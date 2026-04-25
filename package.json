@@ -1,0 +1,24 @@
+{
+  "name": "autodev-cli",
+  "version": "1.0.0",
+  "description": "AutoAIDev CLI — autonomous AI task loop without VS Code",
+  "license": "MIT",
+  "bin": {
+    "autodev": "./bin/autodev.js"
+  },
+  "main": "./out/cli.js",
+  "scripts": {
+    "build": "tsc -p ./",
+    "dev": "tsc -p ./ --watch",
+    "prepublishOnly": "npm run build",
+    "start": "node bin/autodev.js"
+  },
+  "dependencies": {
+    "autoaidev": "file:../autodev-vscode-extension",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

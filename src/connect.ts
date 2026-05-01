@@ -5,6 +5,7 @@ import * as https from 'https';
 import { URL } from 'url';
 import { log } from './logger';
 import { AutodevSettings, SETTINGS_DEFAULTS, parseWsUrl, loadSettingsForRoot } from 'autoaidev/settings';
+import { installHooks, areHooksInstalled } from 'autoaidev/hooks';
 
 // ---------------------------------------------------------------------------
 // CLI ⇄ pixel-office wire protocol
@@ -91,10 +92,24 @@ export function applyWsUrl(cwd: string, wsUrl: string): void {
   settings.serverBaseUrl = parsed.serverBaseUrl;
   settings.serverApiKey  = parsed.serverApiKey;
   settings.webhookSlug   = parsed.webhookSlug;
+  // Connecting to pixel-office implies we want hook events flowing back.
+  settings.hooksEnabled  = true;
   saveSettings(cwd, settings);
+  ensureHooksInstalled(cwd);
   log.success(`Connected → ${parsed.serverBaseUrl}`);
   log.gray(`  endpoint: ${parsed.webhookSlug}`);
   log.gray(`  saved to: ${configWritePath(cwd)}`);
+}
+
+function ensureHooksInstalled(cwd: string): void {
+  try {
+    if (!areHooksInstalled('project', cwd)) {
+      installHooks('project', cwd);
+      log.gray('  hooks installed (Claude + Copilot)');
+    }
+  } catch (err) {
+    log.warn(`  hooks install skipped: ${(err as Error).message}`);
+  }
 }
 
 /** Fetch credentials from a signed setup URL and apply them to the workspace. */
@@ -117,8 +132,11 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
   // different externally-visible base URL than the WS URL host).
   const parsed = parseWsUrl(d.wsUrl);
   if (parsed && !d.serverBaseUrl) { settings.serverBaseUrl = parsed.serverBaseUrl; }
+  // Binding to pixel-office implies we want hook events flowing back.
+  settings.hooksEnabled = true;
 
   saveSettings(cwd, settings);
+  ensureHooksInstalled(cwd);
   log.success(`Connected → ${settings.serverBaseUrl}`);
   log.gray(`  agent:    ${d.agentName ?? d.agentId ?? d.slug}`);
   log.gray(`  endpoint: ${d.slug ?? settings.webhookSlug}`);

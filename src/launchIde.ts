@@ -36,11 +36,16 @@ export function resolveIdeExecutable(ide: IdeId): string | null {
 
 function whichSync(cmd: string): string | null {
   const isWin = process.platform === 'win32';
-  const exts = isWin ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';') : [''];
+  // Prefer .CMD/.BAT over .EXE on Windows: VS Code and Cursor ship a GUI
+  // launcher (Code.exe / Cursor.exe) that doesn't accept the --new-window
+  // CLI flag, plus a `bin/code.cmd` shim that does. We want the shim.
+  const exts = isWin
+    ? ['.CMD', '.BAT', '.EXE', '.COM']
+    : [''];
   const sep  = isWin ? ';' : ':';
   const dirs = (process.env.PATH ?? '').split(sep).filter(Boolean);
-  for (const dir of dirs) {
-    for (const ext of exts) {
+  for (const ext of exts) {
+    for (const dir of dirs) {
       const full = path.join(dir, cmd + ext);
       try { if (fs.existsSync(full)) { return full; } } catch { /* ignore */ }
     }
@@ -49,25 +54,28 @@ function whichSync(cmd: string): string | null {
 }
 
 /** Open the workspace folder in the chosen IDE. Detached so the CLI can exit. */
-export function launchIde(ide: IdeId, cwd: string): boolean {
+export function launchIde(ide: IdeId, cwd: string, opts: { newWindow?: boolean } = {}): boolean {
   const info = IDE_INFO[ide];
   const exe  = resolveIdeExecutable(ide);
   if (!exe) {
     log.error(`Could not find "${info.cmd}" on PATH. Install ${info.label} and ensure the shell command is registered.`);
     return false;
   }
+  // VS Code / Cursor focus the existing window if the folder is already open.
+  // --new-window forces a fresh window so the user always sees the launch.
+  const args = opts.newWindow !== false ? ['--new-window', cwd] : [cwd];
   try {
-    // On Windows the resolved exe is often `code.cmd` / `cursor.cmd`; running
-    // those requires a shell, but spawn(..., { shell: true }) re-quotes the
-    // command string and trips on paths like `D:\Program Files\...`.
-    // Spawning cmd.exe explicitly with /c and an array argv avoids the
-    // double-quoting bug.
     const isWin = process.platform === 'win32';
+    const winCmd = isWin ? buildWinCmd(exe, args) : '';
+    if (process.env.AUTODEV_DEBUG) {
+      log.gray(`exe: ${exe}`);
+      log.gray(`cmd: ${winCmd || (exe + ' ' + args.join(' '))}`);
+    }
     const child = isWin
-      ? spawn('cmd.exe', ['/d', '/s', '/c', `"${exe}" "${cwd}"`], {
+      ? spawn('cmd.exe', ['/d', '/s', '/c', winCmd], {
           cwd, detached: true, stdio: 'ignore', windowsVerbatimArguments: true,
         })
-      : spawn(exe, [cwd], { cwd, detached: true, stdio: 'ignore' });
+      : spawn(exe, args, { cwd, detached: true, stdio: 'ignore' });
     child.unref();
     log.success(`Launched ${info.label} → ${cwd}`);
     return true;
@@ -77,10 +85,19 @@ export function launchIde(ide: IdeId, cwd: string): boolean {
   }
 }
 
+// `cmd /s /c "<command>"` strips the outer quote pair before parsing, so we
+// wrap our already-quoted command in an EXTRA pair: `cmd /s /c ""path with
+// spaces" arg1"`. After stripping, cmd sees `"path with spaces" arg1` which
+// parses correctly. Without the extra wrap, cmd splits `D:\Program Files\…`
+// at the space and tries to run `D:\Program`.
+function buildWinCmd(exe: string, args: string[]): string {
+  const inner = [`"${exe}"`, ...args.map(a => `"${a}"`)].join(' ');
+  return `"${inner}"`;
+}
+
 function spawnIdeCliPiped(exe: string, args: string[]): { status: number | null; stdout: string } {
   if (process.platform === 'win32') {
-    const quoted = [`"${exe}"`, ...args.map(a => `"${a}"`)].join(' ');
-    const r = spawnSync('cmd.exe', ['/d', '/s', '/c', quoted], {
+    const r = spawnSync('cmd.exe', ['/d', '/s', '/c', buildWinCmd(exe, args)], {
       encoding: 'utf8',
       windowsVerbatimArguments: true,
     });
@@ -92,8 +109,7 @@ function spawnIdeCliPiped(exe: string, args: string[]): { status: number | null;
 
 function spawnIdeCliInherit(exe: string, args: string[]): { status: number | null } {
   if (process.platform === 'win32') {
-    const quoted = [`"${exe}"`, ...args.map(a => `"${a}"`)].join(' ');
-    const r = spawnSync('cmd.exe', ['/d', '/s', '/c', quoted], {
+    const r = spawnSync('cmd.exe', ['/d', '/s', '/c', buildWinCmd(exe, args)], {
       stdio: 'inherit',
       windowsVerbatimArguments: true,
     });

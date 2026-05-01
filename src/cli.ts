@@ -6,6 +6,7 @@ import { configCommand } from './commands/config';
 import { statusCommand } from './commands/status';
 import { upCommand, launchCommand } from './commands/up';
 import { connectCommand } from './commands/connect';
+import { tailOutputCommand } from './commands/tailOutput';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -70,6 +71,7 @@ initCommand(program);
 upCommand(program);
 launchCommand(program);
 connectCommand(program);
+tailOutputCommand(program);
 configCommand(program);
 statusCommand(program);
 

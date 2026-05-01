@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { SETTINGS_DEFAULTS } from 'autoaidev/settings';
+import { installHooks, areHooksInstalled } from 'autoaidev/hooks';
 import {
   IdeId,
   isIdeId,
@@ -27,6 +28,7 @@ interface InitOpts {
   // Commander maps --no-foo to opts.foo === false (default true).
   launch?: boolean;
   extension?: boolean;
+  hooks?: boolean;
 }
 
 export function runInit(workspacePath: string | undefined, opts: InitOpts): void {
@@ -57,7 +59,14 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
     log.warn(`.autodev/settings.json already exists (use --force to overwrite)`);
   } else {
     if (!fs.existsSync(autodevDir)) { fs.mkdirSync(autodevDir, { recursive: true }); }
-    let settings: Record<string, unknown> = { ...SETTINGS_DEFAULTS, provider: opts.provider };
+    let settings: Record<string, unknown> = {
+      ...SETTINGS_DEFAULTS,
+      provider: opts.provider,
+      // hooks default ON for new workspaces — without them, pixel-office never
+      // sees tool_start/tool_end/etc. and the office UI looks empty.
+      hooksEnabled: true,
+      hooksScope: 'project',
+    };
     // If a legacy file exists, port its values forward so users keep their config.
     if (fs.existsSync(legacyConfig)) {
       try {
@@ -68,6 +77,21 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
     }
     fs.writeFileSync(configPath, JSON.stringify(settings, null, 2), 'utf8');
     log.success(`Created ${configPath}`);
+  }
+
+  // Install Claude/Copilot hook scripts so pixel-office sees per-tool events
+  // for this workspace. Skipped with --no-hooks, or if already installed.
+  if (opts.hooks !== false) {
+    try {
+      if (!areHooksInstalled('project', cwd)) {
+        installHooks('project', cwd);
+        log.success('Installed agent hooks (Claude + Copilot) under .claude/.github/copilot');
+      } else {
+        log.gray('Agent hooks already installed.');
+      }
+    } catch (err) {
+      log.warn(`Hooks install skipped: ${(err as Error).message}`);
+    }
   }
 
   // Add .autodev/ to .gitignore (covers settings + runtime state).
@@ -113,6 +137,7 @@ export function initCommand(program: Command): void {
     .option('--ide <ide>', 'Launch IDE after init: vscode | cursor')
     .option('--no-launch', 'Do not actually launch the IDE (only install extension)')
     .option('--no-extension', 'Skip auto-installing the autoaidev extension')
+    .option('--no-hooks', 'Skip auto-installing agent hooks')
     .option('--force', 'Overwrite existing files')
     .action((workspacePath: string | undefined, opts: InitOpts) => {
       runInit(workspacePath, opts);

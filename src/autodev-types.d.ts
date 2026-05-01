@@ -66,3 +66,11 @@ declare module 'autoaidev/todo' {
 declare module 'autoaidev/providers' {
   export type ProviderId = 'claude-cli' | 'copilot-cli' | 'opencode-cli';
 }
+
+declare module 'autoaidev/hooks' {
+  export function installHooks(scope: 'project' | 'global', workspaceRoot: string): void;
+  export function uninstallHooks(scope: 'project' | 'global', workspaceRoot: string): void;
+  export function areHooksInstalled(scope: 'project' | 'global', workspaceRoot: string): boolean;
+  export function installClaudeHooks(workspaceRoot: string): void;
+  export function installCopilotHooks(workspaceRoot: string): void;
+}

@@ -45,6 +45,7 @@ declare module 'autoaidev/settings' {
 
   export declare const SETTINGS_DEFAULTS: AutodevSettings;
   export declare function loadSettingsForRoot(root: string): AutodevSettings;
+  export declare function parseWsUrl(wsUrl: string): { serverBaseUrl: string; serverApiKey: string; webhookSlug: string } | null;
 }
 
 declare module 'autoaidev/todo' {

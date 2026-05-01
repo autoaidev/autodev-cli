@@ -5,11 +5,21 @@ import { log } from '../logger';
 import { AutodevSettings, SETTINGS_DEFAULTS, loadSettingsForRoot } from 'autoaidev/settings';
 
 function configPath(cwd: string): string {
-  return path.join(cwd, '.vscode', 'autodev.json');
+  // Read path: prefer the canonical .autodev/settings.json, fall back to the
+  // legacy .vscode/autodev.json if the new file is absent.
+  const canonical = path.join(cwd, '.autodev', 'settings.json');
+  if (fs.existsSync(canonical)) { return canonical; }
+  const legacy = path.join(cwd, '.vscode', 'autodev.json');
+  if (fs.existsSync(legacy)) { return legacy; }
+  return canonical;
+}
+
+function configWritePath(cwd: string): string {
+  return path.join(cwd, '.autodev', 'settings.json');
 }
 
 function saveSettings(cwd: string, settings: AutodevSettings): void {
-  const file = configPath(cwd);
+  const file = configWritePath(cwd);
   const dir  = path.dirname(file);
   if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
   fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n', 'utf8');
@@ -18,7 +28,7 @@ function saveSettings(cwd: string, settings: AutodevSettings): void {
 export function configCommand(program: Command): void {
   const cmd = program
     .command('config')
-    .description('Read or write workspace configuration (.vscode/autodev.json)')
+    .description('Read or write workspace configuration (.autodev/settings.json)')
     .argument('[path]', 'Workspace directory (default: cwd)');
 
   // autodev config [path]  — print all settings

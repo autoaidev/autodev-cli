@@ -1,21 +1,48 @@
 # autodev-cli
 
-Autonomous AI task loop — runs **without VS Code**.
-
-## Install
+AutoAIDev's CLI — autonomous AI task loop with an optional one-shot launcher for **VS Code** and **Cursor**, plus a wire-protocol for connecting a workspace to a pixel-office server.
 
 ```bash
-# From this directory
-npm install
-npm run build
+# Install globally
+npm install -g autodev-cli
 
-# Link globally so `autodev` is on your PATH
-npm link
+# Init the current folder + open it in VS Code (or Cursor)
+autodev --ide=vscode .
+autodev --ide=cursor .
+
+# Connect to a pixel-office agent in one shot (signed URL from the UI)
+autodev --setup-url='https://pixel-office.tools.ooyes.net/api/cli/setup/<id>?expires=…&signature=…' .
+
+# Or paste the WS URL directly
+autodev --connect='wss://pixel-office.tools.ooyes.net/ws?token=<api_key>&endpoint=<slug>' .
+
+# Combine the two: init + open IDE + bind credentials
+autodev --setup-url='…' --ide=vscode .
 ```
 
-> **Prerequisites:** The extension must be compiled first:
+That single command:
+
+1. Creates `TODO.md` and `.autodev/settings.json`
+2. Adds `.autodev/` to `.gitignore`
+3. Installs the **AutoAIDev** extension into the chosen IDE (skipped if already installed)
+4. Opens the folder in the IDE
+5. (with `--setup-url` / `--connect`) writes the pixel-office credentials into `.autodev/settings.json`
+
+---
+
+## Install (from this repo)
+
+```bash
+cd autodev-cli
+npm install
+npm run build
+npm link            # optional — adds `autodev` to your PATH
+```
+
+> Requires the sibling `autodev-vscode-extension` to be compiled first:
 > ```bash
 > cd ../autodev-vscode-extension
+> npm install
 > npm run compile
 > ```
 
@@ -23,20 +50,51 @@ npm link
 
 ## Commands
 
+### `autodev --ide=<ide> [path]` — top-level shortcut
+Same as `autodev up --ide=<ide>`. Inits the workspace and launches the IDE.
+
+### `autodev up --ide=<ide> [path]`
+Init + launch in one step. Auto-installs the extension if missing.
+
+```bash
+autodev up --ide=vscode .
+autodev up --ide=cursor ~/myproject -p copilot-cli
+autodev up --ide=vscode . --no-extension      # skip extension install
+```
+
+### `autodev launch --ide=<ide> [path]`
+Open an existing workspace in an IDE. No init.
+
+### `autodev connect --setup-url=<url> [path]` / `autodev connect --url=<wsurl> [path]`
+Bind the workspace to a pixel-office agent.
+
+```bash
+# Signed URL from the pixel-office UI (preferred)
+autodev connect --setup-url='https://pixel-office.tools.ooyes.net/api/cli/setup/<id>?expires=…&signature=…' .
+
+# Or paste a full WS URL
+autodev connect --url='wss://host/ws?token=<api_key>&endpoint=<slug>' .
+```
+
+Either form writes `wsUrl`, `serverApiKey`, `webhookSlug`, and `serverBaseUrl` into `.autodev/settings.json`. The signed URL is HMAC-protected and expires in 30 minutes.
+
 ### `autodev init [path]`
-Scaffold a workspace — creates `TODO.md` and `.vscode/autodev.json`.
+Scaffold a workspace — `TODO.md` and `.vscode/autodev.json`.
+Pass `--ide=vscode|cursor` to also open it after init.
 
 ```bash
 autodev init                          # current directory
 autodev init ~/myproject              # specific path
-autodev init . --provider claude-cli  # set default provider
+autodev init . --ide=vscode           # also open in VS Code
+autodev init . --ide=cursor --no-extension  # don't auto-install extension
+autodev init . --provider claude-cli  # pick the default provider
 ```
 
 ### `autodev start [path]`
 Start the autonomous loop — reads `TODO.md` and drives the AI until all tasks are done.
 
 ```bash
-autodev start                           # current directory, claude-cli
+autodev start                                 # current directory, claude-cli
 autodev start ~/myproject -p copilot-cli
 autodev start . --provider opencode-cli
 ```
@@ -44,7 +102,7 @@ autodev start . --provider opencode-cli
 Press **Ctrl+C** to stop gracefully.
 
 ### `autodev status [path]`
-Show a summary of tasks in `TODO.md`.
+Summary of tasks in `TODO.md`.
 
 ```bash
 autodev status
@@ -52,21 +110,34 @@ autodev status ~/myproject --all   # also list completed tasks
 ```
 
 ### `autodev config [path]`
-Show or update `.vscode/autodev.json`.
+Read or update `.vscode/autodev.json`.
 
 ```bash
 autodev config                              # print all settings
 autodev config get provider                 # get one value
 autodev config set provider copilot-cli     # set provider
-autodev config set taskTimeoutMinutes 60    # set timeout
-autodev config set discordToken TOKEN       # configure Discord
+autodev config set taskTimeoutMinutes 60
+autodev config set discordToken TOKEN
 ```
+
+---
+
+## IDE launcher details
+
+| `--ide` value | Resolves to | Extension installed |
+|---------------|-------------|---------------------|
+| `vscode`      | `code` (or `code-insiders`) on PATH | `AutoAIDev.autoaidev` |
+| `cursor`      | `cursor` on PATH                    | `AutoAIDev.autoaidev` |
+
+The launcher first looks for a sibling `autoaidev.vsix` next to the CLI install (handy for offline / dev installs). If it can't find one it falls back to the marketplace id `AutoAIDev.autoaidev`.
+
+Pass `--no-extension` to skip the extension install. Pass `--no-launch` (only on `init`) to install the extension without opening the IDE.
 
 ---
 
 ## Configuration
 
-Settings are stored in `.vscode/autodev.json` inside the workspace directory.
+Settings live in `.autodev/settings.json` inside the workspace. The legacy path `.vscode/autodev.json` is still read for back-compat — the next write migrates it to the new location automatically. Highlights:
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -82,7 +153,7 @@ Settings are stored in `.vscode/autodev.json` inside the workspace directory.
 
 ---
 
-## How it works
+## How the loop works
 
 1. Reads `TODO.md` from the workspace root
 2. Picks the first `[ ]` task, sends a prompt to the chosen AI CLI provider

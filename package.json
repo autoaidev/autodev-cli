@@ -1,12 +1,29 @@
 {
   "name": "autodev-cli",
-  "version": "1.0.0",
-  "description": "AutoAIDev CLI — autonomous AI task loop without VS Code",
+  "version": "1.2.1",
+  "description": "AutoAIDev CLI — autonomous AI task loop with VS Code / Cursor launcher",
   "license": "MIT",
   "bin": {
     "autodev": "./bin/autodev.js"
   },
   "main": "./out/cli.js",
+  "files": [
+    "bin",
+    "out",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai",
+    "claude",
+    "copilot",
+    "opencode",
+    "autonomous",
+    "agent",
+    "cli",
+    "vscode",
+    "cursor"
+  ],
   "scripts": {
     "build": "tsc -p ./",
     "dev": "tsc -p ./ --watch",

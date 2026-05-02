@@ -92,8 +92,10 @@ export function applyWsUrl(cwd: string, wsUrl: string): void {
   settings.serverBaseUrl = parsed.serverBaseUrl;
   settings.serverApiKey  = parsed.serverApiKey;
   settings.webhookSlug   = parsed.webhookSlug;
-  // Connecting to pixel-office implies we want hook events flowing back.
+  // Connecting to pixel-office implies we want hook events flowing back AND
+  // the agent to auto-start when the IDE opens this workspace.
   settings.hooksEnabled  = true;
+  settings.autoStartLoop = true;
   saveSettings(cwd, settings);
   ensureHooksInstalled(cwd);
   log.success(`Connected → ${parsed.serverBaseUrl}`);
@@ -132,8 +134,10 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
   // different externally-visible base URL than the WS URL host).
   const parsed = parseWsUrl(d.wsUrl);
   if (parsed && !d.serverBaseUrl) { settings.serverBaseUrl = parsed.serverBaseUrl; }
-  // Binding to pixel-office implies we want hook events flowing back.
+  // Binding to pixel-office implies we want hook events flowing back AND
+  // the agent to auto-start when the IDE opens this workspace.
   settings.hooksEnabled = true;
+  settings.autoStartLoop = true;
 
   saveSettings(cwd, settings);
   ensureHooksInstalled(cwd);

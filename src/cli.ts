@@ -48,6 +48,18 @@ const program = new Command()
     const didSomething = !!(opts.ide || opts.connect || opts.setupUrl);
     if (!didSomething) { program.help(); return; }
 
+    // Order matters: bind credentials FIRST so when the extension activates
+    // on IDE launch, it reads the up-to-date wsUrl + autoStartLoop flag and
+    // can auto-connect immediately. Otherwise the extension activates with
+    // stale settings and the user has to reload the window.
+    try {
+      if (opts.setupUrl) { await applySetupUrl(cwd, opts.setupUrl); }
+      else if (opts.connect) { applyWsUrl(cwd, opts.connect); }
+    } catch (err) {
+      log.error((err as Error).message);
+      process.exit(1);
+    }
+
     if (opts.ide) {
       runInit(maybePath, {
         ide: opts.ide,
@@ -55,14 +67,6 @@ const program = new Command()
         force: opts.force,
         extension: opts.extension,
       });
-    }
-
-    try {
-      if (opts.setupUrl) { await applySetupUrl(cwd, opts.setupUrl); }
-      else if (opts.connect) { applyWsUrl(cwd, opts.connect); }
-    } catch (err) {
-      log.error((err as Error).message);
-      process.exit(1);
     }
   });
 

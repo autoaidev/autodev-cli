@@ -41,6 +41,7 @@ declare module 'autoaidev/settings' {
     gitEnabled: boolean;
     hooksEnabled: boolean;
     hooksScope: 'project' | 'global';
+    autoStartLoop: boolean;
   }
 
   export declare const SETTINGS_DEFAULTS: AutodevSettings;

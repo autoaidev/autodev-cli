@@ -21,6 +21,9 @@ interface RootOpts {
   extension?: boolean;
   connect?: string;
   setupUrl?: string;
+  git?: boolean;
+  fileBrowser?: boolean;
+  profile?: string;
 }
 
 const program = new Command()
@@ -42,6 +45,9 @@ const program = new Command()
   .option('--no-extension', 'Skip auto-installing the autoaidev extension (with --ide)')
   .option('--connect <wsurl>', 'Bind the workspace to a ws:// / wss:// URL with ?token=&endpoint=')
   .option('--setup-url <url>', 'Bind the workspace using a signed pixel-office setup URL')
+  .option('--git', 'Enable git auto-commit')
+  .option('--file-browser', 'Enable file browser tab')
+  .option('--profile <path>', 'Use this AUTODEV.md profile')
   .argument('[path]', 'Workspace path (default: cwd)')
   .action(async (maybePath: string | undefined, opts: RootOpts) => {
     const cwd = maybePath ? path.resolve(maybePath) : process.cwd();
@@ -60,12 +66,15 @@ const program = new Command()
       process.exit(1);
     }
 
-    if (opts.ide) {
+    if (opts.ide || opts.git || opts.fileBrowser || opts.profile) {
       runInit(maybePath, {
         ide: opts.ide,
         provider: opts.provider,
         force: opts.force,
         extension: opts.extension,
+        git: opts.git,
+        fileBrowser: opts.fileBrowser,
+        profile: opts.profile,
       });
     }
   });

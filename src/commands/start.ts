@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from 'autoaidev/sdk';
 
-const PROVIDERS = ['claude-cli', 'copilot-cli', 'opencode-cli'] as const;
+const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-tui', 'opencode-cli', 'opencode-sdk'] as const;
 
 export function startCommand(program: Command): void {
   program

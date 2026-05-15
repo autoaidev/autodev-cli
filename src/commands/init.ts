@@ -29,6 +29,10 @@ interface InitOpts {
   launch?: boolean;
   extension?: boolean;
   hooks?: boolean;
+  // Optional setting toggles (also exposed by the pixel-office Customize panel).
+  git?: boolean;
+  fileBrowser?: boolean;
+  profile?: string;
 }
 
 export function runInit(workspacePath: string | undefined, opts: InitOpts): void {
@@ -55,8 +59,20 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
   const autodevDir = path.join(cwd, '.autodev');
   const configPath = path.join(autodevDir, 'settings.json');
   const legacyConfig = path.join(cwd, '.vscode', 'autodev.json');
-  if (fs.existsSync(configPath) && !opts.force) {
+  const settingsExists = fs.existsSync(configPath);
+  if (settingsExists && !opts.force) {
     log.warn(`.autodev/settings.json already exists (use --force to overwrite)`);
+    // Even when not overwriting, patch in any explicit customization toggles.
+    if (opts.git === true || opts.fileBrowser === true || opts.profile) {
+      try {
+        const cur = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+        if (opts.git === true)         { cur.gitEnabled = true; }
+        if (opts.fileBrowser === true) { cur.enableFileBrowser = true; }
+        if (opts.profile)              { cur.profilePath = opts.profile; }
+        fs.writeFileSync(configPath, JSON.stringify(cur, null, 2), 'utf8');
+        log.gray(`Patched ${configPath} with customization toggles`);
+      } catch { /* ignore */ }
+    }
   } else {
     if (!fs.existsSync(autodevDir)) { fs.mkdirSync(autodevDir, { recursive: true }); }
     let settings: Record<string, unknown> = {
@@ -75,6 +91,10 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
         log.gray(`Imported config from legacy ${legacyConfig}`);
       } catch { /* ignore parse errors */ }
     }
+    // Apply customization toggles last so they win over legacy values.
+    if (opts.git === true)         { settings.gitEnabled = true; }
+    if (opts.fileBrowser === true) { settings.enableFileBrowser = true; }
+    if (opts.profile)              { settings.profilePath = opts.profile; }
     fs.writeFileSync(configPath, JSON.stringify(settings, null, 2), 'utf8');
     log.success(`Created ${configPath}`);
   }
@@ -138,6 +158,9 @@ export function initCommand(program: Command): void {
     .option('--no-launch', 'Do not actually launch the IDE (only install extension)')
     .option('--no-extension', 'Skip auto-installing the autoaidev extension')
     .option('--no-hooks', 'Skip auto-installing agent hooks')
+    .option('--git', 'Enable git auto-commit (sets gitEnabled=true)')
+    .option('--file-browser', 'Enable file browser tab (sets enableFileBrowser=true)')
+    .option('--profile <path>', 'Use this AUTODEV.md profile (sets profilePath)')
     .option('--force', 'Overwrite existing files')
     .action((workspacePath: string | undefined, opts: InitOpts) => {
       runInit(workspacePath, opts);

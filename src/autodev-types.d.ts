@@ -2,7 +2,7 @@
 // The actual implementations live in the compiled extension (autoaidev/out/...).
 
 declare module 'autoaidev/sdk' {
-  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk';
+  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk' | 'grok-tui';
 
   export interface LoopStartOptions {
     provider?: ProviderId;
@@ -19,7 +19,7 @@ declare module 'autoaidev/sdk' {
 }
 
 declare module 'autoaidev/settings' {
-  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk';
+  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk' | 'grok-tui';
 
   export interface AutodevSettings {
     provider: ProviderId;
@@ -65,7 +65,7 @@ declare module 'autoaidev/todo' {
 }
 
 declare module 'autoaidev/providers' {
-  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk';
+  export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-tui' | 'opencode-cli' | 'opencode-sdk' | 'grok-tui';
 }
 
 declare module 'autoaidev/hooks' {

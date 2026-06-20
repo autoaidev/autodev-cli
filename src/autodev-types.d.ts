@@ -75,3 +75,37 @@ declare module 'autoaidev/hooks' {
   export function installClaudeHooks(workspaceRoot: string): void;
   export function installCopilotHooks(workspaceRoot: string): void;
 }
+
+declare module 'autoaidev/agentBackup' {
+  export type Portability = 'full' | 'partial' | 'none';
+
+  export interface ProviderManifestEntry {
+    portability: Portability;
+    note: string;
+    discoveredSessionIds: string[];
+    connectedSessionIds: Record<string, string | null>;
+    tracesCaptured: boolean;
+  }
+
+  export interface SessionManifest {
+    exportedAt: string;
+    workspaceRoot: string;
+    providers: Record<string, ProviderManifestEntry>;
+  }
+
+  export interface ExportResult {
+    destPath: string;
+    capturedProviders: string[];
+    providers: Record<string, ProviderManifestEntry>;
+  }
+
+  export interface ImportResult {
+    destRoot: string;
+    workspaceFiles: number;
+    restoredByProvider: Record<string, number>;
+    manifestRestored: boolean;
+  }
+
+  export function createAgentBackup(root: string, destPath: string): Promise<ExportResult>;
+  export function restoreAgentBackup(zipPath: string, destRoot: string): Promise<ImportResult>;
+}

@@ -7,6 +7,8 @@ import { statusCommand } from './commands/status';
 import { upCommand, launchCommand } from './commands/up';
 import { connectCommand } from './commands/connect';
 import { tailOutputCommand } from './commands/tailOutput';
+import { exportCommand } from './commands/export';
+import { importCommand } from './commands/import';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -87,6 +89,8 @@ connectCommand(program);
 tailOutputCommand(program);
 configCommand(program);
 statusCommand(program);
+exportCommand(program);
+importCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error((err as Error).message);

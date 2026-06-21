@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { AutoDev, LoopStartOptions } from 'autoaidev/sdk';
+import { AutoDev, LoopStartOptions } from '../sdk';
 
 const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-tui'] as const;
 

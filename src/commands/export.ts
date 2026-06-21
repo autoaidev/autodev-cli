@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { createAgentBackup } from 'autoaidev/agentBackup';
+import { createAgentBackup } from '../agentBackup';
 
 interface ExportOpts {
   output?: string;

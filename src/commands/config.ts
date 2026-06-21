@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { AutodevSettings, SETTINGS_DEFAULTS, loadSettingsForRoot } from 'autoaidev/settings';
+import { AutodevSettings, SETTINGS_DEFAULTS, loadSettingsForRoot } from '../core/settingsLoader';
 
 function configPath(cwd: string): string {
   // Read path: prefer the canonical .autodev/settings.json, fall back to the

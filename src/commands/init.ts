@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { SETTINGS_DEFAULTS } from 'autoaidev/settings';
-import { installHooks, areHooksInstalled } from 'autoaidev/hooks';
+import { SETTINGS_DEFAULTS } from '../core/settingsLoader';
+import { installHooks, areHooksInstalled } from '../hooksManager';
 import {
   IdeId,
   isIdeId,

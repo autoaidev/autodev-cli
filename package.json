@@ -31,12 +31,18 @@
     "start": "node bin/autodev.js"
   },
   "dependencies": {
-    "autoaidev": "file:../autodev-vscode-extension",
     "commander": "^12.1.0",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "@opencode-ai/sdk": "^1.14.41",
+    "@raylin01/claude-client": "^0.3.3",
+    "adm-zip": "^0.5.17",
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "@types/adm-zip": "^0.5.7",
+    "@types/mailparser": "^3.4.6"
   }
 }

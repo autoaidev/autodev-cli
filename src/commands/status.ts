@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { parseTodo, countRemaining, Task } from 'autoaidev/todo';
-import { loadSettingsForRoot } from 'autoaidev/settings';
+import { parseTodo, countRemaining, Task } from '../todo';
+import { loadSettingsForRoot } from '../core/settingsLoader';
 
 export function statusCommand(program: Command): void {
   program

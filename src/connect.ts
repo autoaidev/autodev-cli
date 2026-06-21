@@ -4,8 +4,8 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { log } from './logger';
-import { AutodevSettings, SETTINGS_DEFAULTS, parseWsUrl, loadSettingsForRoot } from 'autoaidev/settings';
-import { installHooks, areHooksInstalled } from 'autoaidev/hooks';
+import { AutodevSettings, SETTINGS_DEFAULTS, parseWsUrl, loadSettingsForRoot } from './core/settingsLoader';
+import { installHooks, areHooksInstalled } from './hooksManager';
 
 // ---------------------------------------------------------------------------
 // CLI ⇄ pixel-office wire protocol

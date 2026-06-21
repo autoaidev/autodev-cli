@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
-import { restoreAgentBackup } from 'autoaidev/agentBackup';
+import { restoreAgentBackup } from '../agentBackup';
 import {
   IdeId,
   isIdeId,

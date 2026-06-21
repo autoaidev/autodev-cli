@@ -44,5 +44,10 @@
     "typescript": "^5.4.0",
     "@types/adm-zip": "^0.5.7",
     "@types/mailparser": "^3.4.6"
+  },
+  "exports": {
+    ".": "./out/cli.js",
+    "./*": "./out/*.js",
+    "./package.json": "./package.json"
   }
 }

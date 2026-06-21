@@ -192,8 +192,17 @@ async function getOrCreate(
 // to the VS Code output channel via the stored logger for that root.
 // ---------------------------------------------------------------------------
 
-// Events handled silently (already rendered as streaming CLI text output).
-const _SKIP_LOG = new Set(['message.part.updated', 'sync', 'server.heartbeat']);
+// Noisy / high-frequency / no-payload events that are NOT forwarded to
+// pixel-office. Mirrors the skip set of the opencode-cli hooks plugin so the
+// SDK and CLI provider emit the same event stream. `message.part.delta` is
+// handled explicitly below (buffered into assistant text), not skipped here.
+const _SKIP_LOG = new Set([
+  'message.part.updated', 'message.part.removed', 'message.updated', 'message.removed',
+  'session.diff', 'sync', 'server.heartbeat',
+  'session.next.step.started', 'session.next.reasoning.started', 'session.next.text.started',
+  'session.next.tool.input.started', 'session.next.tool.input.ended',
+  'session.next.tool.called', 'session.next.tool.success',
+]);
 
 /** Accumulated assistant text per root — flushed to the output channel on session.idle. */
 const _textBuffer = new Map<string, string>();
@@ -297,6 +306,7 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
         } else {
           logger(`[OC] session.status: ${statusType ?? JSON.stringify(status)}`);
         }
+        _appendHookEvent(root, { payload: { type: 'session.status', properties: props ?? {} } });
         continue;
       }
 
@@ -328,12 +338,13 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
         continue;
       }
 
-      // --- Default: log type + compact props (write errors to JSONL too) ---
+      // --- Default: log + forward every non-noisy event to the JSONL sink so
+      // pixel-office receives the full event stream (parity with the opencode-cli
+      // hooks plugin). Previously only session.error was forwarded here, so
+      // lifecycle/file/message events from the SDK never reached the server. ---
       const propsStr = props ? JSON.stringify(props) : '{}';
       logger(`[OC] ${type} ${propsStr}`);
-      if (type === 'session.error') {
-        _appendHookEvent(root, { payload: { type: 'session.error', properties: props ?? {} } });
-      }
+      _appendHookEvent(root, { payload: { type, properties: props ?? {} } });
     }
   } catch { /* server closed or client evicted — exit silently */ }
 }

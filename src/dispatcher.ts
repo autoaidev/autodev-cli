@@ -31,7 +31,7 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function teeCommand(cmd: string, outFile: string): string {
+export function teeCommand(cmd: string, outFile: string): string {
   if (os.platform() === 'win32') {
     // $OutputEncoding controls pipe encoding; Console.OutputEncoding controls the subprocess.
     // Use UTF8Encoding($false) = UTF-8 without BOM on both.
@@ -43,7 +43,7 @@ function teeCommand(cmd: string, outFile: string): string {
   return `{ LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ${cmd}; } 2>&1 | tee ${JSON.stringify(outFile)}`;
 }
 
-function withExitFile(cmd: string, exitFile: string): string {
+export function withExitFile(cmd: string, exitFile: string): string {
   const q = JSON.stringify(exitFile);
   if (os.platform() === 'win32') {
     return `${cmd}; [System.IO.File]::WriteAllText(${q}, $LASTEXITCODE.ToString())`;
@@ -67,7 +67,7 @@ function ensureProjectGitignore(root: string, entry: string): void {
  * that don't have native hooks (copilot-cli, opencode-cli). Post hook always
  * runs even if the main command fails.
  */
-function wrapWithSyntheticHooks(cmd: string, provider: string, workspaceRoot: string, sessionName: string): string {
+export function wrapWithSyntheticHooks(cmd: string, provider: string, workspaceRoot: string, sessionName: string): string {
   const pre  = getManualHookCmd(provider, 'SessionStart', workspaceRoot, sessionName);
   const post = getManualHookCmd(provider, 'SessionEnd',   workspaceRoot, sessionName);
   if (os.platform() === 'win32') {
@@ -77,7 +77,7 @@ function wrapWithSyntheticHooks(cmd: string, provider: string, workspaceRoot: st
 }
 
 /** Combine profile + message into a temp file under .autodev/messages/ and return its path. */
-function writeCombinedFile(root: string, agentProfileFile: string, messageFile: string, includeProfile: boolean): string {
+export function writeCombinedFile(root: string, agentProfileFile: string, messageFile: string, includeProfile: boolean): string {
   const msgsDir = path.join(root, '.autodev', 'messages');
   if (!fs.existsSync(msgsDir)) { fs.mkdirSync(msgsDir, { recursive: true }); }
   const msgContent = fs.readFileSync(messageFile, 'utf8');

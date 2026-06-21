@@ -13,7 +13,7 @@ import {
 } from './contract';
 import {
   teeCommand, withExitFile, wrapWithSyntheticHooks,
-} from '../../dispatcher';
+} from '../commandHelpers';
 
 import { buildClaudeCliCommand, probeClaudeSession } from '../../providers/claudeCliProvider';
 import { buildCopilotCliCommand, probeCopilotSession } from '../../providers/copilotCliProvider';

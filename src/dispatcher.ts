@@ -12,8 +12,10 @@ import { sendClaudeTuiPrompt } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, getLatestCopilotSdkSessionId, setCopilotSettingsToken } from './providers/copilotSdkProvider';
 import { sendOpencodeSdkPrompt } from './providers/opencodeSdkProvider';
 import { sendGrokTuiPrompt } from './providers/grokTuiProvider';
-import { getManualHookCmd } from './hooksManager';
 import { isOpenCodeHooksInstalled, installOpenCodeHooks } from './openCodeHooksManager';
+import { teeCommand, withExitFile, wrapWithSyntheticHooks, writeCombinedFile } from './core/commandHelpers';
+import { providerRegistry } from './core/provider/ProviderRegistry';
+import { DispatchRequest } from './core/provider/contract';
 
 // Re-export session helpers so taskLoop.ts imports don't need to change.
 export {
@@ -31,25 +33,7 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function teeCommand(cmd: string, outFile: string): string {
-  if (os.platform() === 'win32') {
-    // $OutputEncoding controls pipe encoding; Console.OutputEncoding controls the subprocess.
-    // Use UTF8Encoding($false) = UTF-8 without BOM on both.
-    // Tee-Object writes the file in the system default encoding (UTF-16 LE on PS5,
-    // UTF-8 on PS7) — the Node.js reader detects the BOM and decodes accordingly.
-    const utf8NoBom = 'New-Object System.Text.UTF8Encoding($false)';
-    return `$OutputEncoding=${utf8NoBom}; [Console]::OutputEncoding=${utf8NoBom}; ${cmd} 2>&1 | Tee-Object -FilePath ${JSON.stringify(outFile)}`;
-  }
-  return `{ LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ${cmd}; } 2>&1 | tee ${JSON.stringify(outFile)}`;
-}
 
-export function withExitFile(cmd: string, exitFile: string): string {
-  const q = JSON.stringify(exitFile);
-  if (os.platform() === 'win32') {
-    return `${cmd}; [System.IO.File]::WriteAllText(${q}, $LASTEXITCODE.ToString())`;
-  }
-  return `{ ${cmd}; echo $? > ${q}; }`;
-}
 
 function ensureProjectGitignore(root: string, entry: string): void {
   const gitignorePath = path.join(root, '.gitignore');
@@ -61,37 +45,7 @@ function ensureProjectGitignore(root: string, entry: string): void {
   } catch { /* ignore */ }
 }
 
-/**
- * Wrap a shell command with synthetic SessionStart / SessionEnd hook events
- * written to <workspaceRoot>/.autodev/hooks-events.jsonl. Used for providers
- * that don't have native hooks (copilot-cli, opencode-cli). Post hook always
- * runs even if the main command fails.
- */
-export function wrapWithSyntheticHooks(cmd: string, provider: string, workspaceRoot: string, sessionName: string): string {
-  const pre  = getManualHookCmd(provider, 'SessionStart', workspaceRoot, sessionName);
-  const post = getManualHookCmd(provider, 'SessionEnd',   workspaceRoot, sessionName);
-  if (os.platform() === 'win32') {
-    return `${pre}; ${cmd}; ${post}`;
-  }
-  return `${pre}; { ${cmd}; }; ${post}`;
-}
 
-/** Combine profile + message into a temp file under .autodev/messages/ and return its path. */
-export function writeCombinedFile(root: string, agentProfileFile: string, messageFile: string, includeProfile: boolean): string {
-  const msgsDir = path.join(root, '.autodev', 'messages');
-  if (!fs.existsSync(msgsDir)) { fs.mkdirSync(msgsDir, { recursive: true }); }
-  const msgContent = fs.readFileSync(messageFile, 'utf8');
-  let combined = msgContent;
-  if (includeProfile) {
-    const profileContent = fs.readFileSync(agentProfileFile, 'utf8');
-    // Task message FIRST so the agent sees the current task immediately,
-    // not buried after hundreds of lines of profile instructions.
-    combined = `${msgContent}\n\n---\n\n${profileContent}`;
-  }
-  const combinedFile = path.join(msgsDir, `temp_${Date.now()}.md`);
-  fs.writeFileSync(combinedFile, combined, 'utf8');
-  return combinedFile;
-}
 
 // ---------------------------------------------------------------------------
 // opencode-cli process-start cooldown
@@ -203,67 +157,18 @@ export async function sendPromptToAi(
     try { fs.writeFileSync(exitFile,   '', 'utf8'); } catch { /* ignore */ }
     log(`Message id: ${messageId} (output: ${path.basename(stdoutFile)})`);
 
-    // --- claude-tui: in-process spawn, no terminal ---
-    if (providerId === 'claude-tui') {
-      const promptFilePath = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      sendClaudeTuiPrompt(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, settings.claudeModel || undefined, showOutput);
-      log(`Claude TUI: prompt dispatched (session=${resolvedSessionId ?? 'new'})`);
-      return;
-    }
-
-    // --- copilot-sdk: persistent SDK session ---
-    if (providerId === 'copilot-sdk') {
-      // Sync the settings-stored token so _loadAuth() picks it up even on
-      // headless Linux where env vars and keytar are unavailable.
-      setCopilotSettingsToken(settings.copilotGithubToken || undefined);
-      const promptFilePath = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      const existingSid = getLatestCopilotSdkSessionId(root);
-      sendCopilotSdkPrompt(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, showOutput);
-      log(`Copilot SDK: prompt dispatched (session=${existingSid ?? 'new'})`);
-      return;
-    }
-
-    // --- opencode-sdk: in-process SDK, no terminal ---
-    if (providerId === 'opencode-sdk') {
-      const promptFilePath = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      sendOpencodeSdkPrompt(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, settings.opencodeModel || undefined, showOutput);
-      log(`OpenCode SDK: prompt dispatched (session=${resolvedSessionId ?? 'new'})`);
-      return;
-    }
-
-    // --- grok-tui: in-process spawn, no terminal ---
-    if (providerId === 'grok-tui') {
-      const promptFilePath = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      sendGrokTuiPrompt(root, promptFilePath, stdoutFile, exitFile, log, settings.grokModel || undefined, showOutput);
-      log('Grok TUI: prompt dispatched');
-      return;
-    }
-
-    let cmd: string;
-    if (providerId === 'claude-cli') {
-      cmd = buildClaudeCliCommand(agentProfileFile, messageFile, resolvedSessionId, includeProfile, settings.claudeModel || undefined);
-      cmd = teeCommand(cmd, stdoutFile);
-    } else if (providerId === 'copilot-cli') {
-      const combinedFile = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      cmd = buildCopilotCliCommand(combinedFile, resolvedSessionId, settings.copilotModel || undefined);
-      cmd = teeCommand(cmd, stdoutFile);
-      if (settings.hooksEnabled) {
-        cmd = wrapWithSyntheticHooks(cmd, 'copilot-cli', root, path.basename(root));
-      }
-    } else {
-      const combinedFile = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
-      cmd = buildOpenCodeCliCommand(combinedFile, resolvedSessionId, settings.opencodeModel || undefined);
-      cmd = teeCommand(cmd, stdoutFile);
-      if (settings.hooksEnabled) {
-        cmd = wrapWithSyntheticHooks(cmd, 'opencode-cli', root, path.basename(root));
-      }
-    }
-
-    cmd = withExitFile(cmd, exitFile);
+    // Build the combined profile+message file once and assemble the immutable
+    // dispatch DTO. The resolved IProvider strategy decides what to do with it
+    // (build a shell command, or spawn in-process) — no per-provider switch.
+    const combinedFile = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
+    const provider = providerRegistry.get(providerId);
+    const req: DispatchRequest = {
+      root, agentProfileFile, messageFile, combinedFile,
+      resolvedSessionId, includeProfile, settings, stdoutFile, exitFile,
+    };
 
     // Enforce a minimum cooldown between consecutive opencode-cli process starts
-    // to avoid the race condition where the previous opencode server is still
-    // disposing when the new process connects, causing an immediate STOP.
+    // to avoid racing a still-disposing previous server (immediate STOP).
     if (providerId === 'opencode-cli') {
       const elapsed = Date.now() - _lastOpenCodeCliStart;
       if (elapsed < OPENCODE_CLI_COOLDOWN_MS && _lastOpenCodeCliStart > 0) {
@@ -274,13 +179,20 @@ export async function sendPromptToAi(
       _lastOpenCodeCliStart = Date.now();
     }
 
-    const termName = `AutoDev: ${providerCfg.label}`;
-    launcher.launch(cmd, termName, root);
-    log(`Sent to ${termName}: ${cmd}`);
+    const outcome = await provider.dispatch(req, { log, launcher, showOutput });
 
-    if (providerId === 'claude-cli' && !resolvedSessionId) {
-      const jsonlSession = findLatestClaudeSession(root);
-      if (jsonlSession) { captureAndSaveSessionId(root, providerId, jsonlSession); }
+    if (outcome.command) {
+      // CLI provider: launch the shell command via the injected launcher.
+      const termName = `AutoDev: ${providerCfg.label}`;
+      launcher.launch(outcome.command, termName, root);
+      log(`Sent to ${termName}: ${outcome.command}`);
+      if (providerId === 'claude-cli' && !resolvedSessionId) {
+        const jsonlSession = findLatestClaudeSession(root);
+        if (jsonlSession) { captureAndSaveSessionId(root, providerId, jsonlSession); }
+      }
+    } else {
+      // In-process (sdk/tui) provider: already spawned inside dispatch().
+      log(`${providerCfg.label}: prompt dispatched (session=${resolvedSessionId ?? 'new'})`);
     }
     return;
   }

@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from 'autoaidev/sdk';
 
-const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-tui', 'opencode-cli', 'opencode-sdk', 'grok-tui'] as const;
+const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-tui'] as const;
 
 export function startCommand(program: Command): void {
   program
@@ -12,15 +12,16 @@ export function startCommand(program: Command): void {
     .description('Start the autonomous task loop in a workspace directory')
     .option(
       '-p, --provider <provider>',
-      `AI provider: ${PROVIDERS.join(' | ')}`,
-      'claude-cli',
+      `AI provider: ${PROVIDERS.join(' | ')} (default: .autodev/settings.json, else claude-cli)`,
     )
     .option('--todo <file>', 'Path to TODO.md (relative to workspace)', 'TODO.md')
-    .action(async (workspacePath: string | undefined, opts: { provider: string; todo: string }) => {
+    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const todoFile = path.resolve(cwd, opts.todo);
 
-      if (!PROVIDERS.includes(opts.provider as typeof PROVIDERS[number])) {
+      // Only validate when explicitly provided; otherwise the SDK resolves the
+      // provider from .autodev/settings.json (parity with the VS Code shell).
+      if (opts.provider && !PROVIDERS.includes(opts.provider as typeof PROVIDERS[number])) {
         log.error(`Unknown provider "${opts.provider}". Valid: ${PROVIDERS.join(', ')}`);
         process.exit(1);
       }
@@ -33,7 +34,7 @@ export function startCommand(program: Command): void {
 
       log.section('🤖 AutoAIDev — Autonomous Task Loop');
       log.info(`Workspace : ${cwd}`);
-      log.info(`Provider  : ${opts.provider}`);
+      log.info(`Provider  : ${opts.provider ?? '(from .autodev/settings.json)'}`);
       log.info(`TODO.md   : ${todoFile}`);
       log.plain('');
       log.gray('Press Ctrl+C to stop the loop gracefully.\n');
@@ -47,7 +48,7 @@ export function startCommand(program: Command): void {
       try {
         const options: LoopStartOptions = {
           cwd,
-          provider: opts.provider as LoopStartOptions['provider'],
+          ...(opts.provider ? { provider: opts.provider as LoopStartOptions['provider'] } : {}),
           log: log.auto,
         };
         await AutoDev.loop.start(options);

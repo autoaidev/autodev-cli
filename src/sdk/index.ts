@@ -3,6 +3,9 @@ import { sendPromptToAi } from '../dispatcher';
 import { NodeFileWatcher, NodeProcessLauncher } from '../core/adapters';
 import { ProviderId, PROVIDERS } from '../providers';
 import { loadSettingsForRoot } from '../core/settingsLoader';
+import { closeAllOpencodeSdkClients } from '../providers/opencodeSdkProvider';
+import { closeAllClaudeTuiClients } from '../providers/claudeTuiProvider';
+import { closeAllCopilotSdkSessions } from '../providers/copilotSdkProvider';
 
 // ---------------------------------------------------------------------------
 // AutoDev standalone SDK — use without VS Code.
@@ -45,6 +48,18 @@ class LoopApi {
 
   stop(): void {
     this._runner.stop();
+    // Close persistent in-process SDK/TUI servers (opencode-sdk, claude-tui,
+    // copilot-sdk). They hold the Node event loop open, so without this a
+    // standalone `autodev start` never exits after the loop stops — the VS Code
+    // shell does this in deactivate(), the headless path must do it here.
+    this.closePersistent();
+  }
+
+  /** Tear down every persistent provider server/session across all roots. */
+  closePersistent(): void {
+    try { closeAllOpencodeSdkClients(); } catch { /* ignore */ }
+    try { closeAllClaudeTuiClients(); } catch { /* ignore */ }
+    try { closeAllCopilotSdkSessions(); } catch { /* ignore */ }
   }
 }
 

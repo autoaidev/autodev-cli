@@ -39,10 +39,17 @@ export function startCommand(program: Command): void {
       log.plain('');
       log.gray('Press Ctrl+C to stop the loop gracefully.\n');
 
-      // Graceful shutdown on Ctrl+C
+      // Graceful shutdown on Ctrl+C. stop() closes the persistent SDK servers,
+      // but give cleanup a brief grace window to flush (webhook offline, file
+      // handles) then force-exit — otherwise a lingering timer/handle can keep
+      // the process alive. A second Ctrl+C exits immediately.
+      let stopping = false;
       process.on('SIGINT', () => {
+        if (stopping) { process.exit(130); }
+        stopping = true;
         log.warn('\n⏹  Stopping task loop…');
         AutoDev.loop.stop();
+        setTimeout(() => process.exit(0), 1500).unref();
       });
 
       try {

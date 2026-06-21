@@ -28,7 +28,8 @@
     "build": "tsc -p ./",
     "dev": "tsc -p ./ --watch",
     "prepublishOnly": "npm run build",
-    "start": "node bin/autodev.js"
+    "start": "node bin/autodev.js",
+    "test": "node test/smoke.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",

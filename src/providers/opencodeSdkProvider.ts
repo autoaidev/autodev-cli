@@ -318,23 +318,22 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
       }
 
       // --- Session idle: flush buffered assistant text + clear activity ---
+      // Emit session.idle EXACTLY ONCE per turn (pixel-office keys turn-end on
+      // it). Attach the assistant text when present so the server can render the
+      // full message in the same event.
       if (type === 'session.idle') {
         _activity.delete(root);
         const text = _textBuffer.get(root);
         _textBuffer.delete(root);
         if (text?.trim()) {
-          // Print a divider then the full assistant response
           logger(`[OC] ── Assistant ──────────────────────────`);
           for (const line of text.split('\n')) { logger(line); }
           logger(`[OC] ────────────────────────────────────────`);
-          // Emit as hook event so Pixel Office can display the full message text
-          _appendHookEvent(root, { payload: { type: 'session.idle', properties: { ...(props ?? {}), _assistantText: text.slice(0, 3000) } } });
-          // Also emit Stop so pixel-office knows the turn ended
-          _appendHookEvent(root, { payload: { type: 'session.idle', properties: props ?? {} } });
         } else {
           logger(`[OC] session.idle`);
-          _appendHookEvent(root, { payload: { type: 'session.idle', properties: props ?? {} } });
         }
+        const idleProps = text?.trim() ? { ...(props ?? {}), _assistantText: text.slice(0, 3000) } : (props ?? {});
+        _appendHookEvent(root, { payload: { type: 'session.idle', properties: idleProps } });
         continue;
       }
 

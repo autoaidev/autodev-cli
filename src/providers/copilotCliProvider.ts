@@ -17,10 +17,13 @@ export function buildCopilotCliCommand(
   combinedFile: string,
   sessionId?: string,
   model?: string,
+  sessionName?: string,
 ): string {
   const resumeFlag = sessionId ? ` --resume=${sessionId}` : '';
   const modelFlag  = model ? ` --model=${model}` : '';
-  const flags = `--autopilot --yolo --no-ask-user --allow-all --no-auto-update --allow-all-paths --allow-all-urls --allow-all-tools --enable-all-github-mcp-tools --no-color --max-autopilot-continues 2000${resumeFlag}${modelFlag}`;
+  // `--name` only applies to a NEW session (resume keeps the prior name).
+  const nameFlag   = (!sessionId && sessionName) ? ` --name ${JSON.stringify(sessionName)}` : '';
+  const flags = `--autopilot --yolo --no-ask-user --allow-all --no-auto-update --allow-all-paths --allow-all-urls --allow-all-tools --enable-all-github-mcp-tools --no-color --max-autopilot-continues 2000${resumeFlag}${modelFlag}${nameFlag}`;
   const fileRef = JSON.stringify(`@${combinedFile}`);
   return `copilot ${flags} -p ${fileRef}`;
 

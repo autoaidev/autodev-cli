@@ -832,7 +832,8 @@ export class TaskLoopRunner {
           fs.readSync(fd, buf, 0, buf.length, this._hooksFileOffset);
           fs.closeSync(fd);
           this._hooksFileOffset = size;
-          const sessionName = this._workspaceRoot ? path.basename(this._workspaceRoot) : undefined;
+          const sessionName = (this._settings?.sessionName && this._settings.sessionName.trim())
+            || (this._workspaceRoot ? path.basename(this._workspaceRoot) : undefined);
           const lines = buf.toString('utf8').split('\n').filter(l => l.trim());
           // Prune dedupe map of stale entries before this tick's run
           const now = Date.now();

@@ -28,7 +28,16 @@ import { RateLimitDetector } from '../rateLimit';
 export const GROK_DEFAULT_MODEL = 'sxs-claude-opus-4-6';
 
 /** Path to the grok binary — use env override for non-default installs. */
-const GROK_BIN = process.env['GROK_BIN'] ?? 'grok';
+const GROK_BIN = process.env['GROK_BIN'] ?? (() => {
+  // Prefer a grok on PATH; otherwise fall back to the default install location
+  // (~/.grok/bin/grok) so the provider works without PATH changes.
+  try {
+    const home = require('os').homedir();
+    const local = require('path').join(home, '.grok', 'bin', 'grok');
+    if (require('fs').existsSync(local)) { return local; }
+  } catch { /* ignore */ }
+  return 'grok';
+})();
 
 // ---------------------------------------------------------------------------
 // Per-workspace state

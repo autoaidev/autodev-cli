@@ -69,6 +69,12 @@ export interface AutodevSettings {
    */
   opencodeModel: string;
   /**
+   * Optional human-readable session display NAME (not the session id). When set
+   * it is shown in pixel-office for this agent and passed to providers that
+   * support a native session title: opencode `--title`, copilot `--name`.
+   */
+  sessionName: string;
+  /**
    * Optional model override for Grok TUI. When set, passes `-m <value>` to
    * the `grok` command. Leave empty to use the default (sxs-claude-opus-4-6).
    * Run `grok models` to list available models.
@@ -236,6 +242,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   copilotModel: '',
   claudeModel: '',
   opencodeModel: '',
+  sessionName: '',
   grokModel: '',
   opencodeCacheEnabled: false,
   mcpServers: {},

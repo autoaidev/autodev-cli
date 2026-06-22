@@ -16,9 +16,24 @@ export function startCommand(program: Command): void {
     )
     .option('--todo <file>', 'Path to TODO.md (relative to workspace)', 'TODO.md')
     .option('--once', 'Run until the TODO drains, then exit (default: poll forever)')
-    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string; once?: boolean }) => {
+    .option('--session-name <name>', 'Display name for this session (opencode --title, copilot --name, shown in pixel-office)')
+    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string; once?: boolean; sessionName?: string }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const todoFile = path.resolve(cwd, opts.todo);
+
+      // Persist the session display name to .autodev/settings.json so the
+      // dispatcher + providers pick it up (opencode --title / copilot --name)
+      // and the loop injects it as _session_name for pixel-office.
+      if (opts.sessionName) {
+        try {
+          const sp = path.join(cwd, '.autodev', 'settings.json');
+          const cur = fs.existsSync(sp) ? JSON.parse(fs.readFileSync(sp, 'utf8')) : {};
+          cur.sessionName = opts.sessionName;
+          fs.mkdirSync(path.dirname(sp), { recursive: true });
+          fs.writeFileSync(sp, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+          log.info(`Session name: ${opts.sessionName}`);
+        } catch (e) { log.warn(`Could not persist session name: ${(e as Error).message}`); }
+      }
 
       // Only validate when explicitly provided; otherwise the SDK resolves the
       // provider from .autodev/settings.json (parity with the VS Code shell).

@@ -47,7 +47,7 @@ export class CopilotCliProvider extends BaseProvider {
   readonly kind: ProviderKind = 'cli';
   resolveSession(root: string, log: Logger) { return probeCopilotSession(root, log); }
   async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
-    let cmd = buildCopilotCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.copilotModel || undefined);
+    let cmd = buildCopilotCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.copilotModel || undefined, req.settings.sessionName || undefined);
     cmd = teeCommand(cmd, req.stdoutFile);
     if (req.settings.hooksEnabled) {
       cmd = wrapWithSyntheticHooks(cmd, 'copilot-cli', req.root, path.basename(req.root));
@@ -64,7 +64,7 @@ export class OpenCodeCliProvider extends BaseProvider {
     return getLatestOpenCodeSessionId(root, log, getSessionClearedAt(root, 'opencode-cli'));
   }
   async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
-    let cmd = buildOpenCodeCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.opencodeModel || undefined);
+    let cmd = buildOpenCodeCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.opencodeModel || undefined, req.settings.sessionName || undefined);
     cmd = teeCommand(cmd, req.stdoutFile);
     if (req.settings.hooksEnabled) {
       cmd = wrapWithSyntheticHooks(cmd, 'opencode-cli', req.root, path.basename(req.root));

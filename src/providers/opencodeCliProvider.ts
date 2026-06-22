@@ -14,6 +14,7 @@ export function buildOpenCodeCliCommand(
   combinedFile: string,
   sessionId?: string,
   model?: string,
+  sessionName?: string,
 ): string {
   // Resume an explicit session with `-s <id>`. On a FRESH run (no session id)
   // do NOT pass `-c`/`--continue`: opencode's "continue the last session" is
@@ -23,8 +24,10 @@ export function buildOpenCodeCliCommand(
   // id and resumes it with `-s` on subsequent iterations.
   const session = sessionId ? ` -s ${sessionId}` : '';
   const modelFlag = model ? ` --model ${JSON.stringify(model)}` : '';
+  // Only title a FRESH session (resuming keeps the existing title).
+  const titleFlag = (!sessionId && sessionName) ? ` --title ${JSON.stringify(sessionName)}` : '';
   const fileRef = JSON.stringify(`@${combinedFile}`);
-  return `opencode run${session}${modelFlag} ${fileRef}`;
+  return `opencode run${session}${modelFlag}${titleFlag} ${fileRef}`;
 }
 
 /**

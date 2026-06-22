@@ -1,4 +1,5 @@
 import { exec, spawn } from 'child_process';
+import { realpathSync as fsRealpath } from 'fs';
 
 // ---------------------------------------------------------------------------
 // OpenCode CLI command builder
@@ -53,9 +54,16 @@ export function listOpenCodeSessions(cwd: string): Promise<Array<{ id: string; m
       clearTimeout(timer);
       try {
         const raw = JSON.parse(stdout) as Array<{ id: string; directory: string; created: number; updated: number }>;
-        const cwdNorm = cwd.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+        // Realpath-aware match (same reasoning as getLatestOpenCodeSessionId) so
+        // symlinked/realpath cwds don't drop every session.
+        const norm = (p: string): string => {
+          let resolved = p;
+          try { resolved = fsRealpath(p); } catch { /* keep lexical */ }
+          return resolved.toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+        };
+        const cwdNorm = norm(cwd);
         const filtered = raw
-          .filter(s => s.directory.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '') === cwdNorm)
+          .filter(s => norm(s.directory) === cwdNorm)
           .sort((a, b) => b.updated - a.updated)
           .slice(0, 20)
           .map(s => ({ id: s.id, mtime: s.updated ?? s.created ?? 0 }));
@@ -109,13 +117,30 @@ export function getLatestOpenCodeSessionId(
       clearTimeout(timer);
       try {
         const sessions = JSON.parse(stdout) as Array<{ id: string; directory: string; created: number; updated: number }>;
-        const cwdNorm = cwd.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-        const match = sessions
-          .filter(s => s.directory.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '') === cwdNorm)
-          .filter(s => !notBefore || (s.created ?? 0) > notBefore)
-          .sort((a, b) => b.updated - a.updated)[0];
+        // Normalise a path for comparison, resolving symlinks/realpath when the
+        // path exists (opencode may record a realpath, e.g. /tmp → /private/tmp,
+        // while the loop passes the raw cwd — an exact string match then misses
+        // every session). Fall back to the lexical normalisation when realpath
+        // fails (path gone / permission).
+        const norm = (p: string): string => {
+          let resolved = p;
+          try { resolved = fsRealpath(p); } catch { /* keep lexical */ }
+          return resolved.toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+        };
+        const cwdNorm = norm(cwd);
+        const inWindow = (s: { created: number }) => !notBefore || (s.created ?? 0) > notBefore;
+        const byRecency = (a: { updated: number }, b: { updated: number }) => b.updated - a.updated;
+        // Primary: sessions whose directory resolves to this workspace.
+        let match = sessions.filter(s => norm(s.directory) === cwdNorm).filter(inWindow).sort(byRecency)[0];
+        // Fallback: a directory that is a prefix of, or contained by, this cwd
+        // (handles nested-root / worktree differences) — still scoped, never global.
+        if (!match) {
+          match = sessions
+            .filter(s => { const d = norm(s.directory); return d && (cwdNorm.startsWith(d + '/') || d.startsWith(cwdNorm + '/')); })
+            .filter(inWindow).sort(byRecency)[0];
+        }
         const id = match?.id;
-        log(`OpenCode session list: ${id ?? 'none found for this directory'}${notBefore ? ` (notBefore=${new Date(notBefore).toISOString()})` : ''}`);
+        log(`OpenCode session list: ${id ?? 'none found for this directory'} (of ${sessions.length} total)${notBefore ? ` (notBefore=${new Date(notBefore).toISOString()})` : ''}`);
         resolve(id);
       } catch {
         resolve(undefined);

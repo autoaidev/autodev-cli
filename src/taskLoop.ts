@@ -83,6 +83,8 @@ export interface LoopCallbacks {
   onStatusChange: (state: LoopState, currentTask?: string) => void;
   /** Called when Claude's current tool activity changes (undefined = idle/done) */
   onActivityChange?: (activity: string | undefined) => void;
+  /** Called once when the queue drains (all tasks done). Used by `--once` to stop. */
+  onAllTasksDone?: () => void;
   /** Returns the currently selected provider ID (live, not from settings file) */
   getActiveProvider: () => ProviderId;
   /** Transiently override the active provider (e.g. fallback on rate limit). */
@@ -1031,6 +1033,9 @@ export class TaskLoopRunner {
               gitBranch: this._gitBranch,
             });
             this._notifyDiscord('✅ All tasks done — waiting for more…');
+            // Notify once-mode callers (e.g. `autodev start --once`) so they can
+            // stop instead of idle-polling forever.
+            this._cb?.onAllTasksDone?.();
           }
         } else {
           // There are uncompleted tasks but none are pending (e.g. all [~] in-progress).

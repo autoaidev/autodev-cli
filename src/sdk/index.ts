@@ -18,6 +18,8 @@ export interface LoopStartOptions {
   cwd?: string;
   /** Logger (default: console.log) */
   log?: (msg: string) => void;
+  /** Run until the TODO drains, then stop and resolve (default: false = poll forever). */
+  once?: boolean;
 }
 
 class LoopApi {
@@ -35,15 +37,30 @@ class LoopApi {
       options.provider
       ?? (settingsProvider && settingsProvider in PROVIDERS ? settingsProvider : undefined)
       ?? 'claude-cli';
-    await this._runner.start({
+    const callbacks = {
       workspaceRoot: root,
       fileWatcher: new NodeFileWatcher(),
-      sendToAi: (prompt, _label, includeProfile, messageFile) =>
+      sendToAi: (prompt: string, _label: string, includeProfile?: boolean, messageFile?: string) =>
         sendPromptToAi(provider, prompt, log, launcher, root, includeProfile, messageFile),
       log,
       getActiveProvider: () => provider,
       onStatusChange: () => {},
-    });
+    };
+
+    if (options.once) {
+      // Resolve as soon as the queue drains and stop the loop — the runner's
+      // start() promise does NOT resolve on stop(), so we gate on onAllTasksDone
+      // ourselves. stop() also tears down persistent SDK servers so the process
+      // can exit cleanly.
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => { if (done) { return; } done = true; this.stop(); resolve(); };
+        void this._runner.start({ ...callbacks, onAllTasksDone: finish }).catch(finish);
+      });
+      return;
+    }
+
+    await this._runner.start(callbacks);
   }
 
   stop(): void {

@@ -15,7 +15,8 @@ export function startCommand(program: Command): void {
       `AI provider: ${PROVIDERS.join(' | ')} (default: .autodev/settings.json, else claude-cli)`,
     )
     .option('--todo <file>', 'Path to TODO.md (relative to workspace)', 'TODO.md')
-    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string }) => {
+    .option('--once', 'Run until the TODO drains, then exit (default: poll forever)')
+    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string; once?: boolean }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const todoFile = path.resolve(cwd, opts.todo);
 
@@ -56,10 +57,12 @@ export function startCommand(program: Command): void {
         const options: LoopStartOptions = {
           cwd,
           ...(opts.provider ? { provider: opts.provider as LoopStartOptions['provider'] } : {}),
+          ...(opts.once ? { once: true } : {}),
           log: log.auto,
         };
         await AutoDev.loop.start(options);
         log.success('\n✅ Task loop finished.');
+        if (opts.once) { process.exit(0); }
       } catch (err: unknown) {
         log.error(`Loop error: ${(err as Error).message}`);
         process.exit(1);

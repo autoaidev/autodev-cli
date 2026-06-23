@@ -6,6 +6,7 @@ import { loadSettingsForRoot } from '../core/settingsLoader';
 import { closeAllOpencodeSdkClients } from '../providers/opencodeSdkProvider';
 import { closeAllClaudeTuiClients } from '../providers/claudeTuiProvider';
 import { closeAllCopilotSdkSessions } from '../providers/copilotSdkProvider';
+import { closeAllGrokTuiSessions } from '../providers/grokTuiProvider';
 
 // ---------------------------------------------------------------------------
 // AutoDev standalone SDK — use without VS Code.
@@ -77,6 +78,7 @@ class LoopApi {
     try { closeAllOpencodeSdkClients(); } catch { /* ignore */ }
     try { closeAllClaudeTuiClients(); } catch { /* ignore */ }
     try { closeAllCopilotSdkSessions(); } catch { /* ignore */ }
+    try { closeAllGrokTuiSessions(); } catch { /* ignore */ }
   }
 }
 

@@ -15,6 +15,7 @@
 // Default model: sxs-claude-opus-4-6. Override via settings.grokModel.
 // ---------------------------------------------------------------------------
 
+import * as path from 'path';
 import * as fs from 'fs';
 import * as readline from 'readline';
 import * as child_process from 'child_process';
@@ -52,6 +53,23 @@ const _activeChildren = new Map<string, child_process.ChildProcess>();
 /** True while a grok turn is running for the given workspace root. */
 export function isGrokTuiBusy(root: string): boolean {
   return _busyRoots.has(root);
+}
+
+/**
+ * Append a REAL grok activity event to `.autodev/hooks-events.jsonl` in the
+ * native Claude-Code hook schema (pixel-office reads `hook_event_name`). Grok
+ * has no hooks mechanism, but its `--output-format streaming-json` stream
+ * carries tool_use / tool_result events — we translate those into PreToolUse /
+ * PostToolUse so pixel-office shows real per-tool activity (no synthetic
+ * SessionStart/End padding beyond the genuine turn boundaries).
+ */
+function _emitGrokHook(root: string, hookEventName: string, extra: Record<string, unknown> = {}): void {
+  try {
+    const dir = path.join(root, '.autodev');
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+    const ev = { hook_event_name: hookEventName, provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
+    fs.appendFileSync(path.join(dir, 'hooks-events.jsonl'), JSON.stringify(ev) + '\n', 'utf8');
+  } catch { /* non-critical */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +117,7 @@ export function sendGrokTuiPrompt(
       },
     );
     _activeChildren.set(root, child);
+    _emitGrokHook(root, 'SessionStart', { source: 'startup' });
   } catch (spawnErr) {
     const msg = (spawnErr as Error)?.message ?? String(spawnErr);
     log(`Grok spawn error: ${msg}`);
@@ -112,6 +131,12 @@ export function sendGrokTuiPrompt(
   // Stream stdout — each line is a streaming-json object.
   // -------------------------------------------------------------------------
   const rl = readline.createInterface({ input: child.stdout! });
+  // Grok's streaming-json exposes `thought`, `text`, `end` — but NOT tool
+  // events (tool use is hidden under --always-approve). So per-tool activity
+  // isn't available; we surface the real turn boundaries instead: SessionStart
+  // at spawn and Stop/SessionEnd on the `end` event (a genuine grok signal, not
+  // synthetic padding). `_endSeen` avoids a duplicate SessionEnd on close.
+  let _endSeen = false;
 
   rl.on('line', (line: string) => {
     if (!line.trim()) { return; }
@@ -136,9 +161,13 @@ export function sendGrokTuiPrompt(
       const errMsg: string = msg.message ?? JSON.stringify(msg);
       log(`Grok error: ${errMsg}`);
       try { fs.appendFileSync(stdoutFile, `\n[Grok error: ${errMsg}]\n`, 'utf8'); } catch { /* ignore */ }
+    } else if (type === 'end') {
+      // Genuine turn-end from grok's stream → real session boundary.
+      _endSeen = true;
+      _emitGrokHook(root, 'Stop', {});
+      _emitGrokHook(root, 'SessionEnd', { reason: 'completed' });
     }
-    // Ignore tool_use, tool_result, thinking, and other event types —
-    // they don't belong in the output file.
+    // `thought` and other event types stay out of the output file.
   });
 
   child.stderr?.on('data', (chunk: Buffer) => {
@@ -152,6 +181,12 @@ export function sendGrokTuiPrompt(
     _busyRoots.delete(root);
     const exitCode = code ?? 1;
     log(`Grok: exited (code=${exitCode})`);
+    // Fallback SessionEnd only if grok didn't already emit an `end` event
+    // (abnormal exit / killed) — avoids a duplicate from the normal path.
+    if (!_endSeen) {
+      _emitGrokHook(root, exitCode === 0 ? 'Stop' : 'StopFailure', { exit_code: exitCode });
+      _emitGrokHook(root, 'SessionEnd', { reason: exitCode === 0 ? 'completed' : 'error' });
+    }
     try { fs.writeFileSync(exitFile, `${exitCode}\n`, 'utf8'); } catch { /* ignore */ }
   });
 }

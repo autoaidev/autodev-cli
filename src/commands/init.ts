@@ -33,6 +33,7 @@ interface InitOpts {
   git?: boolean;
   fileBrowser?: boolean;
   profile?: string;
+  sessionName?: string;
 }
 
 export function runInit(workspacePath: string | undefined, opts: InitOpts): void {
@@ -95,6 +96,7 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
     if (opts.git === true)         { settings.gitEnabled = true; }
     if (opts.fileBrowser === true) { settings.enableFileBrowser = true; }
     if (opts.profile)              { settings.profilePath = opts.profile; }
+    if (opts.sessionName)          { settings.sessionName = opts.sessionName; }
     fs.writeFileSync(configPath, JSON.stringify(settings, null, 2), 'utf8');
     log.success(`Created ${configPath}`);
   }
@@ -158,6 +160,7 @@ export function initCommand(program: Command): void {
     .option('--no-launch', 'Do not actually launch the IDE (only install extension)')
     .option('--no-extension', 'Skip auto-installing the autoaidev extension')
     .option('--no-hooks', 'Skip auto-installing agent hooks')
+    .option('--session-name <name>', 'Session display name (opencode --title, copilot --name, shown in pixel-office)')
     .option('--git', 'Enable git auto-commit (sets gitEnabled=true)')
     .option('--file-browser', 'Enable file browser tab (sets enableFileBrowser=true)')
     .option('--profile <path>', 'Use this AUTODEV.md profile (sets profilePath)')

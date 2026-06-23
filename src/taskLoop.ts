@@ -10,7 +10,7 @@ import { writeMessageFile } from './messageBuilder';
 import { WebhookClient, WebhookEvent, sendDiscordBotMessage } from './webhook';
 import { loadSettingsForRoot, AutodevSettings } from './core/settingsLoader';
 import { IFileWatcher, IDisposable } from './core/adapters';
-import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession } from './dispatcher';
+import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession, setClaudeSessionName } from './dispatcher';
 import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/opencodeCliProvider';
 import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedCleanly } from './openCodeHooksManager';
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
@@ -1310,6 +1310,11 @@ export class TaskLoopRunner {
               ? findLatestClaudeSession(this._workspaceRoot)
               : undefined;
             captureAndSaveSessionId(this._workspaceRoot, activeProvider, jsonlFallback);
+            // Apply the configured display name to the now-known claude session
+            // (the --resume picker label lives in ~/.claude/history.jsonl).
+            if (activeProvider === 'claude-cli' && jsonlFallback && this._settings?.sessionName) {
+              setClaudeSessionName(jsonlFallback, this._settings.sessionName, this._workspaceRoot);
+            }
           }
           this._cb?.log(`Session ID captured for ${activeProvider}`);
         }

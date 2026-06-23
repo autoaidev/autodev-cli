@@ -5,7 +5,7 @@ import { ProviderId, PROVIDERS } from './providers';
 import { IProcessLauncher } from './core/adapters';
 import { getSessionId, captureAndSaveSessionId, getSessionClearedAt, AGENT_PROFILE_FILE, newMessageOutput, autodevDir } from './sessionState';
 import { loadSettingsForRoot } from './core/settingsLoader';
-import { buildClaudeCliCommand, findLatestClaudeSession, probeClaudeSession } from './providers/claudeCliProvider';
+import { buildClaudeCliCommand, findLatestClaudeSession, probeClaudeSession, setClaudeSessionName } from './providers/claudeCliProvider';
 import { buildCopilotCliCommand, probeCopilotSession } from './providers/copilotCliProvider';
 import { buildOpenCodeCliCommand, getLatestOpenCodeSessionId } from './providers/opencodeCliProvider';
 import { sendClaudeTuiPrompt } from './providers/claudeTuiProvider';
@@ -20,6 +20,7 @@ import { DispatchRequest } from './core/provider/contract';
 // Re-export session helpers so taskLoop.ts imports don't need to change.
 export {
   findLatestClaudeSession,
+  setClaudeSessionName,
   getClaudeSessionCursor,
   parseClaudeStateSince,
   hasClaudeEndTurnSince,

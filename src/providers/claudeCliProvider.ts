@@ -77,6 +77,24 @@ export function findLatestClaudeSession(workspacePath: string): string | undefin
   return listClaudeSessionFiles(workspacePath)[0]?.name.replace('.jsonl', '');
 }
 
+/**
+ * Set the display NAME shown for a Claude session in the `claude --resume`
+ * picker. This Claude version has no dedicated title field — the picker label is
+ * the `display` value in ~/.claude/history.jsonl keyed by sessionId. We APPEND a
+ * fresh entry (never rewrite existing lines, so history can't be corrupted); the
+ * picker surfaces the latest display for the session.
+ */
+export function setClaudeSessionName(sessionId: string, name: string, cwd: string): void {
+  if (!sessionId || !name) { return; }
+  try {
+    const claudeDir = process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+    const histFile = path.join(claudeDir, 'history.jsonl');
+    const entry = { display: name, pastedContents: {}, timestamp: Date.now(), project: cwd, sessionId };
+    fs.appendFileSync(histFile, JSON.stringify(entry) + '\n', 'utf8');
+  } catch { /* non-critical */ }
+}
+
+
 function resolveClaudeJsonl(workspacePath: string): string | undefined {
   return listClaudeSessionFiles(workspacePath)[0]?.full;
 }

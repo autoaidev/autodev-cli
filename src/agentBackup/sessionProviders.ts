@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Archive } from './archive';
 import { sessionsPath, copilotSessionStateDir, normalizePath } from './layout';
-import { listClaudeSessionFiles, getClaudeProjectDir } from '../providers/claudeCliProvider';
+import { listClaudeSessionFiles, getClaudeProjectDir, claudeProjectFolder } from '../providers/claudeCliProvider';
 import { listOpenCodeSessions } from '../providers/opencodeCliProvider';
 
 /**
@@ -86,7 +86,27 @@ class ClaudeSessionBackup implements SessionBackupProvider {
     // Claude resolves sessions by an encoding of the *destination* path, so
     // traces must land in that folder even though captured under another.
     const destDir = getClaudeProjectDir(destRoot);
-    return archive.extractDir(sessionsPath(this.id), destDir);
+    const n = archive.extractDir(sessionsPath(this.id), destDir);
+    // Rewrite path references INSIDE each JSONL from the captured (old) root to
+    // destRoot — otherwise a resumed session carries a stale `cwd` and
+    // `transcript_path` pointing at the original machine/folder. The old root is
+    // discovered from the first `"cwd"` field; both the raw path and Claude's
+    // dash-encoded project-folder form are replaced.
+    try {
+      const newEnc = claudeProjectFolder(destRoot);
+      for (const file of fs.readdirSync(destDir)) {
+        if (!file.endsWith('.jsonl')) { continue; }
+        const full = path.join(destDir, file);
+        let text = fs.readFileSync(full, 'utf8');
+        const oldRoot = text.match(/"cwd"\s*:\s*"([^"]+)"/)?.[1];
+        if (!oldRoot || oldRoot === destRoot) { continue; }
+        const oldEnc = claudeProjectFolder(oldRoot);
+        text = text.split(oldRoot).join(destRoot);
+        if (oldEnc !== newEnc) { text = text.split(oldEnc).join(newEnc); }
+        fs.writeFileSync(full, text, 'utf8');
+      }
+    } catch { /* best-effort rewrite — files are still resumable with stale cwd */ }
+    return n;
   }
 }
 

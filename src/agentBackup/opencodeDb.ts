@@ -119,3 +119,19 @@ function normValue(v: unknown): string | number | bigint | null | Uint8Array {
 }
 
 void TABLES;
+
+/** List sessions for a workspace with id + title + updated (for UI). */
+export function listOpenCodeSessionsDetailed(root: string): Array<{ id: string; title: string; updated: number }> {
+  const dbFile = opencodeDbPath();
+  if (!fs.existsSync(dbFile)) { return []; }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let db: any;
+  try {
+    db = openDb(dbFile, true);
+    const target = norm(root);
+    return (db.prepare('SELECT id, title, directory, time_updated FROM session').all() as Row[])
+      .filter(r => norm(String(r.directory ?? '')) === target)
+      .map(r => ({ id: String(r.id), title: String(r.title ?? ''), updated: Number(r.time_updated ?? 0) }))
+      .sort((a, b) => b.updated - a.updated);
+  } catch { return []; } finally { try { db?.close(); } catch { /* ignore */ } }
+}

@@ -84,6 +84,22 @@ export function findLatestClaudeSession(workspacePath: string): string | undefin
  * fresh entry (never rewrite existing lines, so history can't be corrupted); the
  * picker surfaces the latest display for the session.
  */
+/** Read the display NAME shown for a claude session in the --resume picker
+ *  (latest `display` for this sessionId in ~/.claude/history.jsonl). */
+export function getClaudeSessionDisplay(sessionId: string): string | undefined {
+  try {
+    const claudeDir = process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+    const histFile = path.join(claudeDir, 'history.jsonl');
+    if (!fs.existsSync(histFile)) { return undefined; }
+    let display: string | undefined;
+    for (const line of fs.readFileSync(histFile, 'utf8').split('\n')) {
+      if (!line.trim()) { continue; }
+      try { const e = JSON.parse(line); if (e.sessionId === sessionId && e.display) { display = e.display; } } catch { /* skip */ }
+    }
+    return display;
+  } catch { return undefined; }
+}
+
 export function setClaudeSessionName(sessionId: string, name: string, cwd: string): void {
   if (!sessionId || !name) { return; }
   try {

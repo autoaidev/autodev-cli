@@ -4,6 +4,7 @@ import { Archive } from './archive';
 import { sessionsPath, copilotSessionStateDir, normalizePath } from './layout';
 import { listClaudeSessionFiles, getClaudeProjectDir, claudeProjectFolder } from '../providers/claudeCliProvider';
 import { listOpenCodeSessions } from '../providers/opencodeCliProvider';
+import { dumpOpenCodeSessions, restoreOpenCodeSessions, OpenCodeDump } from './opencodeDb';
 
 /**
  * How portable a provider's session traces are across a folder/machine move:
@@ -177,17 +178,35 @@ class CopilotCliSessionBackup implements SessionBackupProvider {
 class OpenCodeSessionBackup implements SessionBackupProvider {
   readonly id = 'opencode';
   readonly sessionStateKeys = ['opencode-cli', 'opencode-sdk'] as const;
-  readonly portability: Portability = 'none';
-  readonly note = 'OpenCode stores sessions in a shared SQLite opencode.db; per-session '
-    + 'export is not supported. Session IDs are recorded for reference only.';
+  readonly portability: Portability = 'full';
+  readonly note = 'Dumps the session/project/workspace/message/part rows from the shared '
+    + 'SQLite opencode.db and re-inserts them with the directory rewritten to the '
+    + 'destination. Restore needs opencode initialised on the target machine.';
 
-  async collect(root: string): Promise<CollectResult> {
+  async collect(root: string, archive: Archive): Promise<CollectResult> {
     let discoveredIds: string[] = [];
     try { discoveredIds = (await listOpenCodeSessions(root)).map(s => s.id); } catch { /* ignore */ }
-    return { discoveredIds, tracesCaptured: false };
+    let tracesCaptured = false;
+    try {
+      const dump = dumpOpenCodeSessions(root);
+      if (dump && dump.sessions.length > 0) {
+        const json = JSON.stringify(dump, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+        archive.addBuffer(`${sessionsPath(this.id)}/dump.json`, Buffer.from(json, 'utf8'));
+        tracesCaptured = true;
+        discoveredIds = dump.sessions.map(s => String(s.id));
+      }
+    } catch { /* fall back to ids-only */ }
+    return { discoveredIds, tracesCaptured };
   }
 
-  async restore(): Promise<number> { return 0; }
+  async restore(destRoot: string, archive: Archive): Promise<number> {
+    const json = archive.readText(`${sessionsPath(this.id)}/dump.json`);
+    if (!json) { return 0; }
+    try {
+      const dump = JSON.parse(json) as OpenCodeDump;
+      return restoreOpenCodeSessions(destRoot, dump);
+    } catch { return 0; }
+  }
 }
 
 /** Copilot SDK: in-process LocalSession with a synthetic id — nothing on disk. */

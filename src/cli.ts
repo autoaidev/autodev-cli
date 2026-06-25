@@ -5,6 +5,7 @@ import { initCommand, runInit }   from './commands/init';
 import { configCommand } from './commands/config';
 import { statusCommand } from './commands/status';
 import { sessionsCommand } from './commands/sessions';
+import { resumeCommand } from './commands/resume';
 import { upCommand, launchCommand } from './commands/up';
 import { connectCommand } from './commands/connect';
 import { tailOutputCommand } from './commands/tailOutput';
@@ -91,6 +92,7 @@ tailOutputCommand(program);
 configCommand(program);
 statusCommand(program);
 sessionsCommand(program);
+resumeCommand(program);
 exportCommand(program);
 importCommand(program);
 

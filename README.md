@@ -153,6 +153,27 @@ Settings live in `.autodev/settings.json` inside the workspace. The legacy path 
 
 ---
 
+## MCP servers
+
+Project MCP servers live in `<workspace>/.mcp.json` and are fanned out to every provider's config (`.mcp.json` for Claude, `opencode.json`, `~/.copilot/mcp-config.json`, `.vscode/mcp.json`) on each sync.
+
+Built-ins (`memory`, `playwright`, `sequential-thinking`, `computer-use-mcp`) are added automatically. Disable any of them with `disabledBuiltinMcp: ["playwright", …]` in settings.
+
+Entries can be **stdio** or **remote (HTTP/SSE)**:
+
+```jsonc
+{
+  "mcpServers": {
+    "my-stdio":  { "command": "npx", "args": ["-y", "some-mcp"], "env": { "K": "v" } },
+    "my-remote": { "type": "http", "url": "https://host/mcp", "headers": { "Authorization": "Bearer …" } }
+  }
+}
+```
+
+**Pixel-office A2A:** when an agent is bound to a pixel-office (has `serverBaseUrl` + `serverApiKey`), a remote MCP server named `pixel-office` is auto-attached, pointing at `<origin>/api/mcp` with the agent's api key — giving it agent-to-agent tools (`list_agents`, `send_message`, `check_messages`). Opt out with `disabledBuiltinMcp: ["pixel-office"]`.
+
+---
+
 ## How the loop works
 
 1. Reads `TODO.md` from the workspace root

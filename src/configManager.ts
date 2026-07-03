@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
-import { loadProjectUserMcp, saveProjectUserMcp, replaceProjectBuiltinMcp } from './core/projectMcp';
+import { loadProjectUserMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, type McpJsonEntries } from './core/projectMcp';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -180,10 +180,10 @@ export class ConfigManager {
     const defaultNames = new Set(baseServers.map(s => s.name));
     const misTagged = Object.keys(userMcp).filter(n => defaultNames.has(n));
     if (misTagged.length > 0) {
-      const cleaned: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+      const cleaned: McpJsonEntries = {};
       for (const [name, e] of Object.entries(userMcp)) {
         if (defaultNames.has(name)) continue;
-        cleaned[name] = { command: e.command, args: e.args, ...(e.env ? { env: e.env } : {}) };
+        cleaned[name] = e; // preserve as-is (stdio or remote); saveProjectUserMcp normalizes
       }
       try {
         saveProjectUserMcp(root, cleaned);
@@ -206,10 +206,28 @@ export class ConfigManager {
 
     // Persist built-ins back to .mcp.json with _meta.kind="builtin" so the
     // sidebar can tell them apart from user entries on the next read.
-    const builtinsForJson: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+    const builtinsForJson: McpJsonEntries = {};
     for (const [name, s] of builtinByName) {
       builtinsForJson[name] = { command: s.command, args: s.args, ...(s.env ? { env: s.env } : {}) };
     }
+
+    // Auto-attach the pixel-office A2A MCP server (remote/HTTP) when this agent
+    // is bound to an office. Gives it agent-to-agent tools (list_agents,
+    // send_message, check_messages) authenticated by its own api key. Users can
+    // opt out via disabledBuiltinMcp: ["pixel-office"].
+    try {
+      const s = loadSettingsForRoot(root);
+      const base = (s.serverBaseUrl || '').replace(/\/+$/, '');
+      const key = s.serverApiKey || '';
+      if (base && key && !disabledBuiltins.includes('pixel-office')) {
+        builtinsForJson['pixel-office'] = {
+          type: 'http',
+          url: `${base}/api/mcp`,
+          headers: { Authorization: `Bearer ${key}` },
+        };
+      }
+    } catch { /* ignore — office binding is optional */ }
+
     try { replaceProjectBuiltinMcp(root, builtinsForJson); }
     catch (e) { log?.(`ConfigManager: failed updating .mcp.json built-ins: ${e}`); }
 
@@ -316,7 +334,7 @@ function _migrateLegacyMcpServers(
 ): void {
   try {
     const existing = loadProjectUserMcp(root);
-    const merged: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = { ...existing };
+    const merged: McpJsonEntries = { ...existing };
     let migratedCount = 0;
     const defaultNames = new Set(DEFAULT_MCP_SERVERS.map(s => s.name).concat('memory'));
     for (const [name, raw] of Object.entries(legacy)) {

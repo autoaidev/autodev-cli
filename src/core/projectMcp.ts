@@ -18,13 +18,25 @@ import * as path from 'path';
 // ---------------------------------------------------------------------------
 
 export interface McpJsonEntry {
-  command: string;
+  /** stdio servers: the executable. Remote (http/sse) servers omit this and set `url`. */
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Remote MCP transport. Present for HTTP/SSE servers (e.g. the pixel-office A2A server). */
+  type?: 'stdio' | 'http' | 'sse';
+  /** Remote MCP endpoint URL (when type is http/sse). */
+  url?: string;
+  /** Headers sent to the remote MCP endpoint (e.g. Authorization: Bearer <token>). */
+  headers?: Record<string, string>;
   /** false = entry is kept in .mcp.json to preserve credentials but not synced to providers */
   enabled?: boolean;
   alwaysLoad?: boolean;
   _meta?: { managedBy?: string; name?: string; kind?: 'user' | 'builtin'; [k: string]: unknown };
+}
+
+/** True for remote (http/sse) MCP entries — identified by a url instead of a command. */
+export function isRemoteMcp(e: McpJsonEntry): boolean {
+  return typeof e?.url === 'string' && e.url.length > 0;
 }
 
 export type McpJsonEntries = Record<string, McpJsonEntry>;
@@ -59,6 +71,22 @@ function _isBuiltin(entry: McpJsonEntry): boolean {
   return entry?._meta?.kind === 'builtin';
 }
 
+/** Canonicalize an entry to either the remote (type/url/headers) or stdio (command/args/env) shape. */
+function _normalizeMcp(raw: McpJsonEntry): McpJsonEntry {
+  if (isRemoteMcp(raw)) {
+    return {
+      type: raw.type ?? 'http',
+      url: raw.url as string,
+      ...(raw.headers && typeof raw.headers === 'object' ? { headers: raw.headers } : {}),
+    };
+  }
+  return {
+    command: raw.command as string,
+    args: Array.isArray(raw.args) ? raw.args : [],
+    ...(raw.env && typeof raw.env === 'object' ? { env: raw.env } : {}),
+  };
+}
+
 /** Return only USER entries from .mcp.json (built-ins filtered out). */
 export function loadProjectUserMcp(root: string): McpJsonEntries {
   const all = _readAll(root);
@@ -81,12 +109,10 @@ export function saveProjectUserMcp(root: string, userEntries: McpJsonEntries): v
     if (!_isBuiltin(e)) delete all[name];
   }
   for (const [name, raw] of Object.entries(userEntries)) {
-    if (!raw || typeof raw.command !== 'string') continue;
+    if (!raw || (typeof raw.command !== 'string' && !isRemoteMcp(raw))) continue;
     const meta = { ...(raw._meta || {}), managedBy: 'autoaidev', name, kind: 'user' as const };
     all[name] = {
-      command: raw.command,
-      args: Array.isArray(raw.args) ? raw.args : [],
-      ...(raw.env && typeof raw.env === 'object' ? { env: raw.env } : {}),
+      ..._normalizeMcp(raw),
       alwaysLoad: true,
       // Preserve disabled state so credentials survive unchecking in the sidebar.
       ...(raw.enabled === false ? { enabled: false } : {}),
@@ -113,12 +139,10 @@ export function replaceProjectBuiltinMcp(root: string, builtins: McpJsonEntries)
     if (_isBuiltin(e)) delete all[name];
   }
   for (const [name, raw] of Object.entries(builtins)) {
-    if (!raw || typeof raw.command !== 'string') continue;
+    if (!raw || (typeof raw.command !== 'string' && !isRemoteMcp(raw))) continue;
     const meta = { ...(raw._meta || {}), managedBy: 'autoaidev', name, kind: 'builtin' as const };
     all[name] = {
-      command: raw.command,
-      args: Array.isArray(raw.args) ? raw.args : [],
-      ...(raw.env && typeof raw.env === 'object' ? { env: raw.env } : {}),
+      ..._normalizeMcp(raw),
       alwaysLoad: true,
       _meta: meta,
     };

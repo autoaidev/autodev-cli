@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
-import { loadProjectUserMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, type McpJsonEntries } from './core/projectMcp';
+import { loadProjectUserMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -239,21 +239,16 @@ export class ConfigManager {
     try { replaceProjectBuiltinMcp(root, builtinsForJson); }
     catch (e) { log?.(`ConfigManager: failed updating .mcp.json built-ins: ${e}`); }
 
-    // Combined set fed to the legacy fan-out files (.vscode/mcp.json + opencode.json).
-    // Disabled user entries (enabled:false) are kept in .mcp.json for credential
-    // preservation but must NOT be propagated to other provider configs.
-    const servers: McpServerEntry[] = [
-      ...builtinByName.values(),
-      ...Object.entries(userMcp)
-        .filter(([, raw]) => raw.enabled !== false)
-        .map(([name, raw]) => ({
-          name,
-          command: raw.command,
-          args: Array.isArray(raw.args) ? raw.args : [],
-          ...(raw.env && typeof raw.env === 'object' ? { env: raw.env } : {}),
-          tools: ['*'] as string[],
-        } as McpServerEntry)),
-    ];
+    // Combined effective set fed to the other provider configs. Built-ins here
+    // already include the remote 'pixel-office' entry; user entries can be stdio
+    // OR remote. Disabled user entries (enabled:false) are kept in .mcp.json for
+    // credential preservation but must NOT be propagated to other provider configs.
+    const effective: McpJsonEntries = { ...builtinsForJson };
+    for (const [name, raw] of Object.entries(userMcp)) {
+      if (raw.enabled === false) continue;
+      effective[name] = raw;
+    }
+    const effectiveList: Array<[string, McpJsonEntry]> = Object.entries(effective);
 
     // Strip any stale mcpServers we previously wrote into .claude/settings.json
     // or .claude/settings.local.json so they don't shadow .mcp.json.
@@ -270,29 +265,45 @@ export class ConfigManager {
       } catch { /* ignore */ }
     }
 
-    // VS Code workspace MCP: .vscode/mcp.json
+    // VS Code workspace MCP: .vscode/mcp.json — supports remote { type, url, headers }.
     _mergeJson(path.join(root, '.vscode', 'mcp.json'), (cfg) => {
       const srv = _obj(cfg['servers']);
-      for (const s of servers) {
-        srv[s.name] = { command: s.command, args: s.args, ...(s.env ? { env: s.env } : {}) };
+      for (const [name, e] of effectiveList) {
+        srv[name] = isRemoteMcp(e)
+          ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}) }
+          : { command: e.command, args: e.args ?? [], ...(e.env ? { env: e.env } : {}) };
       }
       cfg['servers'] = srv;
     }, log, 'VS Code MCP (.vscode/mcp.json)');
 
-    // OpenCode project config: opencode.json (merged with existing permission key)
+    // OpenCode project config: opencode.json — remote servers use type:'remote'.
     _mergeJson(path.join(root, 'opencode.json'), (cfg) => {
       const mcp = _obj(cfg['mcp']);
-      for (const s of servers) {
-        const entry: Record<string, unknown> = {
-          type: 'local',
-          command: [s.command, ...s.args],
-          enabled: true,
-        };
-        if (s.env && Object.keys(s.env).length > 0) { entry['environment'] = s.env; }
-        mcp[s.name] = entry;
+      for (const [name, e] of effectiveList) {
+        if (isRemoteMcp(e)) {
+          mcp[name] = { type: 'remote', url: e.url, enabled: true, ...(e.headers ? { headers: e.headers } : {}) };
+        } else {
+          const entry: Record<string, unknown> = { type: 'local', command: [e.command, ...(e.args ?? [])], enabled: true };
+          if (e.env && Object.keys(e.env).length > 0) { entry['environment'] = e.env; }
+          mcp[name] = entry;
+        }
       }
       cfg['mcp'] = mcp;
     }, log, 'OpenCode project MCP (opencode.json)');
+
+    // Copilot CLI config: ~/.copilot/mcp-config.json — supports remote { type:'http', url, headers }.
+    // NOTE: Copilot's MCP config is GLOBAL (not per-workspace), so on a box running
+    // multiple agents the pixel-office token is the last-synced agent's. Fine for
+    // single-agent boxes; opt out with disabledBuiltinMcp:['pixel-office'].
+    _mergeJson(path.join(os.homedir(), '.copilot', 'mcp-config.json'), (cfg) => {
+      const srv = _obj(cfg['mcpServers']);
+      for (const [name, e] of effectiveList) {
+        srv[name] = isRemoteMcp(e)
+          ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}), tools: ['*'] }
+          : { type: 'local', command: e.command, args: e.args ?? [], env: e.env ?? {}, tools: ['*'] };
+      }
+      cfg['mcpServers'] = srv;
+    }, log, 'Copilot MCP (~/.copilot/mcp-config.json)');
   }
 
   /**

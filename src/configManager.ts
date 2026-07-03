@@ -217,12 +217,20 @@ export class ConfigManager {
     // opt out via disabledBuiltinMcp: ["pixel-office"].
     try {
       const s = loadSettingsForRoot(root);
-      const base = (s.serverBaseUrl || '').replace(/\/+$/, '');
       const key = s.serverApiKey || '';
-      if (base && key && !disabledBuiltins.includes('pixel-office')) {
+      // serverBaseUrl is derived from wsUrl (e.g. wss://host/ws), so take just the
+      // origin and normalize ws/wss → http/https. The MCP endpoint lives at
+      // <origin>/api/mcp, not under the /ws path.
+      let origin = '';
+      try {
+        const u = new URL(s.serverBaseUrl || '');
+        const proto = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
+        origin = `${proto}//${u.host}`;
+      } catch { /* invalid/empty url */ }
+      if (origin && key && !disabledBuiltins.includes('pixel-office')) {
         builtinsForJson['pixel-office'] = {
           type: 'http',
-          url: `${base}/api/mcp`,
+          url: `${origin}/api/mcp`,
           headers: { Authorization: `Bearer ${key}` },
         };
       }

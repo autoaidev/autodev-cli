@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
-import { loadProjectUserMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
+import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -246,9 +246,23 @@ export class ConfigManager {
     const effective: McpJsonEntries = { ...builtinsForJson };
     for (const [name, raw] of Object.entries(userMcp)) {
       if (raw.enabled === false) continue;
+      // Skip malformed entries (neither a stdio command nor a remote url) so we
+      // never emit `command: undefined` / `[null]` into a provider config.
+      if (!isRemoteMcp(raw) && typeof raw.command !== 'string') continue;
       effective[name] = raw;
     }
-    const effectiveList: Array<[string, McpJsonEntry]> = Object.entries(effective);
+
+    // Names autodev may manage (everything in .mcp.json in any state + built-ins
+    // + pixel-office). Used to PRUNE entries from provider configs when they're
+    // disabled/removed — otherwise a merge-only write leaves stale entries (and
+    // their bearer tokens) behind after an opt-out. Foreign entries autodev never
+    // managed are left untouched.
+    const managedNames = new Set<string>([
+      ...Object.keys(effective),
+      ...Object.keys(loadProjectAllMcp(root)),
+      ...baseServers.map(s => s.name),
+      'pixel-office',
+    ]);
 
     // Strip any stale mcpServers we previously wrote into .claude/settings.json
     // or .claude/settings.local.json so they don't shadow .mcp.json.
@@ -268,7 +282,9 @@ export class ConfigManager {
     // VS Code workspace MCP: .vscode/mcp.json — supports remote { type, url, headers }.
     _mergeJson(path.join(root, '.vscode', 'mcp.json'), (cfg) => {
       const srv = _obj(cfg['servers']);
-      for (const [name, e] of effectiveList) {
+      for (const name of managedNames) {
+        const e = effective[name];
+        if (!e) { delete srv[name]; continue; }
         srv[name] = isRemoteMcp(e)
           ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}) }
           : { command: e.command, args: e.args ?? [], ...(e.env ? { env: e.env } : {}) };
@@ -279,7 +295,9 @@ export class ConfigManager {
     // OpenCode project config: opencode.json — remote servers use type:'remote'.
     _mergeJson(path.join(root, 'opencode.json'), (cfg) => {
       const mcp = _obj(cfg['mcp']);
-      for (const [name, e] of effectiveList) {
+      for (const name of managedNames) {
+        const e = effective[name];
+        if (!e) { delete mcp[name]; continue; }
         if (isRemoteMcp(e)) {
           mcp[name] = { type: 'remote', url: e.url, enabled: true, ...(e.headers ? { headers: e.headers } : {}) };
         } else {
@@ -297,7 +315,9 @@ export class ConfigManager {
     // single-agent boxes; opt out with disabledBuiltinMcp:['pixel-office'].
     _mergeJson(path.join(os.homedir(), '.copilot', 'mcp-config.json'), (cfg) => {
       const srv = _obj(cfg['mcpServers']);
-      for (const [name, e] of effectiveList) {
+      for (const name of managedNames) {
+        const e = effective[name];
+        if (!e) { delete srv[name]; continue; }
         srv[name] = isRemoteMcp(e)
           ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}), tools: ['*'] }
           : { type: 'local', command: e.command, args: e.args ?? [], env: e.env ?? {}, tools: ['*'] };

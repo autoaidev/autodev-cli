@@ -1,8 +1,12 @@
 // Lightweight smoke tests (no framework) — guard the SOLID provider layer +
 // core parsing against regressions. Run: node test/smoke.mjs (after npm run build).
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { providerRegistry } from '../out/core/provider/ProviderRegistry.js';
 import { parseTodoContent, countRemaining } from '../out/todo.js';
+import { replaceProjectBuiltinMcp, saveProjectUserMcp, loadProjectAllMcp, isRemoteMcp } from '../out/core/projectMcp.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -36,6 +40,39 @@ ok('parseTodoContent + countRemaining', () => {
   const tasks = parseTodoContent('# TODO\n\n- [ ] a\n- [~] b\n- [x] 2026-01-01  c\n');
   assert.equal(tasks.length, 3);
   assert.equal(countRemaining(tasks), 2); // [ ] + [~]
+});
+
+// .mcp.json preserves remote (http/sse) entries alongside stdio ones.
+ok('projectMcp preserves remote (http) builtin entries', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-mcp-'));
+  try {
+    replaceProjectBuiltinMcp(root, {
+      'pixel-office': { type: 'http', url: 'https://h/api/mcp', headers: { Authorization: 'Bearer agt_x' } },
+      'memory': { command: 'npx', args: ['-y', 'server-memory'] },
+    });
+    const all = loadProjectAllMcp(root);
+    assert.ok(isRemoteMcp(all['pixel-office']), 'pixel-office should be remote');
+    assert.equal(all['pixel-office'].url, 'https://h/api/mcp');
+    assert.equal(all['pixel-office'].headers.Authorization, 'Bearer agt_x');
+    assert.ok(!('command' in all['pixel-office']), 'remote entry has no command');
+    assert.equal(all['memory'].command, 'npx');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// Malformed user entries (neither command nor url) are dropped, not written broken.
+ok('projectMcp drops malformed user entries', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-mcp-'));
+  try {
+    saveProjectUserMcp(root, {
+      bogus: { args: ['x'] },              // no command, no url → dropped
+      good:  { command: 'node' },
+      rem:   { url: 'https://h/mcp' },     // remote → kept
+    });
+    const all = loadProjectAllMcp(root);
+    assert.ok(!('bogus' in all), 'malformed entry should be dropped');
+    assert.equal(all['good'].command, 'node');
+    assert.ok(isRemoteMcp(all['rem']), 'url-only entry kept as remote');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 Promise.resolve().then(() => console.log(`\n${pass} checks passed`));

@@ -5,6 +5,7 @@ import * as readline from 'readline';
 import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
+import { OfficeSocket } from '../officeSocket';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -33,6 +34,33 @@ function officeMcpUrl(serverBaseUrl: string | undefined): string {
   } catch {
     return '';
   }
+}
+
+/** Derive the presence WebSocket URL (…/ws) from the operator-MCP endpoint. */
+export function officeWsUrl(endpoint: string): string {
+  try {
+    const u = new URL(endpoint);
+    const proto = u.protocol === 'http:' ? 'ws:' : u.protocol === 'https:' ? 'wss:' : u.protocol;
+    return `${proto}//${u.host}/ws`;
+  } catch {
+    return '';
+  }
+}
+
+/** Turn a server WS push into a one-line human notice, or null to ignore it. */
+export function describePush(msg: Record<string, unknown>): string | null {
+  const type = msg['type'];
+  if (type === 'new_task') {
+    const task = (msg['data'] as { task?: { title?: string } } | undefined)?.task;
+    return task?.title ? `New task: ${task.title}` : 'New task assigned.';
+  }
+  // A2A task/message push frame: { task: { metadata: { task: { text }, event } } }
+  const task = msg['task'] as { metadata?: { task?: { text?: string }; event?: string } } | undefined;
+  if (task?.metadata) {
+    const text = task.metadata.task?.text;
+    return text ? `New message: ${text}` : 'You have a new message.';
+  }
+  return null;
 }
 
 /** POST a JSON-RPC message to the remote operator MCP; resolve its JSON reply. */
@@ -71,7 +99,8 @@ export function mcpOperateCommand(program: Command): void {
     .description('Run a stdio MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Add it with: claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <url>')
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
-    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string }) => {
+    .option('--no-socket', 'Do not open the presence WebSocket (stay on poll-based presence only).')
+    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const settings = loadSettingsForRoot(cwd);
       const endpoint = opts.url || officeMcpUrl(settings.serverBaseUrl);
@@ -88,11 +117,46 @@ export function mcpOperateCommand(program: Command): void {
       const send = (msg: unknown): void => { process.stdout.write(JSON.stringify(msg) + '\n'); };
       const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
+      // ── Presence WebSocket (optional; --no-socket disables) ──────────────────
+      // Holds a live connection so the office shows this MCP agent genuinely
+      // online, and surfaces task/message pushes to the client as MCP
+      // notifications the moment they arrive. Purely additive — if it can't
+      // connect, the stdio bridge keeps working and presence falls back to the
+      // server's poll heuristic.
+      let socket: OfficeSocket | null = null;
+      const startSocket = async (): Promise<void> => {
+        if (opts.socket === false) { return; }
+        const wsUrl = officeWsUrl(endpoint);
+        if (!wsUrl) { return; }
+        // Learn our slug (needed for the ?endpoint= WS auth) from whoami.
+        let slug = '';
+        try {
+          const who = await proxy(endpoint, key, { jsonrpc: '2.0', id: 'boot-whoami', method: 'tools/call', params: { name: 'whoami', arguments: {} } });
+          const text = (((who['result'] as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text) ?? '');
+          slug = (text.match(/slug:\s*([a-z0-9][a-z0-9-]*)/i)?.[1]) ?? '';
+        } catch { /* whoami failed — skip presence, bridge still works */ }
+        if (!slug) { process.stderr.write('autodev mcp-operate: could not resolve slug — presence socket disabled.\n'); return; }
+
+        socket = new OfficeSocket(wsUrl, key, slug, {
+          log: (l) => process.stderr.write(l + '\n'),
+          meta: { provider: 'mcp-operator', fileBrowserEnabled: false },
+          onMessage: (msg) => {
+            const notice = describePush(msg);
+            if (notice) {
+              // MCP logging notification — client-visible, no id (one-way).
+              send({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', logger: 'pixel-office', data: notice } });
+            }
+          },
+        });
+        socket.start();
+      };
+      void startSocket();
+
       // Drain in-flight requests before exiting when stdin closes, so a reply
       // in progress is never clipped.
       let inflight = 0;
       let closed = false;
-      const maybeExit = (): void => { if (closed && inflight === 0) { process.exit(0); } };
+      const maybeExit = (): void => { if (closed && inflight === 0) { socket?.destroy(); process.exit(0); } };
 
       rl.on('line', async (line: string) => {
         const t = line.trim();

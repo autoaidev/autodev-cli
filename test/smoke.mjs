@@ -7,6 +7,7 @@ import path from 'node:path';
 import { providerRegistry } from '../out/core/provider/ProviderRegistry.js';
 import { parseTodoContent, countRemaining } from '../out/todo.js';
 import { replaceProjectBuiltinMcp, saveProjectUserMcp, loadProjectAllMcp, isRemoteMcp } from '../out/core/projectMcp.js';
+import { officeWsUrl, describePush } from '../out/commands/mcpOperate.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -73,6 +74,20 @@ ok('projectMcp drops malformed user entries', () => {
     assert.equal(all['good'].command, 'node');
     assert.ok(isRemoteMcp(all['rem']), 'url-only entry kept as remote');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// mcp-operate presence socket: ws-url derivation + push→notice mapping.
+ok('officeWsUrl derives wss from https office-mcp url', () => {
+  assert.equal(officeWsUrl('https://host.example/api/office-mcp'), 'wss://host.example/ws');
+  assert.equal(officeWsUrl('http://localhost:8000/api/office-mcp'), 'ws://localhost:8000/ws');
+  assert.equal(officeWsUrl('not a url'), '');
+});
+
+ok('describePush maps task/message pushes, ignores noise', () => {
+  assert.equal(describePush({ type: 'new_task', data: { task: { title: 'Ship it' } } }), 'New task: Ship it');
+  assert.equal(describePush({ task: { metadata: { event: 'user_message', task: { text: 'hi' } } } }), 'New message: hi');
+  assert.equal(describePush({ type: 'agent_update', data: {} }), null);
+  assert.equal(describePush({ type: 'task_deleted', data: { id: 'x' } }), null);
 });
 
 Promise.resolve().then(() => console.log(`\n${pass} checks passed`));

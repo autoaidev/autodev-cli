@@ -64,6 +64,15 @@ export async function restoreAgentBackup(zipPath: string, destRoot: string): Pro
     } catch { /* best effort */ }
   }
 
+  // Start a FRESH provider session. The backup's session-state.json points at the
+  // SOURCE agent's live session — resuming it would leak that agent's conversation
+  // into this one and kick off a phantom "working" turn. Restore recovers the
+  // workspace files; the session starts clean.
+  try {
+    const sessionState = path.join(destRoot, '.autodev', 'session-state.json');
+    if (fs.existsSync(sessionState)) { fs.rmSync(sessionState); }
+  } catch { /* best effort */ }
+
   // 2. Provider session traces into their host stores (Strategy).
   const restoredByProvider: Record<string, number> = {};
   for (const provider of SESSION_BACKUP_PROVIDERS) {

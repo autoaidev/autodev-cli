@@ -92,7 +92,11 @@ export class WebhookClient {
       case 'agent_idle':
         return this.buildMessage('autodev idle', payload, now);
       case 'all_tasks_done':
-        return this.buildMessage('All TODO tasks done — waiting for new tasks', payload, now);
+        // Status frame (not a chat message) so the server flips the badge to idle
+        // when the loop finishes all tasks and returns to polling.
+        return { statusUpdate: { taskId: this.currentTaskId ?? uuid(),
+          contextId: this.contextId,
+          status: { state: 'TASK_STATE_COMPLETED', timestamp: now }, metadata: { event: 'all_tasks_done', ...payload } } };
 
       case 'task_start': {
         this.currentTaskId = uuid(); this.currentArtifactId = null;

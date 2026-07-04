@@ -10,6 +10,21 @@ export interface UploadResult {
   downloadUrl: string;
 }
 
+/**
+ * serverBaseUrl is derived from wsUrl as `wss://host/ws`. The export endpoint
+ * lives at the HTTP origin (`https://host/api/...`), so normalize scheme (ws→
+ * http/wss→https) and drop the `/ws` path before building the upload URL.
+ */
+function httpOrigin(serverBaseUrl: string): string {
+  try {
+    const u = new url.URL(serverBaseUrl);
+    const proto = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
+    return `${proto}//${u.host}`;
+  } catch {
+    return serverBaseUrl.replace(/\/+$/, '');
+  }
+}
+
 /** Upload a backup zip to `POST /api/agents/{agentId}/exports`. */
 export async function uploadAgentBackup(
   zipPath: string,
@@ -30,7 +45,7 @@ export async function uploadAgentBackup(
   const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
   const body = Buffer.concat([preamble, fileBuffer, epilogue]);
 
-  const parsed = new url.URL(`${serverBaseUrl.replace(/\/$/, '')}/api/agents/${agentId}/exports/upload`);
+  const parsed = new url.URL(`${httpOrigin(serverBaseUrl)}/api/agents/${agentId}/exports/upload`);
   const transport = parsed.protocol === 'https:' ? https : http;
   const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
 

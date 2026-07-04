@@ -1,8 +1,16 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import { AdmZipArchive } from './archive';
 import { ARCHIVE_PATHS, TOP_FOLDER } from './layout';
 import { SESSION_BACKUP_PROVIDERS } from './sessionProviders';
 import { parseManifest } from './manifest';
+
+/**
+ * Identity/connection settings that belong to the DESTINATION agent, not the
+ * backed-up one. Restoring a backup must never overwrite these, or the restored
+ * agent would connect as the source agent (identity hijack).
+ */
+const IDENTITY_KEYS = ['wsUrl', 'serverBaseUrl', 'serverApiKey', 'webhookSlug', 'agentId'] as const;
 
 export interface ImportResult {
   destRoot: string;
@@ -29,8 +37,32 @@ export async function restoreAgentBackup(zipPath: string, destRoot: string): Pro
     throw new Error('Not an AutoDev agent backup (missing agent-export/ root).');
   }
 
+  // Preserve THIS agent's identity/connection settings across the restore —
+  // the backup carries the source agent's settings.json (wsUrl/api_key/slug),
+  // which would otherwise hijack this agent's identity.
+  const destSettingsPath = path.join(destRoot, '.autodev', 'settings.json');
+  const preservedIdentity: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(destSettingsPath)) {
+      const cur = JSON.parse(fs.readFileSync(destSettingsPath, 'utf8')) as Record<string, unknown>;
+      for (const k of IDENTITY_KEYS) { if (cur[k] !== undefined) { preservedIdentity[k] = cur[k]; } }
+    }
+  } catch { /* no current settings — nothing to preserve */ }
+
   // 1. Workspace state + root docs back into the destination folder.
   const workspaceFiles = archive.extractDir(ARCHIVE_PATHS.workspace, destRoot);
+
+  // Re-apply the preserved identity onto the restored settings.json.
+  if (Object.keys(preservedIdentity).length > 0) {
+    try {
+      const restored = fs.existsSync(destSettingsPath)
+        ? (JSON.parse(fs.readFileSync(destSettingsPath, 'utf8')) as Record<string, unknown>)
+        : {};
+      Object.assign(restored, preservedIdentity);
+      fs.mkdirSync(path.dirname(destSettingsPath), { recursive: true });
+      fs.writeFileSync(destSettingsPath, JSON.stringify(restored, null, 2) + '\n', 'utf8');
+    } catch { /* best effort */ }
+  }
 
   // 2. Provider session traces into their host stores (Strategy).
   const restoredByProvider: Record<string, number> = {};

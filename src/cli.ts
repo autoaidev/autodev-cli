@@ -11,6 +11,7 @@ import { connectCommand } from './commands/connect';
 import { tailOutputCommand } from './commands/tailOutput';
 import { exportCommand } from './commands/export';
 import { importCommand } from './commands/import';
+import { mcpOperateCommand } from './commands/mcpOperate';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -95,6 +96,7 @@ sessionsCommand(program);
 resumeCommand(program);
 exportCommand(program);
 importCommand(program);
+mcpOperateCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error((err as Error).message);

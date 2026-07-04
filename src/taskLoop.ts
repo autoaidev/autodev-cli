@@ -318,6 +318,21 @@ export class TaskLoopRunner {
     this._gitRepo   = git.gitRepo;
     this._gitBranch = git.gitBranch;
 
+    // Wire per-provider MCP configs at startup so the A2A tools are always
+    // available for whatever provider this agent runs — not just after an
+    // `mcp_update` push. Without this, a per-project config (e.g. opencode.json)
+    // never gets written and opencode/copilot agents start with no send_message
+    // tool. Office-bound only (sync auto-attaches the pixel-office server from
+    // serverApiKey); harmless no-op otherwise.
+    if (settings.serverApiKey && settings.serverBaseUrl) {
+      try {
+        ConfigManager.syncProjectMcpServers(root, (m) => callbacks.log(m));
+        void ConfigManager.reportProjectMcp(root, (m) => callbacks.log(m));
+      } catch (err) {
+        callbacks.log(`⚠️ startup MCP sync failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     this._webhook = (settings.serverBaseUrl && settings.webhookSlug)
       ? new WebhookClient(
           settings.serverBaseUrl.replace(/\/$/, '') + '/webhook/' + settings.webhookSlug,

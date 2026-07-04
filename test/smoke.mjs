@@ -13,10 +13,10 @@ const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
 
 // Registry resolves every provider id with the right kind.
 const expected = {
-  'claude-cli': 'cli', 'copilot-cli': 'cli', 'opencode-cli': 'cli',
+  'claude-cli': 'cli', 'copilot-cli': 'cli', 'opencode-cli': 'cli', 'grok-cli': 'cli',
   'claude-tui': 'tui', 'grok-tui': 'tui', 'copilot-sdk': 'sdk', 'opencode-sdk': 'sdk',
 };
-ok('registry has all 7 providers', () => assert.equal(providerRegistry.ids().length, 7));
+ok('registry has all 8 providers', () => assert.equal(providerRegistry.ids().length, 8));
 for (const [id, kind] of Object.entries(expected)) {
   ok(`registry resolves ${id} (kind=${kind})`, () => {
     const p = providerRegistry.get(id);

@@ -1,16 +1,21 @@
 // ---------------------------------------------------------------------------
-// grokTuiProvider -- Grok tasks via `grok --prompt-file` (simple CLI, no ACP).
+// grokProvider -- Grok tasks via the `grok` headless CLI. Backs BOTH provider
+// variants from one shared runner:
 //
-// Each task spawns a FRESH grok process without -c, so there is no context
-// accumulation across tasks (which previously caused auto-compaction /
-// "Loop: stopping" issues).
+//   grok-cli  (stateless):  fresh process each task, no session flags — no
+//                           context accumulation across tasks.
+//   grok-tui  (persistent): resumes ONE session per workspace so context
+//                           carries across tasks, like an interactive session.
+//                           First task: `--session-id <uuid>` (created + saved
+//                           to session-state.json); later tasks: `--resume <id>`.
 //
 // Command:
-//   grok -m <model> --always-approve --cwd <root> --prompt-file <file>
-//         --output-format streaming-json
+//   grok -m <model> --always-approve --cwd <root>
+//        [--session-id <uuid> | --resume <uuid>]      (grok-tui only)
+//        --prompt-file <file> --output-format streaming-json
 //
 // streaming-json lines are parsed; assistant text chunks are appended to
-// stdoutFile.  exitFile is written when the process exits.
+// stdoutFile. exitFile is written when the process exits.
 //
 // Default model: sxs-claude-opus-4-6. Override via settings.grokModel.
 // ---------------------------------------------------------------------------
@@ -19,7 +24,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as readline from 'readline';
 import * as child_process from 'child_process';
+import { randomUUID } from 'crypto';
 import { RateLimitDetector } from '../rateLimit';
+import { saveSessionId } from '../sessionState';
+import type { ProviderId } from '../providers';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -78,21 +86,57 @@ function _emitGrokHook(root: string, hookEventName: string, extra: Record<string
 // Fire-and-forget: spawns grok with --prompt-file, streams output to
 // stdoutFile, writes exit code to exitFile when the process exits.
 // ---------------------------------------------------------------------------
-export function sendGrokTuiPrompt(
+interface GrokRunOptions {
+  model?: string;
+  /** Reveal the output panel (VS Code shell only). */
+  showOutput?: () => void;
+  /** grok-tui: resume/continue a session so context accumulates across tasks. */
+  persist?: boolean;
+  /** Session id to resume (from resolveSession). Ignored unless `persist`. */
+  sessionId?: string;
+  /** Provider id used to persist a freshly-created session id. */
+  providerId?: ProviderId;
+}
+
+/**
+ * Shared runner behind both grok providers. `persist:false` (grok-cli) spawns
+ * a stateless process; `persist:true` (grok-tui) resumes the workspace session
+ * (or creates + saves a new one on the first task).
+ */
+export function sendGrokPrompt(
   root: string,
   /** Absolute path to the combined agent-profile + message file. */
   promptFilePath: string,
   stdoutFile: string,
   exitFile: string,
   log: (msg: string) => void,
-  model?: string,
-  /** Optional callback invoked once to reveal the output panel to the user. */
-  showOutput?: () => void,
+  opts: GrokRunOptions = {},
 ): void {
-  showOutput?.();
+  opts.showOutput?.();
 
-  const resolvedModel = model || GROK_DEFAULT_MODEL;
-  log(`Grok: spawning (model=${resolvedModel})`);
+  // Only force a model when one is explicitly configured. With no model, grok
+  // uses the account's own default — more robust than hardcoding a model id
+  // that may not exist for every account/plan.
+  const modelArgs = opts.model ? ['-m', opts.model] : [];
+  const modelLabel = opts.model || 'account default';
+
+  // Session flags — grok-tui only. Resume the stored session, or mint a new id
+  // and persist it immediately so the next task resumes the same conversation.
+  const sessionArgs: string[] = [];
+  if (opts.persist) {
+    const providerId = opts.providerId ?? 'grok-tui';
+    if (opts.sessionId) {
+      sessionArgs.push('--resume', opts.sessionId);
+      log(`Grok: resuming session ${opts.sessionId.slice(0, 8)}… (model=${modelLabel})`);
+    } else {
+      const sid = randomUUID();
+      sessionArgs.push('--session-id', sid);
+      try { saveSessionId(root, providerId, sid); } catch { /* best effort */ }
+      log(`Grok: new persistent session ${sid.slice(0, 8)}… (model=${modelLabel})`);
+    }
+  } else {
+    log(`Grok: spawning (model=${modelLabel})`);
+  }
 
   try { fs.writeFileSync(stdoutFile, '', 'utf8'); } catch { /* ignore */ }
   try { fs.writeFileSync(exitFile,   '', 'utf8'); } catch { /* ignore */ }
@@ -104,9 +148,10 @@ export function sendGrokTuiPrompt(
     child = child_process.spawn(
       GROK_BIN,
       [
-        '-m', resolvedModel,
+        ...modelArgs,
         '--always-approve',
         '--cwd', root,
+        ...sessionArgs,
         '--prompt-file', promptFilePath,
         '--output-format', 'streaming-json',
       ],
@@ -191,13 +236,49 @@ export function sendGrokTuiPrompt(
   });
 }
 
+/** grok-cli: stateless — a fresh grok process every task (no session flags). */
+export function sendGrokCliPrompt(
+  root: string,
+  promptFilePath: string,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  model?: string,
+  showOutput?: () => void,
+): void {
+  sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
+    model, showOutput, persist: false, providerId: 'grok-cli',
+  });
+}
+
+/** grok-tui: persistent — resume the workspace session so context accumulates. */
+export function sendGrokTuiPrompt(
+  root: string,
+  promptFilePath: string,
+  /** Session id from resolveSession (undefined on the first task). */
+  resolvedSessionId: string | undefined,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  model?: string,
+  showOutput?: () => void,
+): void {
+  sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
+    model, showOutput, persist: true, sessionId: resolvedSessionId, providerId: 'grok-tui',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // closeGrokTuiSession
-// Called by taskLoop reset interval — nothing to clear with stateless approach.
+// Called by taskLoop reset interval. grok-tui persists its session id in
+// session-state.json BY DESIGN (so context survives), so we only ensure no
+// child is left running — the session id is intentionally preserved.
 // ---------------------------------------------------------------------------
 export function closeGrokTuiSession(root: string, _log: (msg: string) => void): void {
-  // Stateless per-task execution: no session state to clear.
-  void root;
+  // Kill any active child for this root; keep the persisted session id.
+  const child = _activeChildren.get(root);
+  if (child) { try { child.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
+  _busyRoots.delete(root);
 }
 
 /** Kill all active grok processes — called on extension deactivate. */

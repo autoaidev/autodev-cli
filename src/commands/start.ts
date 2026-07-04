@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from '../sdk';
 
-const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-tui'] as const;
+const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui'] as const;
 
 export function startCommand(program: Command): void {
   program

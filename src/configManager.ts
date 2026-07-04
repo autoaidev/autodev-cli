@@ -324,6 +324,12 @@ export class ConfigManager {
       }
       cfg['mcpServers'] = srv;
     }, log, 'Copilot MCP (~/.copilot/mcp-config.json)');
+
+    // Grok project config: ./.grok/config.toml — [mcp_servers.<name>] blocks.
+    // Remote servers carry a nested [mcp_servers.<name>.headers] table for the
+    // A2A bearer token. TOML (not JSON), so we regenerate only the managed
+    // mcp_servers blocks and preserve any other grok settings in the file.
+    _writeGrokToml(path.join(root, '.grok', 'config.toml'), managedNames, effective, log);
   }
 
   /**
@@ -472,5 +478,80 @@ function _mergeJson(
     log?.(`ConfigManager: applied ${label}`);
   } catch (err) {
     log?.(`ConfigManager: failed ${label}: ${err}`);
+  }
+}
+
+/** Escape a string as a TOML basic (double-quoted) value. */
+function _tomlStr(s: string): string {
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\t/g, '\\t') + '"';
+}
+
+/** A TOML key — bare if it's a simple identifier, otherwise quoted. */
+function _tomlKey(name: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(name) ? name : _tomlStr(name);
+}
+
+/**
+ * Write ./.grok/config.toml MCP servers. grok uses `[mcp_servers.<name>]`
+ * tables (remote servers carry a nested `[mcp_servers.<name>.headers]` table
+ * for the A2A bearer token). Since this is TOML — not JSON — we regenerate only
+ * the autodev-managed `[mcp_servers.*]` tables and preserve any other grok
+ * settings in the file verbatim.
+ */
+function _writeGrokToml(
+  filePath: string,
+  managedNames: Set<string>,
+  effective: McpJsonEntries,
+  log?: (m: string) => void,
+): void {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+
+    // Read existing file and drop every [mcp_servers...] table (autodev owns
+    // those); keep all other tables/keys untouched.
+    let preserved = '';
+    if (fs.existsSync(filePath)) {
+      const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+      const kept: string[] = [];
+      let skipping = false;
+      for (const line of lines) {
+        const m = /^\s*\[\s*([^\]]*?)\s*\]/.exec(line);
+        if (m) { skipping = /^mcp_servers\b/.test(m[1]); }
+        if (!skipping) { kept.push(line); }
+      }
+      preserved = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    // Regenerate the managed [mcp_servers.<name>] tables from the effective set.
+    // A pruned/disabled entry simply isn't emitted (regeneration drops it).
+    const blocks: string[] = [];
+    for (const name of managedNames) {
+      const e = effective[name];
+      if (!e) continue;
+      const key = `mcp_servers.${_tomlKey(name)}`;
+      if (isRemoteMcp(e) && e.url) {
+        const b = [`[${key}]`, `url = ${_tomlStr(e.url)}`, `enabled = true`];
+        if (e.headers && Object.keys(e.headers).length) {
+          b.push('', `[${key}.headers]`);
+          for (const [hk, hv] of Object.entries(e.headers)) { b.push(`${_tomlKey(hk)} = ${_tomlStr(String(hv))}`); }
+        }
+        blocks.push(b.join('\n'));
+      } else if (typeof e.command === 'string') {
+        const b = [`[${key}]`, `command = ${_tomlStr(e.command)}`,
+          `args = [${(e.args ?? []).map(a => _tomlStr(String(a))).join(', ')}]`, `enabled = true`];
+        if (e.env && Object.keys(e.env).length) {
+          b.push('', `[${key}.env]`);
+          for (const [ek, ev] of Object.entries(e.env)) { b.push(`${_tomlKey(ek)} = ${_tomlStr(String(ev))}`); }
+        }
+        blocks.push(b.join('\n'));
+      }
+    }
+
+    const out = [preserved, blocks.join('\n\n')].filter(Boolean).join('\n\n').trim() + '\n';
+    fs.writeFileSync(filePath, out, 'utf8');
+    log?.('ConfigManager: applied Grok project MCP (.grok/config.toml)');
+  } catch (err) {
+    log?.(`ConfigManager: failed Grok project MCP (.grok/config.toml): ${err}`);
   }
 }

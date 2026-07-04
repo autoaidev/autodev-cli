@@ -220,12 +220,17 @@ class CopilotSdkSessionBackup implements SessionBackupProvider {
   async restore(): Promise<number> { return 0; }
 }
 
-/** Grok TUI: fresh process per task, no session store at all. */
+/**
+ * Grok: grok-cli is stateless (fresh process per task). grok-tui persists a
+ * session id in session-state.json (backed up verbatim with the workspace), but
+ * the grok session transcript lives outside the workspace (~/.grok), so it is
+ * not portable across machines — same-machine restore keeps the resumable id.
+ */
 class GrokSessionBackup implements SessionBackupProvider {
-  readonly id = 'grok-tui';
-  readonly sessionStateKeys = ['grok-tui'] as const;
+  readonly id = 'grok';
+  readonly sessionStateKeys = ['grok-cli', 'grok-tui'] as const;
   readonly portability: Portability = 'none';
-  readonly note = 'Grok TUI keeps no session state; each task is an independent process.';
+  readonly note = 'grok-cli is stateless; grok-tui persists a resumable session id (workspace-local), but grok transcripts (~/.grok) are not captured.';
 
   async collect(): Promise<CollectResult> { return { discoveredIds: [], tracesCaptured: false }; }
   async restore(): Promise<number> { return 0; }

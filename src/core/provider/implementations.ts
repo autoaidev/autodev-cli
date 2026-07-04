@@ -21,8 +21,8 @@ import { buildOpenCodeCliCommand, getLatestOpenCodeSessionId } from '../../provi
 import { sendClaudeTuiPrompt, isClaudeTuiBusy, closeClaudeTuiClient } from '../../providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, closeCopilotSdkSession, setCopilotSettingsToken } from '../../providers/copilotSdkProvider';
 import { sendOpencodeSdkPrompt, isOpencodeSdkBusy, closeOpencodeSdkClient } from '../../providers/opencodeSdkProvider';
-import { sendGrokTuiPrompt } from '../../providers/grokTuiProvider';
-import { getSessionClearedAt } from '../../sessionState';
+import { sendGrokCliPrompt, sendGrokTuiPrompt, isGrokTuiBusy, closeGrokTuiSession } from '../../providers/grokTuiProvider';
+import { getSessionClearedAt, getSessionId } from '../../sessionState';
 
 // --- CLI providers --------------------------------------------------------
 
@@ -122,13 +122,32 @@ export class OpenCodeSdkProvider extends BaseProvider {
   close(root: string, log: Logger) { closeOpencodeSdkClient(root, log); }
 }
 
+export class GrokCliProvider extends BaseProvider {
+  readonly id: ProviderId = 'grok-cli';
+  readonly label = 'Grok CLI';
+  readonly kind: ProviderKind = 'cli';
+  // Stateless: a fresh grok process every task, no session to resume.
+  async dispatch(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchOutcome> {
+    sendGrokCliPrompt(req.root, req.combinedFile, req.stdoutFile, req.exitFile,
+      ctx.log, req.settings.grokModel || undefined, ctx.showOutput);
+    return {};
+  }
+  isBusy(root: string) { return isGrokTuiBusy(root); }
+  close(root: string, log: Logger) { closeGrokTuiSession(root, log); }
+}
+
 export class GrokTuiProvider extends BaseProvider {
   readonly id: ProviderId = 'grok-tui';
   readonly label = 'Grok TUI';
   readonly kind: ProviderKind = 'tui';
+  // Persistent: resume the workspace's stored grok session so context carries
+  // across tasks (getSessionId returns undefined on the first task → fresh id).
+  resolveSession(root: string) { return Promise.resolve(getSessionId(root, 'grok-tui')); }
   async dispatch(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchOutcome> {
-    sendGrokTuiPrompt(req.root, req.combinedFile, req.stdoutFile, req.exitFile,
+    sendGrokTuiPrompt(req.root, req.combinedFile, req.resolvedSessionId, req.stdoutFile, req.exitFile,
       ctx.log, req.settings.grokModel || undefined, ctx.showOutput);
     return {};
   }
+  isBusy(root: string) { return isGrokTuiBusy(root); }
+  close(root: string, log: Logger) { closeGrokTuiSession(root, log); }
 }

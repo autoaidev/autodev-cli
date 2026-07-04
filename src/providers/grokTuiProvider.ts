@@ -173,6 +173,27 @@ export function sendGrokPrompt(
   }
 
   // -------------------------------------------------------------------------
+  // Watchdog — grok can wedge internally (e.g. retrying a failing tool call
+  // forever) WITHOUT ever exiting, which leaves the process alive, the exit
+  // file unwritten, and the task loop blocked indefinitely on this one task
+  // while new work piles up. Kill a run that overruns a hard time budget or
+  // floods tool-output errors, so `close` fires, the exit file is written, and
+  // the loop fails this task cleanly and moves on.
+  // -------------------------------------------------------------------------
+  const GROK_MAX_RUN_MS     = Number(process.env.AUTODEV_GROK_MAX_RUN_MS) || 10 * 60_000;
+  const GROK_MAX_TOOL_ERRORS = Number(process.env.AUTODEV_GROK_MAX_TOOL_ERRORS) || 25;
+  let toolErrorCount = 0;
+  const killGrok = (why: string): void => {
+    log(`Grok watchdog: ${why} — killing run`);
+    try { fs.appendFileSync(stdoutFile, `\n[Grok watchdog: ${why}]\n`, 'utf8'); } catch { /* ignore */ }
+    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+  };
+  const watchdog = setTimeout(
+    () => killGrok(`exceeded ${Math.round(GROK_MAX_RUN_MS / 60_000)}min time budget`),
+    GROK_MAX_RUN_MS,
+  );
+
+  // -------------------------------------------------------------------------
   // Stream stdout — each line is a streaming-json object.
   // -------------------------------------------------------------------------
   const rl = readline.createInterface({ input: child.stdout! });
@@ -217,10 +238,22 @@ export function sendGrokPrompt(
 
   child.stderr?.on('data', (chunk: Buffer) => {
     const text = chunk.toString('utf8').trim();
-    if (text) { log(`Grok stderr: ${text}`); }
+    if (text) {
+      log(`Grok stderr: ${text}`);
+      // A flood of tool-output errors means grok is stuck retrying a tool it
+      // can't complete — kill it now rather than waiting out the time budget.
+      const hits = (text.match(/tool_output_error/g) || []).length;
+      if (hits) {
+        toolErrorCount += hits;
+        if (toolErrorCount >= GROK_MAX_TOOL_ERRORS) {
+          killGrok(`${toolErrorCount} tool-output errors (stuck retry loop)`);
+        }
+      }
+    }
   });
 
   child.on('close', (code: number | null) => {
+    clearTimeout(watchdog);
     rl.close();
     _activeChildren.delete(root);
     _busyRoots.delete(root);

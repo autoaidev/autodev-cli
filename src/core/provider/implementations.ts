@@ -47,6 +47,13 @@ export class CopilotCliProvider extends BaseProvider {
   readonly kind: ProviderKind = 'cli';
   resolveSession(root: string, log: Logger) { return probeCopilotSession(root, log); }
   async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
+    // Authenticate the copilot CLI with the agent's configured token via env
+    // (COPILOT_GITHUB_TOKEN) — kept out of the command string so it never lands
+    // in logs. The copilot child inherits process.env.
+    if (req.settings.copilotGithubToken) {
+      process.env['COPILOT_GITHUB_TOKEN'] = req.settings.copilotGithubToken;
+      if (! process.env['GH_TOKEN']) { process.env['GH_TOKEN'] = req.settings.copilotGithubToken; }
+    }
     let cmd = buildCopilotCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.copilotModel || undefined, req.settings.sessionName || undefined);
     cmd = teeCommand(cmd, req.stdoutFile);
     if (req.settings.hooksEnabled) {

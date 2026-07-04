@@ -206,7 +206,7 @@ export interface AutodevSettings {
 }
 
 export const SETTINGS_DEFAULTS: AutodevSettings = {
-  provider: 'claude-cli' as ProviderId,
+  provider: 'claude-tui' as ProviderId,
   wsUrl: '',
   serverBaseUrl: '',
   serverApiKey: '',

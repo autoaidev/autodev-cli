@@ -595,6 +595,7 @@ export class TaskLoopRunner {
       const typed = entries as Record<string, { command: string; args?: string[]; env?: Record<string, string>; enabled?: boolean }>;
       saveProjectUserMcp(root, typed);
       ConfigManager.syncProjectMcpServers(root, (m) => this._cb?.log(m));
+      void ConfigManager.reportProjectMcp(root, (m) => this._cb?.log(m));
       this._cb?.log('✅ MCP config synced to .mcp.json, opencode.json, .vscode/mcp.json — restarting loop…');
     } catch (err) {
       this._cb?.log(`⚠️ MCP update failed: ${err instanceof Error ? err.message : String(err)}`);

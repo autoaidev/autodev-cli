@@ -327,6 +327,51 @@ export class ConfigManager {
   }
 
   /**
+   * Report the agent's effective MCP servers to pixel-office so the profile's
+   * MCP tab can show what the agent actually has (built-ins + the pixel-office
+   * A2A server + user entries). Sends names/kind/detail ONLY — never headers,
+   * tokens, or env values. Best-effort and fire-and-forget.
+   */
+  static async reportProjectMcp(root: string, log?: (m: string) => void): Promise<void> {
+    try {
+      const s = loadSettingsForRoot(root);
+      const key = s.serverApiKey || '';
+      let origin = '';
+      try {
+        const u = new URL(s.serverBaseUrl || '');
+        const proto = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
+        origin = `${proto}//${u.host}`;
+      } catch { /* not office-bound */ }
+      if (! origin || ! key) { return; }
+
+      const all = loadProjectAllMcp(root);
+      const servers = Object.entries(all).map(([name, e]) => {
+        const remote = isRemoteMcp(e);
+        let detail = '';
+        if (remote) { try { detail = new URL(e.url as string).host; } catch { detail = ''; } }
+        else { detail = e.command ? [e.command, ...(e.args ?? [])].join(' ') : ''; }
+        return {
+          name,
+          kind: remote ? 'remote' : 'stdio',
+          detail,                                   // host (remote) or command line (stdio) — no secrets
+          builtin: e._meta?.kind === 'builtin',
+          enabled: e.enabled !== false,
+        };
+      });
+
+      // Node 18+ global fetch. Best-effort — swallow any network/DNS error.
+      const f = (globalThis as unknown as { fetch?: typeof fetch }).fetch;
+      if (! f) { return; }
+      await f(`${origin}/api/agent-mcp-report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ servers }),
+      });
+      log?.(`MCP: reported ${servers.length} servers to pixel-office`);
+    } catch { /* best-effort */ }
+  }
+
+  /**
    * @deprecated Use syncProjectMcpServers(root) instead.
    * Kept for backwards compat — no longer called from applyAll.
    */
@@ -349,6 +394,8 @@ export class ConfigManager {
     if (root) {
       try { ConfigManager.syncProjectMcpServers(root, log); }
       catch (err) { log?.(`ConfigManager: Project MCP sync error: ${err}`); }
+      // Report the effective server set to pixel-office so the UI can show it.
+      void ConfigManager.reportProjectMcp(root, log);
     }
   }
 }

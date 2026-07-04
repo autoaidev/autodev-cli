@@ -131,7 +131,14 @@ export async function sendPromptToAi(
       }
     }
 
-    const storedSessionId = settings.resumeSession ? getSessionId(root, providerId) : undefined;
+    // grok-tui is persistent BY DESIGN (resumes its own workspace session so
+    // context accumulates); grok-cli is stateless BY DESIGN. Both ignore the
+    // global resumeSession toggle — that's the whole point of the two variants.
+    // Every other provider honors resumeSession.
+    const wantResume = providerId === 'grok-tui' ? true
+      : providerId === 'grok-cli' ? false
+      : settings.resumeSession;
+    const storedSessionId = wantResume ? getSessionId(root, providerId) : undefined;
 
     let resolvedSessionId = storedSessionId;
     if (!resolvedSessionId && settings.resumeSession) {

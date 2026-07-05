@@ -42,6 +42,9 @@ export class OfficeSocket {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _pingTimer: ReturnType<typeof setInterval> | null = null;
   private _lastPongAt = 0;
+  // Reassembly state for fragmented data messages (FIN=0 + continuation frames).
+  private _fragOpcode = 0;
+  private _fragChunks: Buffer[] = [];
 
   constructor(
     private readonly wsUrl: string,
@@ -187,13 +190,14 @@ export class OfficeSocket {
     while (true) {
       const frame = this._parseFrame();
       if (!frame) { break; }
-      this._onFrame(frame.opcode, frame.payload);
+      this._onFrame(frame.fin, frame.opcode, frame.payload);
     }
   }
 
-  private _parseFrame(): { opcode: number; payload: Buffer } | null {
+  private _parseFrame(): { fin: boolean; opcode: number; payload: Buffer } | null {
     if (this._buffer.length < 2) { return null; }
     const byte2 = this._buffer[1];
+    const fin = (this._buffer[0] & 0x80) !== 0;
     const opcode = this._buffer[0] & 0x0f;
     const isMasked = (byte2 & 0x80) !== 0;
     let payloadLen = byte2 & 0x7f;
@@ -220,17 +224,39 @@ export class OfficeSocket {
       for (let i = 0; i < payload.length; i++) { payload[i] ^= mask[i % 4]; }
     }
     this._buffer = this._buffer.slice(offset + payloadLen);
-    return { opcode, payload };
+    return { fin, opcode, payload };
   }
 
-  private _onFrame(opcode: number, payload: Buffer): void {
+  private _onFrame(fin: boolean, opcode: number, payload: Buffer): void {
+    // Control frames (never fragmented) — handle immediately; they may be
+    // interleaved between data fragments.
     if (opcode === 0x9) { this._sendPong(payload); this._lastPongAt = Date.now(); return; }
     if (opcode === 0xa) { this._lastPongAt = Date.now(); return; }
     if (opcode === 0x8) { this._connected = false; this._scheduleReconnect(); return; }
-    if (opcode !== 0x1) { return; }
+
+    // Data frames: reassemble fragmented messages (FIN=0 start + 0x0 continuations).
+    let full: Buffer;
+    if (opcode === 0x0) {
+      // Continuation of an in-progress message.
+      if (!this._fragChunks.length) { return; } // stray continuation — ignore
+      this._fragChunks.push(payload);
+      if (!fin) { return; }
+      opcode = this._fragOpcode;
+      full = Buffer.concat(this._fragChunks);
+      this._fragChunks = [];
+    } else if (!fin) {
+      // First fragment of a new message — start accumulating.
+      this._fragOpcode = opcode;
+      this._fragChunks = [payload];
+      return;
+    } else {
+      full = payload; // unfragmented single frame
+    }
+
+    if (opcode !== 0x1) { return; } // only text messages carry our JSON
 
     let msg: Record<string, unknown>;
-    try { msg = JSON.parse(payload.toString('utf8')); }
+    try { msg = JSON.parse(full.toString('utf8')); }
     catch { return; }
 
     // Server app-level heartbeat: reply so it counts us alive.

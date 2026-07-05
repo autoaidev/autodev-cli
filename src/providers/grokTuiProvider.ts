@@ -141,6 +141,12 @@ export function sendGrokPrompt(
   try { fs.writeFileSync(stdoutFile, '', 'utf8'); } catch { /* ignore */ }
   try { fs.writeFileSync(exitFile,   '', 'utf8'); } catch { /* ignore */ }
 
+  // Defensive: if a previous run for this root is somehow still tracked, kill it
+  // first so `_activeChildren.set` below can't orphan it (callers gate on
+  // isGrokTuiBusy, but don't rely on that alone).
+  const prior = _activeChildren.get(root);
+  if (prior) { try { prior.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
+
   _busyRoots.add(root);
 
   let child: child_process.ChildProcess;
@@ -180,18 +186,26 @@ export function sendGrokPrompt(
   // floods tool-output errors, so `close` fires, the exit file is written, and
   // the loop fails this task cleanly and moves on.
   // -------------------------------------------------------------------------
-  const GROK_MAX_RUN_MS     = Number(process.env.AUTODEV_GROK_MAX_RUN_MS) || 10 * 60_000;
-  const GROK_MAX_TOOL_ERRORS = Number(process.env.AUTODEV_GROK_MAX_TOOL_ERRORS) || 25;
+  // Env overrides: accept any finite >= 0; 0 explicitly DISABLES that guard
+  // (the old `Number(x) || DEFAULT` silently reverted 0 back to the default).
+  const envNum = (key: string, def: number): number => {
+    const n = Number(process.env[key]);
+    return Number.isFinite(n) && n >= 0 ? n : def;
+  };
+  const GROK_MAX_RUN_MS      = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
+  const GROK_MAX_TOOL_ERRORS = envNum('AUTODEV_GROK_MAX_TOOL_ERRORS', 25);
   let toolErrorCount = 0;
+  let killed = false;
   const killGrok = (why: string): void => {
+    if (killed) { return; } // never double-kill / double-log
+    killed = true;
     log(`Grok watchdog: ${why} — killing run`);
     try { fs.appendFileSync(stdoutFile, `\n[Grok watchdog: ${why}]\n`, 'utf8'); } catch { /* ignore */ }
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
   };
-  const watchdog = setTimeout(
-    () => killGrok(`exceeded ${Math.round(GROK_MAX_RUN_MS / 60_000)}min time budget`),
-    GROK_MAX_RUN_MS,
-  );
+  const watchdog = GROK_MAX_RUN_MS > 0
+    ? setTimeout(() => killGrok(`exceeded ${Math.round(GROK_MAX_RUN_MS / 60_000)}min time budget`), GROK_MAX_RUN_MS)
+    : null;
 
   // -------------------------------------------------------------------------
   // Stream stdout — each line is a streaming-json object.
@@ -236,24 +250,26 @@ export function sendGrokPrompt(
     // `thought` and other event types stay out of the output file.
   });
 
-  child.stderr?.on('data', (chunk: Buffer) => {
-    const text = chunk.toString('utf8').trim();
-    if (text) {
-      log(`Grok stderr: ${text}`);
-      // A flood of tool-output errors means grok is stuck retrying a tool it
-      // can't complete — kill it now rather than waiting out the time budget.
-      const hits = (text.match(/tool_output_error/g) || []).length;
-      if (hits) {
-        toolErrorCount += hits;
-        if (toolErrorCount >= GROK_MAX_TOOL_ERRORS) {
-          killGrok(`${toolErrorCount} tool-output errors (stuck retry loop)`);
-        }
+  // Read stderr LINE by line (not raw chunks) so a `tool_output_error` marker
+  // split across two data chunks is still counted exactly once.
+  const errRl = child.stderr ? readline.createInterface({ input: child.stderr }) : null;
+  errRl?.on('line', (line: string) => {
+    const text = line.trim();
+    if (!text) { return; }
+    log(`Grok stderr: ${text}`);
+    // A flood of tool-output errors means grok is stuck retrying a tool it
+    // can't complete — kill it now rather than waiting out the time budget.
+    if (GROK_MAX_TOOL_ERRORS > 0 && text.includes('tool_output_error')) {
+      toolErrorCount++;
+      if (toolErrorCount >= GROK_MAX_TOOL_ERRORS) {
+        killGrok(`${toolErrorCount} tool-output errors (stuck retry loop)`);
       }
     }
   });
 
   child.on('close', (code: number | null) => {
-    clearTimeout(watchdog);
+    if (watchdog) { clearTimeout(watchdog); }
+    errRl?.close();
     rl.close();
     _activeChildren.delete(root);
     _busyRoots.delete(root);

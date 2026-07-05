@@ -87,6 +87,10 @@ function proxy(endpoint: string, key: string, body: unknown): Promise<Record<str
         catch (e) { reject(e); }
       });
     });
+    // Without a timeout, an office that accepts the connection but never
+    // responds would leave this promise pending forever — the bridge's
+    // inflight counter never returns to 0 and the process can't exit.
+    req.setTimeout(120_000, () => req.destroy(new Error('proxy request timed out after 120s')));
     req.on('error', reject);
     req.write(data);
     req.end();
@@ -156,7 +160,14 @@ export function mcpOperateCommand(program: Command): void {
       // in progress is never clipped.
       let inflight = 0;
       let closed = false;
-      const maybeExit = (): void => { if (closed && inflight === 0) { socket?.destroy(); process.exit(0); } };
+      const maybeExit = (): void => {
+        if (closed && inflight === 0) {
+          socket?.destroy();
+          // Flush any buffered stdout (e.g. the final reply on a pipe) before
+          // exiting, so the last frame is never clipped.
+          process.stdout.write('', () => process.exit(0));
+        }
+      };
 
       rl.on('line', async (line: string) => {
         const t = line.trim();

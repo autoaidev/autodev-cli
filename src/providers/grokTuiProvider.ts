@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import * as child_process from 'child_process';
 import { randomUUID } from 'crypto';
+import { eventTypeFor } from '../hookEventNormalizer';
 import { RateLimitDetector } from '../rateLimit';
 import { saveSessionId } from '../sessionState';
 import type { ProviderId } from '../providers';
@@ -75,7 +76,9 @@ function _emitGrokHook(root: string, hookEventName: string, extra: Record<string
   try {
     const dir = path.join(root, '.autodev');
     if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-    const ev = { hook_event_name: hookEventName, provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
+    // Emit the canonical event_type too (grok writes hooks directly, bypassing
+    // normalizeEvent) so pixel-office can trust it without a provider map.
+    const ev = { hook_event_name: hookEventName, event_type: eventTypeFor(hookEventName), provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
     fs.appendFileSync(path.join(dir, 'hooks-events.jsonl'), JSON.stringify(ev) + '\n', 'utf8');
   } catch { /* non-critical */ }
 }

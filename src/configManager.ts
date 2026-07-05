@@ -219,8 +219,8 @@ export class ConfigManager {
       const s = loadSettingsForRoot(root);
       const key = s.serverApiKey || '';
       // serverBaseUrl is derived from wsUrl (e.g. wss://host/ws), so take just the
-      // origin and normalize ws/wss → http/https. The MCP endpoint lives at
-      // <origin>/api/mcp, not under the /ws path.
+      // origin and normalize ws/wss → http/https. The A2A MCP endpoint lives at
+      // <origin>/api/mcp/a2a, not under the /ws path.
       let origin = '';
       try {
         const u = new URL(s.serverBaseUrl || '');
@@ -230,7 +230,7 @@ export class ConfigManager {
       if (origin && key && !disabledBuiltins.includes('pixel-office')) {
         builtinsForJson['pixel-office'] = {
           type: 'http',
-          url: `${origin}/api/mcp`,
+          url: `${origin}/api/mcp/a2a`,
           headers: { Authorization: `Bearer ${key}` },
         };
       }

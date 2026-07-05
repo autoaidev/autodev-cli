@@ -21,6 +21,7 @@
 
 export interface HookEvent {
   hook_event_name: string;
+  event_type?: string;   // canonical snake_case type (derived from hook_event_name)
   provider: string;
   tool_name?: string;
   tool_input?: unknown;
@@ -375,6 +376,32 @@ function normalizeCliHook(
  * @returns         A HookEvent ready to be JSON-stringified, or null if the
  *                  event type is not mapped / not interesting.
  */
+// Canonical hook_event_name (PascalCase) → event_type (snake_case). Mirrors
+// pixel-office's HookEventNormalizer::CLAUDE_CODE_TYPES so the CLI can emit the
+// final event_type itself — the server then trusts it and doesn't have to know
+// every provider (which is what let grok-tui events fall through to "unknown").
+const EVENT_TYPE_MAP: Record<string, string> = {
+  PreToolUse: 'tool_start', PostToolUse: 'tool_end', PostToolUseFailure: 'tool_error',
+  SessionStart: 'session_start', SessionEnd: 'session_end', Stop: 'session_end', StopFailure: 'stop_failure',
+  SubagentStart: 'subagent_start', SubagentStop: 'subagent_stop', TeammateIdle: 'teammate_idle',
+  PermissionRequest: 'permission_request', PermissionDenied: 'permission_denied', PermissionReplied: 'permission_replied',
+  UserPromptSubmit: 'user_prompt_submit',
+  TaskCreated: 'task_created', TaskCompleted: 'task_completed',
+  CwdChanged: 'cwd_changed', FileChanged: 'file_changed', InstructionsLoaded: 'instructions_loaded', ConfigChange: 'config_change',
+  PreCompact: 'pre_compact', PostCompact: 'post_compact',
+  Elicitation: 'elicitation', ElicitationResult: 'elicitation_result',
+  WorktreeCreate: 'worktree_create', WorktreeRemove: 'worktree_remove',
+  Notification: 'notification',
+  AgentMessage: 'agent_message', TurnStart: 'turn_start', TurnEnd: 'turn_end',
+};
+
+/** Canonical event_type for a hook_event_name (falls back to snake_case-ing the name). */
+export function eventTypeFor(hookEventName: string): string {
+  if (EVENT_TYPE_MAP[hookEventName]) { return EVENT_TYPE_MAP[hookEventName]; }
+  // Unknown PascalCase name → best-effort snake_case so it's at least descriptive.
+  return hookEventName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
 export function normalizeEvent(
   provider: string,
   raw: Record<string, unknown>,
@@ -391,7 +418,10 @@ export function normalizeEvent(
   }
 
   if (!partial) { return null; }
-  return { ...partial, timestamp: new Date().toISOString() } as HookEvent;
+  // Emit the canonical event_type alongside hook_event_name so downstream
+  // consumers (pixel-office) never have to re-derive it per provider.
+  const event_type = eventTypeFor(String(partial.hook_event_name ?? 'unknown'));
+  return { ...partial, event_type, timestamp: new Date().toISOString() } as HookEvent;
 }
 
 /**

@@ -54,6 +54,23 @@ export function describePush(msg: Record<string, unknown>): string | null {
     const task = (msg['data'] as { task?: { title?: string } } | undefined)?.task;
     return task?.title ? `New task: ${task.title}` : 'New task assigned.';
   }
+  // Office-feed events fanned out to connected agents (chat, status,
+  // celebrations, joins…): { type:'office_event', event, fromName, text }. The
+  // feed text is already self-contained (usually names the actor), so surface it
+  // as-is rather than double-prefixing.
+  if (type === 'office_event') {
+    const text = (msg['text'] as string) || '';
+    const from = (msg['fromName'] as string) || (msg['from'] as string) || 'a teammate';
+    return text || `${from} posted an office update`;
+  }
+  // Tool-activity (hook) events from teammates: { type:'hook_event', agentName, toolName, eventName }.
+  if (type === 'hook_event') {
+    const data = (msg['data'] as Record<string, unknown> | undefined) ?? msg;
+    const who = (data['agentName'] as string) || (msg['agentName'] as string) || 'a teammate';
+    const tool = (data['toolName'] as string) || (msg['toolName'] as string) || '';
+    const ev = (data['eventType'] as string) || (msg['eventName'] as string) || 'activity';
+    return `🔧 ${who}: ${tool || ev}`;
+  }
   // A2A task/message push frame: { task: { metadata: { task: { text }, event } } }
   const task = msg['task'] as { metadata?: { task?: { text?: string }; event?: string } } | undefined;
   if (task?.metadata) {

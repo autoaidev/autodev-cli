@@ -138,6 +138,30 @@ export function mcpOperateCommand(program: Command): void {
       const send = (msg: unknown): void => { process.stdout.write(JSON.stringify(msg) + '\n'); };
       const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
+      // ── Real-time event stream over the presence socket ──────────────────────
+      // The socket receives office activity live; buffer it here and expose a
+      // `wait_for_events` tool that blocks until something arrives (or a timeout).
+      // A driven agent loops on it to react in real time — through the tool
+      // channel, since MCP clients don't surface server notifications into the
+      // model's context.
+      const EVENT_CAP = 200;
+      const eventQueue: string[] = [];
+      let eventWaiter: (() => void) | null = null;
+      const pushEvent = (line: string): void => {
+        eventQueue.push(line);
+        if (eventQueue.length > EVENT_CAP) { eventQueue.splice(0, eventQueue.length - EVENT_CAP); }
+        if (eventWaiter) { const w = eventWaiter; eventWaiter = null; w(); }
+      };
+      const waitForEvent = (ms: number): Promise<void> => new Promise((resolve) => {
+        const timer = setTimeout(() => { eventWaiter = null; resolve(); }, ms);
+        eventWaiter = () => { clearTimeout(timer); resolve(); };
+      });
+      const WAIT_TOOL = {
+        name: 'wait_for_events',
+        description: "Block until new office activity arrives over the live socket (or a timeout), then return it. Teammates' messages, status changes, task assignments and tool activity stream in as they happen — call this in a loop to react in real time. Returns any buffered events immediately.",
+        inputSchema: { type: 'object', properties: { timeout_seconds: { type: 'integer', description: 'Max seconds to wait for the next event (default 25, max 55).' } }, required: [] as string[] },
+      };
+
       // ── Presence WebSocket (optional; --no-socket disables) ──────────────────
       // Holds a live connection so the office shows this MCP agent genuinely
       // online, and surfaces task/message pushes to the client as MCP
@@ -164,7 +188,9 @@ export function mcpOperateCommand(program: Command): void {
           onMessage: (msg) => {
             const notice = describePush(msg);
             if (notice) {
-              // MCP logging notification — client-visible, no id (one-way).
+              // Buffer for wait_for_events (the reliable real-time path)…
+              pushEvent(`- ${new Date().toISOString()} ${notice}`);
+              // …and also emit a logging notification for clients that show them.
               send({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', logger: 'pixel-office', data: notice } });
             }
           },
@@ -201,9 +227,32 @@ export function mcpOperateCommand(program: Command): void {
           return;
         }
 
+        // Local tool: wait_for_events — stream office activity from the socket
+        // instead of proxying to the server. Blocks until an event (or timeout).
+        const params = (req as { params?: { name?: string; arguments?: { timeout_seconds?: unknown } } }).params;
+        if (req.method === 'tools/call' && params?.name === 'wait_for_events') {
+          inflight++;
+          try {
+            const secs = Math.max(1, Math.min(55, Number(params?.arguments?.timeout_seconds) || 25));
+            if (eventQueue.length === 0) { await waitForEvent(secs * 1000); }
+            const events = eventQueue.splice(0, eventQueue.length);
+            const text = events.length
+              ? `Office activity (${events.length} event${events.length === 1 ? '' : 's'}):\n${events.join('\n')}\n\nUse get_events / check_messages for detail, then call wait_for_events again to keep listening.`
+              : `No new events in ${secs}s. Call wait_for_events again to keep listening.`;
+            send({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text }] } });
+          } finally { inflight--; maybeExit(); }
+          return;
+        }
+
         inflight++;
         try {
-          send(await proxy(endpoint, key, req));
+          const res = await proxy(endpoint, key, req);
+          // Advertise the local streaming tool alongside the server's own tools.
+          if (req.method === 'tools/list') {
+            const result = res['result'] as { tools?: unknown[] } | undefined;
+            if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL); }
+          }
+          send(res);
         } catch (e) {
           send({ jsonrpc: '2.0', id: req.id, error: { code: -32603, message: 'proxy error: ' + ((e as Error)?.message ?? String(e)) } });
         } finally {

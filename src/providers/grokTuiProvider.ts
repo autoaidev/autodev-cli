@@ -239,6 +239,26 @@ export function sendGrokPrompt(
     if (!_activityTimer) { _activityTimer = setTimeout(flushActivity, 1200); }
   };
 
+  // Console output: grok streams assistant text token-by-token (often mid-word,
+  // e.g. "aut"/"ode"/"v"). Logging each delta puts one timestamped line per token
+  // and shreds the output. Buffer deltas and only log COMPLETE lines (on \n),
+  // flushing whatever remains when the turn ends.
+  let _lineBuf = '';
+  const emitOutputLines = (text: string): void => {
+    _lineBuf += text;
+    let nl: number;
+    while ((nl = _lineBuf.indexOf('\n')) >= 0) {
+      const line = _lineBuf.slice(0, nl).replace(/\s+$/, '');
+      _lineBuf = _lineBuf.slice(nl + 1);
+      if (line.trim()) { log(`  ${line}`); }
+    }
+  };
+  const flushOutputLine = (): void => {
+    const line = _lineBuf.replace(/\s+$/, '');
+    _lineBuf = '';
+    if (line.trim()) { log(`  ${line}`); }
+  };
+
   rl.on('line', (line: string) => {
     if (!line.trim()) { return; }
     let msg: any;
@@ -255,8 +275,8 @@ export function sendGrokPrompt(
       const text: string = msg.content ?? msg.data ?? msg.text ?? msg.message ?? '';
       if (text) {
         try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ }
-        const preview = text.replace(/\r?\n/g, ' ').trim().substring(0, 120);
-        if (preview) { log(`  ${preview}`); }
+        // Log full lines only (buffer partial tokens until a newline arrives).
+        emitOutputLines(text);
         // Feed the office activity stream (coalesced).
         _activityBuf += text;
         scheduleActivity();
@@ -268,6 +288,7 @@ export function sendGrokPrompt(
     } else if (type === 'end') {
       // Genuine turn-end from grok's stream → real session boundary.
       _endSeen = true;
+      flushOutputLine();             // print any half-line still buffered
       flushActivity();               // emit any buffered assistant text first
       _emitGrokHook(root, 'Stop', {});
       _emitGrokHook(root, 'SessionEnd', { reason: 'completed' });
@@ -294,6 +315,7 @@ export function sendGrokPrompt(
 
   child.on('close', (code: number | null) => {
     if (watchdog) { clearTimeout(watchdog); }
+    flushOutputLine();               // print any half-line still buffered
     flushActivity();                 // flush any trailing assistant text
     errRl?.close();
     rl.close();

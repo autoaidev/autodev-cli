@@ -221,6 +221,26 @@ export function sendGrokPrompt(
   // synthetic padding). `_endSeen` avoids a duplicate SessionEnd on close.
   let _endSeen = false;
 
+  // Grok exposes NO tool events in streaming-json (tool use is hidden under
+  // --always-approve), so pixel-office's activity feed would otherwise be empty
+  // apart from the SessionStart/End boundaries. Surface the assistant's streamed
+  // TEXT as periodic, coalesced `Notification` hook events so the office shows
+  // what grok is actually producing (not raw per-chunk spam).
+  let _activityBuf = '';
+  let _activityTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushActivity = (): void => {
+    if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
+    const t = _activityBuf.trim();
+    _activityBuf = '';
+    if (!t) { return; }
+    const preview = t.length > 280 ? t.slice(0, 277) + '…' : t;
+    _emitGrokHook(root, 'Notification', { message: preview, title: 'grok', tool_name: 'grok' });
+  };
+  const scheduleActivity = (): void => {
+    if (_activityBuf.length >= 400) { flushActivity(); return; }
+    if (!_activityTimer) { _activityTimer = setTimeout(flushActivity, 1200); }
+  };
+
   rl.on('line', (line: string) => {
     if (!line.trim()) { return; }
     let msg: any;
@@ -239,6 +259,9 @@ export function sendGrokPrompt(
         try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ }
         const preview = text.replace(/\r?\n/g, ' ').trim().substring(0, 120);
         if (preview) { log(`  ${preview}`); }
+        // Feed the office activity stream (coalesced).
+        _activityBuf += text;
+        scheduleActivity();
       }
     } else if (type === 'error') {
       const errMsg: string = msg.message ?? JSON.stringify(msg);
@@ -247,6 +270,7 @@ export function sendGrokPrompt(
     } else if (type === 'end') {
       // Genuine turn-end from grok's stream → real session boundary.
       _endSeen = true;
+      flushActivity();               // emit any buffered assistant text first
       _emitGrokHook(root, 'Stop', {});
       _emitGrokHook(root, 'SessionEnd', { reason: 'completed' });
     }
@@ -272,6 +296,7 @@ export function sendGrokPrompt(
 
   child.on('close', (code: number | null) => {
     if (watchdog) { clearTimeout(watchdog); }
+    flushActivity();                 // flush any trailing assistant text
     errRl?.close();
     rl.close();
     _activeChildren.delete(root);

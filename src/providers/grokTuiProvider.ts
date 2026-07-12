@@ -17,7 +17,8 @@
 // streaming-json lines are parsed; assistant text chunks are appended to
 // stdoutFile. exitFile is written when the process exits.
 //
-// Default model: sxs-claude-opus-4-6. Override via settings.grokModel.
+// Model: none is forced — grok uses the account's own default. Set an explicit,
+// VALID model via settings.grokModel to override (`grok models` lists them).
 // ---------------------------------------------------------------------------
 
 import * as path from 'path';
@@ -33,9 +34,6 @@ import type { ProviderId } from '../providers';
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/** Default model. Override via settings.grokModel. */
-export const GROK_DEFAULT_MODEL = 'sxs-claude-opus-4-6';
 
 /** Path to the grok binary — use env override for non-default installs. */
 const GROK_BIN = process.env['GROK_BIN'] ?? (() => {

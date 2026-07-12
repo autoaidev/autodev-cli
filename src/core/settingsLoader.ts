@@ -76,8 +76,8 @@ export interface AutodevSettings {
   sessionName: string;
   /**
    * Optional model override for Grok TUI. When set, passes `-m <value>` to
-   * the `grok` command. Leave empty to use the default (sxs-claude-opus-4-6).
-   * Run `grok models` to list available models.
+   * the `grok` command. Leave empty (the default) to force NO model, so grok
+   * uses the account's own default. Run `grok models` to list valid models.
    */
   grokModel: string;
   /**

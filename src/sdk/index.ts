@@ -32,12 +32,12 @@ class LoopApi {
     const log = options.log ?? console.log;
     // Provider resolution order: explicit option → `.autodev/settings.json`
     // provider (parity with the VS Code shell, which reads the same field) →
-    // 'claude-cli' fallback. Guard against an unknown settings value.
+    // 'claude-tui' fallback. Guard against an unknown settings value.
     const settingsProvider = loadSettingsForRoot(root).provider as ProviderId | undefined;
     const provider: ProviderId =
       options.provider
       ?? (settingsProvider && settingsProvider in PROVIDERS ? settingsProvider : undefined)
-      ?? 'claude-cli';
+      ?? 'claude-tui';
     const callbacks = {
       workspaceRoot: root,
       fileWatcher: new NodeFileWatcher(),

@@ -12,7 +12,7 @@ export function startCommand(program: Command): void {
     .description('Start the autonomous task loop in a workspace directory')
     .option(
       '-p, --provider <provider>',
-      `AI provider: ${PROVIDERS.join(' | ')} (default: .autodev/settings.json, else claude-cli)`,
+      `AI provider: ${PROVIDERS.join(' | ')} (default: .autodev/settings.json, else claude-tui)`,
     )
     .option('--todo <file>', 'Path to TODO.md (relative to workspace)', 'TODO.md')
     .option('--once', 'Run until the TODO drains, then exit (default: poll forever)')

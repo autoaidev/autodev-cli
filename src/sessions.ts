@@ -20,7 +20,7 @@ export interface SessionInfo {
  *  from settings and include claude + opencode (the inspectable stores). */
 export function collectSessions(root: string, provider?: ProviderId): SessionInfo[] {
   const settings = loadSettingsForRoot(root);
-  const fam = (provider ?? settings.provider ?? 'claude-cli');
+  const fam = (provider ?? settings.provider ?? 'claude-tui');
   const out: SessionInfo[] = [];
 
   const wantClaude = fam.startsWith('claude') || !provider;

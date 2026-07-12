@@ -155,7 +155,7 @@ export function initCommand(program: Command): void {
   program
     .command('init [path]')
     .description('Initialise a workspace: create TODO.md and .autodev/settings.json')
-    .option('-p, --provider <provider>', 'Default AI provider', 'claude-cli')
+    .option('-p, --provider <provider>', 'Default AI provider', 'claude-tui')
     .option('--ide <ide>', 'Launch IDE after init: vscode | cursor')
     .option('--no-launch', 'Do not actually launch the IDE (only install extension)')
     .option('--no-extension', 'Skip auto-installing the autoaidev extension')

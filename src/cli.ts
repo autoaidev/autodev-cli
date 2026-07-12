@@ -45,7 +45,7 @@ const program = new Command()
   //   autodev --setup-url=https://… --ide=cursor .
   //   autodev --connect=wss://host?token=…&endpoint=… .
   .option('--ide <ide>', 'Init and launch the workspace in an IDE (vscode | cursor)')
-  .option('-p, --provider <provider>', 'Default AI provider', 'claude-cli')
+  .option('-p, --provider <provider>', 'Default AI provider', 'claude-tui')
   .option('--force', 'Overwrite existing files (with --ide)')
   .option('--no-extension', 'Skip auto-installing the autoaidev extension (with --ide)')
   .option('--connect <wsurl>', 'Bind the workspace to a ws:// / wss:// URL with ?token=&endpoint=')

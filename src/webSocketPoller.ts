@@ -41,7 +41,7 @@ export class WebSocketPoller {
   private _fragChunks: Buffer[] = [];
   private _onConnect: (() => void) | null = null;
   private _onTaskAppend: (() => void) | null = null;
-  private _onSteer: ((text: string) => void) | null = null;
+  private _onSteer: ((text: string, onDelivered: () => void) => void) | null = null;
   private _onCommand: ((cmd: string) => void) | null = null;
   private _onMcpUpdate: ((entries: Record<string, unknown>) => void) | null = null;
   private _onExportRequest: ((agentId: string) => void) | null = null;
@@ -79,7 +79,7 @@ export class WebSocketPoller {
   setOnTaskAppend(cb: () => void): void { this._onTaskAppend = cb; }
 
   /** Called when an instant/steer message arrives — delivered live, NOT queued to TODO. */
-  setOnSteer(cb: (text: string) => void): void { this._onSteer = cb; }
+  setOnSteer(cb: (text: string, onDelivered: () => void) => void): void { this._onSteer = cb; }
 
   /** Called when a slash command (e.g. /restart) is received via WS push. */
   setOnCommand(cb: (cmd: string) => void): void { this._onCommand = cb; }
@@ -666,8 +666,11 @@ export class WebSocketPoller {
         steerText = steerText.replace(/\r\n|\r|\n/g, ' ').trim();
         if (!steerText) { return; }
         this._log(`WS steer received: "${steerText}"`);
-        if (taskId) { this._markSeenDelivery(taskId); }
-        this._onSteer?.(steerText);
+        // At-least-once (mirror the user_message path below): mark the delivery
+        // seen only AFTER the steer is durably handled — mid-turn injection or a
+        // successful TODO append. On failure we leave it unseen so the server's
+        // reconnect replay re-delivers it instead of silently dropping it.
+        this._onSteer?.(steerText, () => { if (taskId) { this._markSeenDelivery(taskId); } });
         return;
       }
 

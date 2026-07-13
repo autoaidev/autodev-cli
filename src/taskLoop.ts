@@ -425,7 +425,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setRdpEnabled(settings.rdpEnabled ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
-      this._webhookPoller.setOnSteer((text) => this._handleSteer(text));
+      this._webhookPoller.setOnSteer((text, onDelivered) => this._handleSteer(text, onDelivered));
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
       this._webhookPoller.setOnExportRequest((agentId) => void this._handleExportRequest(agentId));
@@ -798,9 +798,11 @@ export class TaskLoopRunner {
    *     and wake the idle sleep so it runs at the very next turn boundary rather
    *     than waiting for a poll interval. This is the documented fallback.
    */
-  private _handleSteer(text: string): void {
+  private _handleSteer(text: string, onDelivered?: () => void): void {
     const clean = text.trim();
-    if (!clean) { return; }
+    // Malformed/empty steer: nothing to deliver — treat as terminally handled so
+    // the server doesn't keep replaying it.
+    if (!clean) { onDelivered?.(); return; }
     const root = this._workspaceRoot;
     const provider = this._cb?.getActiveProvider() ?? '';
 
@@ -809,6 +811,7 @@ export class TaskLoopRunner {
     if (root && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
       if (steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
+        onDelivered?.(); // durably injected into the live turn
         return;
       }
     }
@@ -817,12 +820,21 @@ export class TaskLoopRunner {
     // idle sleep so an idle loop starts immediately instead of waiting a poll.
     const todoPath = this._settings?.todoPath || (root ? path.join(root, 'TODO.md') : '');
     if (!todoPath) {
+      // No TODO path is a terminal config error, not a transient failure —
+      // redelivery cannot help, so mark it handled to avoid an infinite replay.
       this._cb?.log(`⚡ Steer dropped — no TODO path (text: "${clean.slice(0, 80)}")`);
+      onDelivered?.();
       return;
     }
     this._cb?.log(`⚡ Steer queued for next turn boundary: "${clean.slice(0, 80)}"`);
     todoWriter.append(todoPath, clean, shortId())
-      .then(() => this._wakeIdleSleep())
+      .then(() => {
+        // At-least-once: only mark the delivery seen AFTER the durable append
+        // succeeds, mirroring the user_message path. Left unmarked on failure so
+        // the server's reconnect replay re-delivers instead of losing the steer.
+        onDelivered?.();
+        this._wakeIdleSleep();
+      })
       .catch(err => this._cb?.log(`⚡ Steer append failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 

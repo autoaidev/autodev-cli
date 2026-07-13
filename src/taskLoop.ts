@@ -2251,12 +2251,28 @@ export class TaskLoopRunner {
         // every stdout-teeing provider so a throttled grok/copilot exit pauses
         // instead of being force-marked done.
         const exitStdout = readStdoutFile();
+        // Read the process exit code. Auth-failure detection must be gated on a
+        // NON-ZERO exit: for claude-tui the stdout capture IS the model's own
+        // assistant transcript, so a *successful* task (exit 0) whose output
+        // legitimately contains {"type":"authentication_error"} — e.g. code
+        // working on Anthropic API handling, or a pasted 401 body — would trip
+        // AuthDetector and pause the loop indefinitely over benign output. Real
+        // auth/credit failures exit non-zero (the provider appends `[Error: …]`),
+        // so gating on the exit code loses nothing. Rate-limit detection stays
+        // ungated — its phrases are error-scoped and a throttle can surface on a
+        // zero exit for some providers.
+        const exitCodeRaw = this._workspaceRoot
+          ? ((): string => { try { return fs.readFileSync(exitFilePath(this._workspaceRoot!, activeProvider), 'utf8').trim(); } catch { return ''; } })()
+          : '';
+        const exitedNonZero = exitCodeRaw !== '' && exitCodeRaw !== '0';
         if (teesStdout) {
-          const authFromStdout = AuthDetector.detect(exitStdout);
-          if (authFromStdout) {
-            cleanup();
-            reject(authFromStdout);
-            return;
+          if (exitedNonZero) {
+            const authFromStdout = AuthDetector.detect(exitStdout);
+            if (authFromStdout) {
+              cleanup();
+              reject(authFromStdout);
+              return;
+            }
           }
           const rlFromStdout = RateLimitDetector.detect(exitStdout);
           if (rlFromStdout) {

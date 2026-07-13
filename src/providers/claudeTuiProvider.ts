@@ -102,7 +102,7 @@ export function getClaudeTuiLatestSessionId(root: string): string | undefined {
  * Returns true if the message was injected into a live session; false when
  * there is no live client for this root (caller should fall back to queuing).
  */
-export function steerClaudeTui(root: string, text: string, log: (msg: string) => void): boolean {
+export async function steerClaudeTui(root: string, text: string, log: (msg: string) => void): Promise<boolean> {
   const client = _clients.get(root);
   if (!client) { return false; }
   const raw = client.raw as RawSteerClient;
@@ -113,12 +113,17 @@ export function steerClaudeTui(root: string, text: string, log: (msg: string) =>
     // queueMessage sends immediately when idle, or enqueues behind the raw
     // client's in-flight message; sendMessage always writes now. Prefer
     // sendMessage for a busy turn (true mid-turn injection), fall back to queue.
+    //
+    // Await the write so a stdin failure (process died between the busy check
+    // and the write, or the pipe closed) rejects here and returns false — the
+    // caller then falls back to the durable TODO append instead of marking the
+    // steer delivered on a silently-dropped write (at-least-once invariant).
     if (_busyRoots.has(root) && typeof raw.sendMessage === 'function') {
-      void raw.sendMessage(text);
+      await raw.sendMessage(text);
     } else if (typeof raw.queueMessage === 'function') {
       raw.queueMessage(text);
     } else {
-      void raw.sendMessage(text);
+      await raw.sendMessage(text);
     }
     log(`Claude TUI: steered live session (${text.length} chars) — injected into current turn`);
     return true;

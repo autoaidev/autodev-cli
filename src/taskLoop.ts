@@ -838,6 +838,13 @@ export class TaskLoopRunner {
     const verify = String(env.MCP_EMAIL_SERVER_IMAP_VERIFY_SSL ?? 'true').toLowerCase() !== 'false';
     const allowed = (env.AUTODEV_EMAIL_ALLOWED_SENDERS || '')
       .split(',').map(s => s.trim()).filter(Boolean);
+    // Fail closed: an empty allowlist would otherwise ingest autonomous,
+    // full-tool-access instructions from ANY sender who guesses the mailbox.
+    // Require an explicit allowlist before enabling inbound email tasks.
+    if (allowed.length === 0) {
+      this._cb?.log('🔒 Inbound email tasks disabled — set AUTODEV_EMAIL_ALLOWED_SENDERS to an explicit sender allowlist to enable them.');
+      return null;
+    }
     return new EmailTaskPoller({ host, port, secure, user, pass, allowedSenders: allowed, rejectUnauthorized: verify });
   }
 

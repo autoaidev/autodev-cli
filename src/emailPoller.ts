@@ -25,7 +25,7 @@ export interface EmailPollerOptions {
   secure: boolean;
   user: string;
   pass: string;
-  /** Empty array = allow every sender. */
+  /** Sender allowlist (regex/substring patterns). Empty array = allow NOBODY. */
   allowedSenders: string[];
   /** Verify TLS cert. Default true. */
   rejectUnauthorized?: boolean;
@@ -173,7 +173,10 @@ export class EmailTaskPoller {
   }
 
   private _senderAllowed(address?: string | null): boolean {
-    if (this.allowed.length === 0) return true;
+    // Fail closed: an empty allowlist allows NOBODY. Inbound email runs
+    // autonomous, full-tool-access tasks, so it must never be an open relay for
+    // anyone who guesses the mailbox address.
+    if (this.allowed.length === 0) return false;
     if (!address) return false;
     const addr = address.toLowerCase();
     return this.allowed.some(p => p.test(addr));

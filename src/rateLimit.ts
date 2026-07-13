@@ -31,6 +31,50 @@ const PHRASES: ReadonlyArray<RegExp> = [
   /·\s*rate limited/i,                  // "... · Rate limited" suffix banner
 ];
 
+/**
+ * Raised when the provider CLI reports it is logged out / unauthenticated /
+ * out of credit — a state the loop must NOT treat as task failure. Unlike a
+ * rate limit there is no reset time: the loop pauses indefinitely and asks the
+ * operator to re-authenticate.
+ */
+export class AuthError extends Error {
+  constructor(readonly rawMessage: string) {
+    super(rawMessage);
+    this.name = 'AuthError';
+  }
+}
+
+/**
+ * Phrases that mean "the CLI is not authenticated / out of credit". These are
+ * high-signal provider error strings (invalid key, expired/revoked token,
+ * /login prompt, low balance) that never appear in ordinary assistant prose,
+ * so they are safe to match case-insensitively across the captured output.
+ */
+const AUTH_PHRASES: ReadonlyArray<RegExp> = [
+  /invalid api key/i,                                    // Claude: "Invalid API key · Please run /login"
+  /credit balance is too low/i,                          // Anthropic out-of-credit banner
+  /please run\s+\/login/i,                               // explicit re-login instruction
+  /oauth token[^\n]{0,60}(expired|revoked|invalid)/i,    // token lifecycle failure
+  /authentication_error/i,                               // Anthropic API error type
+  // "not logged in / authenticated" only when paired with a re-auth instruction
+  // (a bare mention appears in ordinary code the agent writes).
+  /not (logged in|authenticated)[^\n]{0,40}(log ?in|authenticate|run|sign in|\/login)/i,
+];
+
+export class AuthDetector {
+  /** True when text contains any known auth-failure phrase. */
+  static matches(text: string): boolean {
+    if (!text) { return false; }
+    return AUTH_PHRASES.some(p => p.test(text));
+  }
+
+  /** Build an AuthError from text, or null when text is not an auth failure. */
+  static detect(text: string): AuthError | null {
+    if (!AuthDetector.matches(text)) { return null; }
+    return new AuthError((text ?? '').trim() || 'Authentication required');
+  }
+}
+
 export class RateLimitDetector {
   /** True when text contains any known rate-limit phrase. */
   static matches(text: string): boolean {

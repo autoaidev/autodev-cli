@@ -9,7 +9,7 @@ import { parseTodoContent, countRemaining, parseTodo, appendTask, markInProgress
 import { replaceProjectBuiltinMcp, saveProjectUserMcp, loadProjectAllMcp, isRemoteMcp, isSafeStdioMcpCommand, sanitizeRemoteMcpEntries } from '../out/core/projectMcp.js';
 import { officeWsUrl, describePush } from '../out/commands/mcpOperate.js';
 import { saveAttachment } from '../out/messageBuilder.js';
-import { RateLimitDetector } from '../out/rateLimit.js';
+import { RateLimitDetector, AuthDetector } from '../out/rateLimit.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
 
 let pass = 0;
@@ -137,6 +137,22 @@ ok('RateLimitDetector matches banners, not prose', () => {
   assert.ok(RateLimitDetector.matches('Working... · Rate limited'));
   assert.ok(!RateLimitDetector.matches('I added rate limiting to the API endpoint'));
   assert.ok(!RateLimitDetector.matches('The rate limit is 100 requests per second'));
+});
+
+// Auth-failure detection: real logged-out banners match, ordinary prose does not.
+ok('AuthDetector matches auth-failure banners, not prose', () => {
+  assert.ok(AuthDetector.matches('Invalid API key · Please run /login'));
+  assert.ok(AuthDetector.matches('Your credit balance is too low to access the Anthropic API'));
+  assert.ok(AuthDetector.matches('API Error: 401 {"type":"authentication_error"}'));
+  assert.ok(AuthDetector.matches('OAuth token has expired, please sign in again'));
+  assert.ok(AuthDetector.matches('You are not logged in. Run /login to authenticate.'));
+  // Ordinary code / prose the agent might write must NOT pause the loop.
+  assert.ok(!AuthDetector.matches('I added an auth guard that returns 401 when the user is not authenticated'));
+  assert.ok(!AuthDetector.matches('The API key is stored in the environment'));
+  assert.ok(!AuthDetector.matches('validate the api key against the database'));
+  // detect() returns a non-null AuthError only for a real banner.
+  assert.ok(AuthDetector.detect('Invalid API key · Please run /login') !== null);
+  assert.ok(AuthDetector.detect('just some normal output') === null);
 });
 
 // mcp_update hardening: shell/path commands are rejected, launchers + remote allowed.

@@ -18,7 +18,7 @@ export type WebhookEvent =
   | 'loop_start' | 'loop_complete'
   | 'task_start' | 'task_done' | 'task_fail' | 'task_progress' | 'task_checkin'
   | 'task_output' | 'all_tasks_done'
-  | 'rate_limit' | 'claude_output';
+  | 'rate_limit' | 'reauth_required' | 'claude_output';
 
 export class WebhookClient {
   private readonly contextId: string;

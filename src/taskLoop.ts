@@ -39,7 +39,7 @@ export type LoopState = 'idle' | 'running' | 'stopping' | 'paused';
 // Rate-limit + context-length errors
 // ---------------------------------------------------------------------------
 
-import { RateLimitError, RateLimitDetector } from './rateLimit';
+import { RateLimitError, RateLimitDetector, AuthError, AuthDetector } from './rateLimit';
 import { CliExitHandler } from './cliExit';
 
 class ContextLengthError extends Error {
@@ -1579,6 +1579,31 @@ export class TaskLoopRunner {
           }
         }
       } catch (err) {
+        // --- Auth required: pause INDEFINITELY, never mark the task done ----
+        // A logged-out / out-of-credit CLI is not a task failure. Put the task
+        // back to [ ], flip the office to a distinct 'needs reauth' state, and
+        // block until the operator re-authenticates and clicks Retry.
+        if (err instanceof AuthError) {
+          const rawMsg = err.rawMessage.slice(0, 300);
+          const currentProvider = this._cb?.getActiveProvider() ?? 'unknown';
+          this._cb?.log(`🔑 Authentication required (${currentProvider}) — pausing loop until re-auth. ${rawMsg}`);
+          this._notifyDiscord(`🔑 **Authentication required** (${currentProvider}) — loop paused until you re-authenticate.\n\`\`\`\n${rawMsg}\n\`\`\``);
+          this._notifyWebhook('reauth_required', {
+            iteration: this._iterations,
+            task:      { text: task.text },
+            message:   rawMsg,
+            provider:  currentProvider,
+            workDir:   this._workspaceRoot,
+            gitRepo:   this._gitRepo,
+            gitBranch: this._gitBranch,
+          });
+          // Never markDone — restore the task so it is retried after re-auth.
+          await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+          // Pause indefinitely (no auto-resume) — operator must re-auth + Retry.
+          await this._pauseLoop();
+          if (this._state !== 'running') { break; }
+          continue;
+        }
         // --- Rate limit: pause loop, schedule auto-resume -----------------
         if (err instanceof RateLimitError) {
           // Two flavours:
@@ -2026,6 +2051,18 @@ export class TaskLoopRunner {
           lastStdoutLen = content.length; // keep cursor up to date
         }
 
+        // Auth failure detection — highest priority. A logged-out / out-of-credit
+        // CLI exits fast with no rate-limit or context signal, so without this it
+        // was walked remind->give_up and the whole backlog was falsely marked [x].
+        {
+          const authErr = AuthDetector.detect(content);
+          if (authErr) {
+            cleanup();
+            reject(authErr);
+            return;
+          }
+        }
+
         // Rate limit detection — run for every stdout-teeing provider. The
         // RateLimitDetector phrases are scoped to error/banner forms, so this
         // is safe to apply provider-agnostically (grok/copilot were previously
@@ -2109,6 +2146,12 @@ export class TaskLoopRunner {
         // instead of being force-marked done.
         const exitStdout = readStdoutFile();
         if (teesStdout) {
+          const authFromStdout = AuthDetector.detect(exitStdout);
+          if (authFromStdout) {
+            cleanup();
+            reject(authFromStdout);
+            return;
+          }
           const rlFromStdout = RateLimitDetector.detect(exitStdout);
           if (rlFromStdout) {
             cleanup();

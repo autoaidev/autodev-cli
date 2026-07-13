@@ -134,6 +134,13 @@ export class WebhookPoller {
     }
   }
 
+  /** Register a callback for instant/steer messages (delivered live, not queued). */
+  setOnSteer(cb: (text: string) => void): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setOnSteer(cb);
+    }
+  }
+
   setOnCommand(cb: (cmd: string) => void): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setOnCommand(cb);

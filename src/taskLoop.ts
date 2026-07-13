@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { execSync } from 'child_process';
-import { parseTodo, pickNextTask, countRemaining, Task, pruneTodoToArchive } from './todo';
+import { parseTodo, pickNextTask, countRemaining, Task, pruneTodoToArchive, shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
 import { buildPrompt } from './prompt';
 import { writeMessageFile } from './messageBuilder';
@@ -14,7 +14,7 @@ import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession,
 import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/opencodeCliProvider';
 import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedCleanly } from './openCodeHooksManager';
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
-import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui } from './providers/claudeTuiProvider';
+import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk } from './providers/opencodeSdkProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
@@ -420,6 +420,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setGitEnabled(settings.gitEnabled ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
+      this._webhookPoller.setOnSteer((text) => this._handleSteer(text));
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
       this._webhookPoller.setOnExportRequest((agentId) => void this._handleExportRequest(agentId));
@@ -748,6 +749,45 @@ export class TaskLoopRunner {
         }
       }
     }
+  }
+
+  /**
+   * Handle an instant/steer message pushed over the WS. Unlike a normal task
+   * (which is queued to TODO and picked up on the next poll), a steer is meant
+   * to reach the agent *now*:
+   *
+   *   • claude-tui, mid-turn  → inject the text straight into the running turn
+   *     (true mid-turn steering via the live stdin session).
+   *   • otherwise (idle, or a provider without a live session) → append to TODO
+   *     and wake the idle sleep so it runs at the very next turn boundary rather
+   *     than waiting for a poll interval. This is the documented fallback.
+   */
+  private _handleSteer(text: string): void {
+    const clean = text.trim();
+    if (!clean) { return; }
+    const root = this._workspaceRoot;
+    const provider = this._cb?.getActiveProvider() ?? '';
+
+    // True mid-turn injection — only claude-tui keeps a live steerable session,
+    // and only while a turn is actually running.
+    if (root && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
+      if (steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
+        this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
+        return;
+      }
+    }
+
+    // Fallback: deliver at the next turn boundary. Append to TODO and wake the
+    // idle sleep so an idle loop starts immediately instead of waiting a poll.
+    const todoPath = this._settings?.todoPath || (root ? path.join(root, 'TODO.md') : '');
+    if (!todoPath) {
+      this._cb?.log(`⚡ Steer dropped — no TODO path (text: "${clean.slice(0, 80)}")`);
+      return;
+    }
+    this._cb?.log(`⚡ Steer queued for next turn boundary: "${clean.slice(0, 80)}"`);
+    todoWriter.append(todoPath, clean, shortId())
+      .then(() => this._wakeIdleSleep())
+      .catch(err => this._cb?.log(`⚡ Steer append failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   // -------------------------------------------------------------------------

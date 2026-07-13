@@ -41,6 +41,13 @@ interface StructuredClient {
   readonly raw: RawClient;
 }
 
+interface RawSteerClient extends RawClient {
+  /** Write a user message to the live process stdin (stream-json input). */
+  sendMessage(text: string): Promise<void>;
+  /** Queue a user message; sends immediately if not currently processing. */
+  queueMessage(text: string): void;
+}
+
 interface LibModule {
   ClaudeClient: {
     init(cfg: Record<string, unknown>): Promise<StructuredClient>;
@@ -79,6 +86,46 @@ export function forceIdleClaudeTui(root: string): void {
 
 export function getClaudeTuiLatestSessionId(root: string): string | undefined {
   return _latestSessionIds.get(root) ?? _clients.get(root)?.sessionId;
+}
+
+/**
+ * Steer the live Claude TUI session mid-turn by injecting a user message
+ * straight into the running process's stdin.
+ *
+ * The persistent client runs `claude --input-format stream-json
+ * --include-partial-messages`, which accepts additional user messages while a
+ * turn is in flight — the CLI folds them into the current turn as steering
+ * (exactly like typing while Claude is working). We bypass the structured
+ * `send()` (which would queue the text as a *separate* next turn) and call the
+ * raw client's `sendMessage()` so the text lands in the turn already running.
+ *
+ * Returns true if the message was injected into a live session; false when
+ * there is no live client for this root (caller should fall back to queuing).
+ */
+export function steerClaudeTui(root: string, text: string, log: (msg: string) => void): boolean {
+  const client = _clients.get(root);
+  if (!client) { return false; }
+  const raw = client.raw as RawSteerClient;
+  if (typeof raw.sendMessage !== 'function' && typeof raw.queueMessage !== 'function') {
+    return false;
+  }
+  try {
+    // queueMessage sends immediately when idle, or enqueues behind the raw
+    // client's in-flight message; sendMessage always writes now. Prefer
+    // sendMessage for a busy turn (true mid-turn injection), fall back to queue.
+    if (_busyRoots.has(root) && typeof raw.sendMessage === 'function') {
+      void raw.sendMessage(text);
+    } else if (typeof raw.queueMessage === 'function') {
+      raw.queueMessage(text);
+    } else {
+      void raw.sendMessage(text);
+    }
+    log(`Claude TUI: steered live session (${text.length} chars) — injected into current turn`);
+    return true;
+  } catch (err) {
+    log(`Claude TUI: steer failed: ${(err as Error)?.message ?? String(err)}`);
+    return false;
+  }
 }
 
 function _getLib(): LibModule {

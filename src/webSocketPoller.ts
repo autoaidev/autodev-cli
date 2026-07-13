@@ -33,6 +33,7 @@ export class WebSocketPoller {
   private _gitEnabled = false;
   private _onConnect: (() => void) | null = null;
   private _onTaskAppend: (() => void) | null = null;
+  private _onSteer: ((text: string) => void) | null = null;
   private _onCommand: ((cmd: string) => void) | null = null;
   private _onMcpUpdate: ((entries: Record<string, unknown>) => void) | null = null;
   private _onExportRequest: ((agentId: string) => void) | null = null;
@@ -61,6 +62,9 @@ export class WebSocketPoller {
 
   /** Called whenever a task is successfully appended to TODO.md via a WS push. */
   setOnTaskAppend(cb: () => void): void { this._onTaskAppend = cb; }
+
+  /** Called when an instant/steer message arrives — delivered live, NOT queued to TODO. */
+  setOnSteer(cb: (text: string) => void): void { this._onSteer = cb; }
 
   /** Called when a slash command (e.g. /restart) is received via WS push. */
   setOnCommand(cb: (cmd: string) => void): void { this._onCommand = cb; }
@@ -555,6 +559,29 @@ export class WebSocketPoller {
         }
       }
       const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
+
+      // ── Instant / steer message ────────────────────────────────────────────
+      // Delivered live to the running turn (mid-turn injection), NOT appended to
+      // TODO. Same A2A task-frame shape as a user_message but event='steer'.
+      if (meta['event'] === 'steer' || meta['event'] === 'instant') {
+        const steerObj = meta['task'] as Record<string, unknown> | undefined;
+        let steerText = typeof steerObj?.['text'] === 'string' ? steerObj['text'] as string : '';
+        if (!steerText) {
+          const parts = meta['parts'] as Array<Record<string, unknown>> | undefined;
+          if (parts) {
+            const texts = parts
+              .filter(p => p['kind'] === 'text' && typeof p['text'] === 'string')
+              .map(p => p['text'] as string);
+            steerText = texts.join(' ');
+          }
+        }
+        steerText = steerText.replace(/\r\n|\r|\n/g, ' ').trim();
+        if (!steerText) { return; }
+        this._log(`WS steer received: "${steerText}"`);
+        this._onSteer?.(steerText);
+        return;
+      }
+
       if (meta['event'] !== 'user_message') { return; }
       const taskObj = meta['task'] as Record<string, unknown> | undefined;
       let taskText = typeof taskObj?.['text'] === 'string' ? taskObj['text'] : '';

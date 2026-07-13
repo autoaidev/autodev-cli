@@ -1,8 +1,51 @@
+import * as fs from 'fs';
 import * as path from 'path';
-import { AdmZipArchive } from './archive';
-import { ARCHIVE_PATHS, ROOT_DOCS, WORKSPACE_DIRS } from './layout';
+import { AdmZipArchive, Archive } from './archive';
+import { ARCHIVE_PATHS, IDENTITY_KEYS, ROOT_DOCS, WORKSPACE_DIRS } from './layout';
 import { SESSION_BACKUP_PROVIDERS } from './sessionProviders';
 import { ProviderManifestEntry, SessionManifest, readSessionState } from './manifest';
+
+/**
+ * Add the workspace `.autodev/` tree to the archive, but with `settings.json`
+ * SANITIZED — the raw file holds the live WS auth token + endpoint (IDENTITY_KEYS)
+ * written at connect time, and a backup ZIP is uploaded off-VM and served by the
+ * download endpoint. Shipping the token would let anyone who fetches the export
+ * connect AS the agent. Every other `.autodev` file is added verbatim so
+ * workspace-state portability is preserved. Symlinks are skipped (walk uses
+ * isFile), which also avoids following a link out of the tree.
+ */
+function addSanitizedAutodev(root: string, archive: Archive): void {
+  const srcDir = path.join(root, '.autodev');
+  if (!fs.existsSync(srcDir)) { return; }
+  const archiveBase = `${ARCHIVE_PATHS.workspace}/.autodev`;
+  const walk = (absDir: string, relDir: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(absDir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const abs = path.join(absDir, e.name);
+      const rel = relDir ? `${relDir}/${e.name}` : e.name;
+      if (e.isDirectory()) { walk(abs, rel); continue; }
+      if (!e.isFile()) { continue; }
+      if (rel === 'settings.json') {
+        archive.addBuffer(`${archiveBase}/settings.json`, sanitizeSettings(abs));
+      } else {
+        archive.addFile(abs, `${archiveBase}/${rel}`);
+      }
+    }
+  };
+  walk(srcDir, '');
+}
+
+/** Read settings.json and return it with all IDENTITY_KEYS stripped. Fails
+ *  closed: an unreadable/malformed file yields an empty object rather than
+ *  shipping the raw (token-bearing) contents. */
+function sanitizeSettings(absPath: string): Buffer {
+  let obj: Record<string, unknown> = {};
+  try { obj = JSON.parse(fs.readFileSync(absPath, 'utf8')) as Record<string, unknown>; }
+  catch { obj = {}; }
+  for (const k of IDENTITY_KEYS) { delete obj[k]; }
+  return Buffer.from(JSON.stringify(obj, null, 2) + '\n', 'utf8');
+}
 
 export interface ExportResult {
   destPath: string;
@@ -20,9 +63,15 @@ export interface ExportResult {
 export async function createAgentBackup(root: string, destPath: string): Promise<ExportResult> {
   const archive = AdmZipArchive.create();
 
-  // Workspace state directories (single source of truth in layout).
+  // Workspace state directories (single source of truth in layout). The
+  // `.autodev` tree is added via a sanitizing walk that strips the agent's WS
+  // auth token from settings.json before it can leave the VM.
   for (const rel of WORKSPACE_DIRS) {
-    archive.addDir(path.join(root, rel), `${ARCHIVE_PATHS.workspace}/${rel}`);
+    if (rel === '.autodev') {
+      addSanitizedAutodev(root, archive);
+    } else {
+      archive.addDir(path.join(root, rel), `${ARCHIVE_PATHS.workspace}/${rel}`);
+    }
   }
 
   // Root-level agent docs.

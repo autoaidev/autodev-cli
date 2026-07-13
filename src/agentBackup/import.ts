@@ -1,16 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AdmZipArchive } from './archive';
-import { ARCHIVE_PATHS, TOP_FOLDER } from './layout';
+import { ARCHIVE_PATHS, TOP_FOLDER, IDENTITY_KEYS } from './layout';
 import { SESSION_BACKUP_PROVIDERS } from './sessionProviders';
 import { parseManifest } from './manifest';
-
-/**
- * Identity/connection settings that belong to the DESTINATION agent, not the
- * backed-up one. Restoring a backup must never overwrite these, or the restored
- * agent would connect as the source agent (identity hijack).
- */
-const IDENTITY_KEYS = ['wsUrl', 'serverBaseUrl', 'serverApiKey', 'webhookSlug', 'agentId'] as const;
 
 export interface ImportResult {
   destRoot: string;

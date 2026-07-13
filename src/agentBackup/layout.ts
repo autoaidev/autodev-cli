@@ -38,6 +38,16 @@ export const WORKSPACE_DIRS: readonly string[] = [
   path.posix.join('media', 'skills'),
 ];
 
+/**
+ * Identity/connection settings in `.autodev/settings.json` that are scoped to a
+ * specific agent and MUST NOT travel in a backup: they are the live WS auth
+ * token + endpoint. Export strips them from the shipped settings.json (a backup
+ * ZIP is uploaded off-VM), and import preserves the destination agent's own
+ * values so a restore never hijacks its identity. Single source of truth shared
+ * by both sides (DRY).
+ */
+export const IDENTITY_KEYS = ['wsUrl', 'serverBaseUrl', 'serverApiKey', 'webhookSlug', 'agentId'] as const;
+
 /** Normalise a filesystem path for comparison (case-insensitive, slash-form). */
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();

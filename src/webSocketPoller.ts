@@ -31,6 +31,10 @@ export class WebSocketPoller {
   private _rdpSessions: Map<string, RdpSession> = new Map();
   private _rdpSettings: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string } = {};
   private _gitEnabled = false;
+  private _fileBrowserEnabled = false;
+  // WebSocket message reassembly (fragmented frames: FIN=0 start + 0x0 continuations).
+  private _fragOpcode = 0;
+  private _fragChunks: Buffer[] = [];
   private _onConnect: (() => void) | null = null;
   private _onTaskAppend: (() => void) | null = null;
   private _onSteer: ((text: string) => void) | null = null;
@@ -269,15 +273,16 @@ export class WebSocketPoller {
     while (true) {
       const frame = this._parseFrame();
       if (!frame) { break; }
-      this._onFrame(frame.opcode, frame.payload);
+      this._onFrame(frame.fin, frame.opcode, frame.payload);
     }
   }
 
-  private _parseFrame(): { opcode: number; payload: Buffer } | null {
+  private _parseFrame(): { fin: boolean; opcode: number; payload: Buffer } | null {
     if (this._buffer.length < 2) { return null; }
 
     const byte1 = this._buffer[0];
     const byte2 = this._buffer[1];
+    const fin = (byte1 & 0x80) !== 0;
     const opcode = byte1 & 0x0f;
     const isMasked = (byte2 & 0x80) !== 0;
     let payloadLen = byte2 & 0x7f;
@@ -311,10 +316,12 @@ export class WebSocketPoller {
     // Consume frame from buffer
     this._buffer = this._buffer.slice(offset + payloadLen);
 
-    return { opcode, payload };
+    return { fin, opcode, payload };
   }
 
-  private _onFrame(opcode: number, payload: Buffer): void {
+  private _onFrame(fin: boolean, opcode: number, payload: Buffer): void {
+    // Control frames (never fragmented) — handle immediately; they may be
+    // interleaved between data fragments.
     if (opcode === 0x9) {
       // Ping from server — reply with pong + treat as proof of life
       this._sendPong(payload);
@@ -332,11 +339,30 @@ export class WebSocketPoller {
       this._scheduleReconnect();
       return;
     }
-    if (opcode !== 0x1) { return; } // only handle text frames
+
+    // Data frames: reassemble fragmented messages (FIN=0 start + 0x0 continuations).
+    let full: Buffer;
+    if (opcode === 0x0) {
+      if (!this._fragChunks.length) { return; } // stray continuation — ignore
+      this._fragChunks.push(payload);
+      if (!fin) { return; }
+      opcode = this._fragOpcode;
+      full = Buffer.concat(this._fragChunks);
+      this._fragChunks = [];
+    } else if (!fin) {
+      // First fragment of a new message — start accumulating.
+      this._fragOpcode = opcode;
+      this._fragChunks = [payload];
+      return;
+    } else {
+      full = payload; // unfragmented single frame
+    }
+
+    if (opcode !== 0x1) { return; } // only text frames carry our JSON
 
     let msg: Record<string, unknown>;
-    try { msg = JSON.parse(payload.toString('utf8')); }
-    catch { return; }
+    try { msg = JSON.parse(full.toString('utf8')); }
+    catch (err) { this._log(`WS frame JSON parse failed: ${err}`); return; }
 
     const msgType = msg['type'] as string | undefined;
 
@@ -644,21 +670,32 @@ export class WebSocketPoller {
       this.sendFrame({ type: 'fb_response', requestId, ok, ...extra });
     };
 
+    if (!this._fileBrowserEnabled) {
+      respond(false, { error: 'File browser not enabled' });
+      return;
+    }
+
     const root = this._workspaceRoot;
     if (!root) {
       respond(false, { error: 'No workspace root configured' });
       return;
     }
 
-    // Resolve and validate path is within workspace root
-    const resolveSafe = (rel: string): string | null => {
+    // Resolve and validate path is within workspace root. The root itself is
+    // permitted for read-only actions (list/search) but never for mutations.
+    const resolveSafe = (rel: string, allowRoot: boolean): string | null => {
       const resolved = path.resolve(root, rel);
-      return resolved.startsWith(root + path.sep) || resolved === root ? resolved : null;
+      if (resolved === root) { return allowRoot ? resolved : null; }
+      return resolved.startsWith(root + path.sep) ? resolved : null;
     };
 
-    const absPath = resolveSafe(relPath);
+    const MUTATING = new Set(['write', 'delete', 'rename', 'mkdir']);
+    const allowRoot = !MUTATING.has(action);
+    const absPath = resolveSafe(relPath, allowRoot);
     if (!absPath) {
-      respond(false, { error: 'Path outside workspace' });
+      respond(false, {
+        error: allowRoot ? 'Path outside workspace' : 'Refusing to modify workspace root',
+      });
       return;
     }
 
@@ -726,7 +763,7 @@ export class WebSocketPoller {
             respond(false, { error: 'No newPath provided' });
             break;
           }
-          const absNewPath = resolveSafe(newPath);
+          const absNewPath = resolveSafe(newPath, false);
           if (!absNewPath) {
             respond(false, { error: 'newPath outside workspace' });
             break;
@@ -737,6 +774,12 @@ export class WebSocketPoller {
         }
 
         case 'download': {
+          const stat = fs.statSync(absPath);
+          const MAX_DOWNLOAD_BYTES = 25 * 1_048_576; // 25 MB — base64 ~1.33x in heap
+          if (stat.size > MAX_DOWNLOAD_BYTES) {
+            respond(false, { error: `File too large (${stat.size} bytes, limit 25 MB)` });
+            break;
+          }
           const buf = fs.readFileSync(absPath);
           respond(true, { base64: buf.toString('base64') });
           break;
@@ -888,6 +931,10 @@ export class WebSocketPoller {
 
   setGitEnabled(enabled: boolean): void {
     this._gitEnabled = enabled;
+  }
+
+  setFileBrowserEnabled(enabled: boolean): void {
+    this._fileBrowserEnabled = enabled;
   }
 
   setRdpSettings(s: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string }): void {

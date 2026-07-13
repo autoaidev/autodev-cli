@@ -114,6 +114,12 @@ export class WebhookPoller {
     }
   }
 
+  setFileBrowserEnabled(enabled: boolean): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setFileBrowserEnabled(enabled);
+    }
+  }
+
   setRdpSettings(s: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string }): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setRdpSettings(s);

@@ -418,6 +418,7 @@ export class TaskLoopRunner {
     }
     if (this._webhookPoller) {
       this._webhookPoller.setGitEnabled(settings.gitEnabled ?? false);
+      this._webhookPoller.setFileBrowserEnabled(settings.enableFileBrowser ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
       this._webhookPoller.setOnSteer((text) => this._handleSteer(text));
@@ -2292,8 +2293,9 @@ export class TaskLoopRunner {
           }
         }
 
-        // Also check stdout capture file as poller fallback (watcher handles most cases)
-        checkStdout();
+        // (stdout capture file is already checked once at the top of this tick via
+        // checkStdout() at line ~2215; a second scan here was redundant and doubled
+        // the per-tick cost of re-reading the growing stdout file.)
 
         // Track JSONL activity
         const currentSize = getClaudeSessionCursor(this._workspaceRoot);

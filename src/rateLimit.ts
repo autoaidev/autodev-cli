@@ -55,7 +55,12 @@ const AUTH_PHRASES: ReadonlyArray<RegExp> = [
   /credit balance is too low/i,                          // Anthropic out-of-credit banner
   /please run\s+\/login/i,                               // explicit re-login instruction
   /oauth token[^\n]{0,60}(expired|revoked|invalid)/i,    // token lifecycle failure
-  /authentication_error/i,                               // Anthropic API error type
+  // "authentication_error" ONLY inside the provider's API-error framing or a JSON
+  // error body. A bare occurrence appears in ordinary code/prose the agent writes
+  // ("handle the authentication_error case", a pasted Stripe/Anthropic 401
+  // snippet), which previously bricked the loop into a false reauth pause.
+  /api error[^\n]{0,160}authentication_error/i,          // "API Error: 401 ... authentication_error"
+  /"type"\s*:\s*"authentication_error"/i,                // {"type":"authentication_error"}
   // "not logged in / authenticated" only when paired with a re-auth instruction
   // (a bare mention appears in ordinary code the agent writes).
   /not (logged in|authenticated)[^\n]{0,40}(log ?in|authenticate|run|sign in|\/login)/i,

@@ -2051,17 +2051,14 @@ export class TaskLoopRunner {
           lastStdoutLen = content.length; // keep cursor up to date
         }
 
-        // Auth failure detection — highest priority. A logged-out / out-of-credit
-        // CLI exits fast with no rate-limit or context signal, so without this it
-        // was walked remind->give_up and the whole backlog was falsely marked [x].
-        {
-          const authErr = AuthDetector.detect(content);
-          if (authErr) {
-            cleanup();
-            reject(authErr);
-            return;
-          }
-        }
+        // Auth-failure detection is intentionally NOT run here mid-stream. For
+        // claude-tui (and other teeing providers) this growing capture is the
+        // model's own assistant transcript, so an ordinary task that merely
+        // mentions auth/login ("handle the authentication_error case") would
+        // trip AuthDetector and brick the running turn into a false reauth
+        // pause. Auth is detected only on the process-EXIT buffer (see onCliExit
+        // below), which is the provider's real failure surface — a logged-out /
+        // out-of-credit CLI exits fast and is caught there.
 
         // Rate limit detection — run for every stdout-teeing provider. The
         // RateLimitDetector phrases are scoped to error/banner forms, so this

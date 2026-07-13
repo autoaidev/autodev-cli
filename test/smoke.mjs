@@ -150,6 +150,10 @@ ok('AuthDetector matches auth-failure banners, not prose', () => {
   assert.ok(!AuthDetector.matches('I added an auth guard that returns 401 when the user is not authenticated'));
   assert.ok(!AuthDetector.matches('The API key is stored in the environment'));
   assert.ok(!AuthDetector.matches('validate the api key against the database'));
+  // "authentication_error" in assistant prose (not an API-error banner) must NOT
+  // fire — this is the false-reauth that bricked the agent on its own transcript.
+  assert.ok(!AuthDetector.matches('Next I will handle the authentication_error case in auth.ts'));
+  assert.ok(!AuthDetector.matches('We throw an authentication_error when the token is missing'));
   // detect() returns a non-null AuthError only for a real banner.
   assert.ok(AuthDetector.detect('Invalid API key · Please run /login') !== null);
   assert.ok(AuthDetector.detect('just some normal output') === null);

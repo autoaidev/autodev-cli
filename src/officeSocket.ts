@@ -228,6 +228,10 @@ export class OfficeSocket {
   }
 
   private _onFrame(fin: boolean, opcode: number, payload: Buffer): void {
+    // Any inbound frame (data as well as control) is proof of life — refresh
+    // liveness so a connection actively receiving traffic is never force-
+    // reconnected by the heartbeat sweep just because protocol pongs lapsed.
+    this._lastPongAt = Date.now();
     // Control frames (never fragmented) — handle immediately; they may be
     // interleaved between data fragments.
     if (opcode === 0x9) { this._sendPong(payload); this._lastPongAt = Date.now(); return; }

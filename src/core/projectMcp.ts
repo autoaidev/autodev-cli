@@ -67,6 +67,43 @@ export function isSafeStdioMcpCommand(command: unknown): command is string {
   return true;
 }
 
+// Interpreter flags that turn an otherwise-legitimate launcher (node/npx/uvx/…)
+// into a direct arbitrary-code primitive: `node -e "require('child_process')…"`,
+// `python -c …`, `node --require=/tmp/evil.js`, `deno --import …`. These never
+// appear in a real MCP server invocation, so reject any arg equal to or
+// prefixing one of them.
+const _MCP_FORBIDDEN_ARG =
+  /^\s*(-e|--eval|-c|--command|-p|--print|--require|--import|--experimental-loader|--loader)(=|$)/i;
+
+// Env vars that inject code / preload a library into the spawned interpreter
+// regardless of its args (NODE_OPTIONS=--require=…, LD_PRELOAD=…). Never valid
+// for an MCP server env block.
+const _MCP_FORBIDDEN_ENV_KEYS = new Set([
+  'NODE_OPTIONS', 'PYTHONSTARTUP', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES',
+  'BUN_INSPECT', 'PERL5OPT', 'RUBYOPT',
+]);
+
+/** Reject an stdio MCP `args` array that carries an interpreter code-exec flag. */
+export function isSafeStdioMcpArgs(args: unknown): boolean {
+  if (args === undefined) return true;
+  if (!Array.isArray(args)) return false;
+  for (const a of args) {
+    if (typeof a !== 'string') return false;
+    if (_MCP_FORBIDDEN_ARG.test(a)) return false;
+  }
+  return true;
+}
+
+/** Reject an stdio MCP `env` block that sets a code-injection / preload var. */
+export function isSafeStdioMcpEnv(env: unknown): boolean {
+  if (env === undefined) return true;
+  if (typeof env !== 'object' || env === null || Array.isArray(env)) return false;
+  for (const k of Object.keys(env)) {
+    if (_MCP_FORBIDDEN_ENV_KEYS.has(k.trim().toUpperCase())) return false;
+  }
+  return true;
+}
+
 /**
  * Filter an untrusted `mcpServers` map down to entries that are safe to write
  * and (re)spawn. Remote entries must have an http/https url; stdio entries must
@@ -87,7 +124,11 @@ export function sanitizeRemoteMcpEntries(
       if (/^https?:\/\//i.test(url)) { safe[name] = e; } else { rejected.push(name); }
       continue;
     }
-    if (isSafeStdioMcpCommand(e.command)) { safe[name] = e; } else { rejected.push(name); }
+    if (isSafeStdioMcpCommand(e.command) && isSafeStdioMcpArgs(e.args) && isSafeStdioMcpEnv(e.env)) {
+      safe[name] = e;
+    } else {
+      rejected.push(name);
+    }
   }
   return { safe, rejected };
 }

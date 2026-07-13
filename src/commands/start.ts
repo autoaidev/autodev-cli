@@ -68,6 +68,18 @@ export function startCommand(program: Command): void {
         setTimeout(() => process.exit(0), 1500).unref();
       });
 
+      // Backstop: an unexpected throw or rejection anywhere in the loop (a
+      // hostile WS frame, an I/O error) must not take the whole agent offline
+      // requiring a manual respawn. Log and keep the process alive so it stays
+      // online and serving. The per-frame try/catch in webSocketPoller is the
+      // primary guard; these are the last line of defence.
+      process.on('uncaughtException', (err) => {
+        log.error(`Uncaught exception (kept alive): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      });
+      process.on('unhandledRejection', (reason) => {
+        log.error(`Unhandled rejection (kept alive): ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+      });
+
       try {
         const options: LoopStartOptions = {
           cwd,

@@ -412,6 +412,22 @@ export class WebSocketPoller {
 
     const msgType = msg['type'] as string | undefined;
 
+    // Server app-level heartbeat: reply with a JSON pong so the server's
+    // liveness sweep counts this (primary, task-carrying) connection as alive,
+    // mirroring OfficeSocket. Without this the workhorse connection can be swept
+    // as stale even while the WS-protocol ping/pong keeps flowing.
+    if (msgType === 'ping') {
+      this._sendTextFrame(JSON.stringify({ type: 'pong' }));
+      this._lastPongAt = Date.now();
+      return;
+    }
+
+    // Isolate all downstream frame dispatch: a single throwing frame (malformed
+    // payload, ENOSPC/EACCES while saving an attachment, a containment-guard
+    // throw) must never propagate out of the socket 'data' handler and crash the
+    // whole agent process. Log and drop the frame instead of going offline.
+    try {
+
     // ── VNC frames from pixel-office ─────────────────────────────────────────
 
     // ── MCP update from pixel-office ─────────────────────────────────────────
@@ -717,6 +733,11 @@ export class WebSocketPoller {
           this._onTaskAppend?.();
         })
         .catch(err => { this._log(`WS failed to append task to TODO.md: ${err}`); });
+    }
+
+    } catch (err) {
+      // A bad frame must never take down the socket/process — see the try above.
+      this._log(`WS frame dispatch failed (type=${msgType ?? 'unknown'}): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     }
   }
 

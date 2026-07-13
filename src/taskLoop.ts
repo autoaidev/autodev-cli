@@ -25,9 +25,9 @@ import { PeriodicActionManager, PERIODIC_ACTIONS } from './periodicActions';
 import { DiscordGateway } from './discordGateway';
 import { WebhookPoller } from './webhookPoller';
 import { EmailTaskPoller } from './emailPoller';
-import { loadProjectUserMcp, saveProjectUserMcp } from './core/projectMcp';
+import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
 import { ConfigManager } from './configManager';
-import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup } from './agentBackup';
+import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
 
 // ---------------------------------------------------------------------------
 // TaskLoopRunner — mirrors PHP Loop.php
@@ -419,6 +419,10 @@ export class TaskLoopRunner {
     if (this._webhookPoller) {
       this._webhookPoller.setGitEnabled(settings.gitEnabled ?? false);
       this._webhookPoller.setFileBrowserEnabled(settings.enableFileBrowser ?? false);
+      // VNC / RDP session bridges are honored only when explicitly enabled —
+      // an ungated frame would let a remote party open outbound bridges.
+      this._webhookPoller.setVncEnabled(settings.vncEnabled ?? false);
+      this._webhookPoller.setRdpEnabled(settings.rdpEnabled ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
       this._webhookPoller.setOnSteer((text) => this._handleSteer(text));
@@ -606,11 +610,25 @@ export class TaskLoopRunner {
   private _handleMcpUpdate(entries: Record<string, unknown>): void {
     const root = this._workspaceRoot;
     if (!root) return;
-    this._cb?.log('🔧 mcp_update received — writing .mcp.json and syncing providers…');
+    // Opt-in gate: writing remote-supplied MCP config spawns stdio child
+    // processes on restart (code-execution surface). Ignore unless explicitly
+    // enabled, mirroring enableFileBrowser / gitEnabled.
+    if (!this._settings?.mcpUpdateEnabled) {
+      this._cb?.log('🔒 mcp_update ignored — mcpUpdateEnabled is off (set it in .autodev/settings.json to allow)');
+      return;
+    }
+    this._cb?.log('🔧 mcp_update received — validating and writing .mcp.json…');
+    // Reject entries that would execute an arbitrary shell / path command.
+    const { safe, rejected } = sanitizeRemoteMcpEntries(entries);
+    if (rejected.length) {
+      this._cb?.log(`⚠️ mcp_update dropped ${rejected.length} unsafe entr${rejected.length === 1 ? 'y' : 'ies'}: ${rejected.join(', ')}`);
+    }
+    if (Object.keys(safe).length === 0) {
+      this._cb?.log('⚠️ mcp_update had no safe entries — not writing config or restarting.');
+      return;
+    }
     try {
-      // Cast to the shape saveProjectUserMcp expects
-      const typed = entries as Record<string, { command: string; args?: string[]; env?: Record<string, string>; enabled?: boolean }>;
-      saveProjectUserMcp(root, typed);
+      saveProjectUserMcp(root, safe);
       ConfigManager.syncProjectMcpServers(root, (m) => this._cb?.log(m));
       void ConfigManager.reportProjectMcp(root, (m) => this._cb?.log(m));
       this._cb?.log('✅ MCP config synced to .mcp.json, opencode.json, .vscode/mcp.json — restarting loop…');
@@ -650,6 +668,13 @@ export class TaskLoopRunner {
     const settings = this._settings;
     if (!root || !settings?.serverApiKey) {
       this._cb?.log('⚠️ restore_request ignored — serverApiKey not configured');
+      return;
+    }
+    // The download carries the agent's Bearer credential and overwrites the
+    // workspace, so the URL must point at the configured server origin — never
+    // an attacker-chosen host from the WS frame.
+    if (!isTrustedDownloadUrl(downloadUrl, settings.serverBaseUrl)) {
+      this._cb?.log(`🔒 restore_request refused — downloadUrl origin does not match the configured server: ${downloadUrl}`);
       return;
     }
     this._cb?.log(`🔄 restore_request received — downloading backup from ${downloadUrl}…`);

@@ -32,6 +32,8 @@ export class WebSocketPoller {
   private _rdpSettings: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string } = {};
   private _gitEnabled = false;
   private _fileBrowserEnabled = false;
+  private _vncEnabled = false;
+  private _rdpEnabled = false;
   // WebSocket message reassembly (fragmented frames: FIN=0 start + 0x0 continuations).
   private _fragOpcode = 0;
   private _fragChunks: Buffer[] = [];
@@ -434,6 +436,7 @@ export class WebSocketPoller {
     }
 
     if (msgType === 'vnc_session') {
+      if (!this._vncEnabled) { this._log('vnc_session ignored — VNC not enabled'); return; }
       const action = msg['action'] as string | undefined;
       if (action === 'start') {
         const sessionId = msg['sessionId'] as string;
@@ -476,15 +479,17 @@ export class WebSocketPoller {
     // ── RDP frames from pixel-office ─────────────────────────────────────────
 
     if (msgType === 'rdp_session') {
+      if (!this._rdpEnabled) { this._log('rdp_session ignored — RDP not enabled'); return; }
       const action = msg['action'] as string | undefined;
       if (action === 'start') {
         const sessionId = msg['sessionId'] as string;
         const opts: RdpConnectOptions = {
-          // Local settings take priority: the server-sent host is pixel-office's own IP,
-          // not the target RDP server. Use local rdpHost setting, or default to 127.0.0.1
-          // (xrdp always runs on the same machine as the extension).
-          host:       this._rdpSettings.host || (msg['host'] as string | undefined) || '127.0.0.1',
-          port:       msg['port']     ? Number(msg['port'])     : (this._rdpSettings.port ?? 3389),
+          // Host/port come ONLY from local settings — never from the WS frame.
+          // A frame-supplied host/port would let a remote party open an outbound
+          // RDP bridge to an arbitrary target (SSRF / internal-network pivot).
+          // Default to loopback (xrdp runs on the same machine as the extension).
+          host:       this._rdpSettings.host || '127.0.0.1',
+          port:       this._rdpSettings.port ?? 3389,
           // credentials never sent from server — always use local settings
           username:   this._rdpSettings.username || (msg['username'] as string | undefined),
           password:   this._rdpSettings.password || (msg['password'] as string | undefined),
@@ -935,6 +940,14 @@ export class WebSocketPoller {
 
   setFileBrowserEnabled(enabled: boolean): void {
     this._fileBrowserEnabled = enabled;
+  }
+
+  setVncEnabled(enabled: boolean): void {
+    this._vncEnabled = enabled;
+  }
+
+  setRdpEnabled(enabled: boolean): void {
+    this._rdpEnabled = enabled;
   }
 
   setRdpSettings(s: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string }): void {

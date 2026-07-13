@@ -40,6 +40,14 @@ export interface AutodevSettings {
   rdpGuacWsUrl: string;
   enableFileBrowser: boolean;
   gitEnabled: boolean;
+  /**
+   * Opt-in: honor `mcp_update` frames pushed over the WS channel. When false
+   * (default), inbound mcp_update frames are ignored. Writing remote-supplied
+   * MCP server config spawns stdio child processes on restart, so this is a
+   * code-execution surface and must be explicitly enabled (mirrors
+   * enableFileBrowser / gitEnabled). Even when enabled, entries are validated.
+   */
+  mcpUpdateEnabled: boolean;
   hooksEnabled: boolean;
   hooksScope: 'project' | 'global';
   openCodeHooksEnabled: boolean;
@@ -235,6 +243,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   rdpGuacWsUrl: '',
   enableFileBrowser: false,
   gitEnabled: false,
+  mcpUpdateEnabled: false,
   hooksEnabled: false,
   hooksScope: 'project',
   openCodeHooksEnabled: false,

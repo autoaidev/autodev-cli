@@ -120,6 +120,18 @@ export class WebhookPoller {
     }
   }
 
+  setVncEnabled(enabled: boolean): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setVncEnabled(enabled);
+    }
+  }
+
+  setRdpEnabled(enabled: boolean): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setRdpEnabled(enabled);
+    }
+  }
+
   setRdpSettings(s: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string }): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setRdpSettings(s);

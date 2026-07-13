@@ -25,6 +25,27 @@ function httpOrigin(serverBaseUrl: string): string {
   }
 }
 
+/**
+ * True when `downloadUrl` points at the same origin (scheme+host+port) as the
+ * configured server. Restores attach the agent's `serverApiKey` as a Bearer
+ * token and overwrite the workspace, so a frame-supplied URL to an attacker
+ * host must never be honored (credential exfiltration + workspace poisoning).
+ * Scheme is normalized (ws→http / wss→https) so a wss:// serverBaseUrl matches
+ * an https:// download URL.
+ */
+export function isTrustedDownloadUrl(downloadUrl: string, serverBaseUrl: string): boolean {
+  try {
+    if (!serverBaseUrl) return false;
+    const d = new url.URL(downloadUrl);
+    const expected = new url.URL(httpOrigin(serverBaseUrl));
+    if (d.protocol !== 'http:' && d.protocol !== 'https:') return false;
+    // Require the same normalized scheme + host (host includes an explicit port).
+    return d.protocol === expected.protocol && d.host === expected.host;
+  } catch {
+    return false;
+  }
+}
+
 /** Upload a backup zip to `POST /api/agents/{agentId}/exports`. */
 export async function uploadAgentBackup(
   zipPath: string,

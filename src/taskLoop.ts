@@ -444,7 +444,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setRdpEnabled(settings.rdpEnabled ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
-      this._webhookPoller.setOnSteer((text, onDelivered) => this._handleSteer(text, onDelivered));
+      this._webhookPoller.setOnSteer((text, onDelivered) => void this._handleSteer(text, onDelivered));
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
       this._webhookPoller.setOnExportRequest((agentId) => void this._handleExportRequest(agentId));
@@ -832,7 +832,7 @@ export class TaskLoopRunner {
    *     and wake the idle sleep so it runs at the very next turn boundary rather
    *     than waiting for a poll interval. This is the documented fallback.
    */
-  private _handleSteer(text: string, onDelivered?: () => void): void {
+  private async _handleSteer(text: string, onDelivered?: () => void): Promise<void> {
     const clean = text.trim();
     // Malformed/empty steer: nothing to deliver — treat as terminally handled so
     // the server doesn't keep replaying it.
@@ -841,9 +841,12 @@ export class TaskLoopRunner {
     const provider = this._cb?.getActiveProvider() ?? '';
 
     // True mid-turn injection — only claude-tui keeps a live steerable session,
-    // and only while a turn is actually running.
+    // and only while a turn is actually running. Await the injection: mark the
+    // delivery seen ONLY after the stdin write resolves, so a write that rejects
+    // (dead child / closed pipe) falls through to the durable TODO append below
+    // instead of dropping the steer — preserving at-least-once delivery.
     if (root && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
-      if (steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
+      if (await steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
         onDelivered?.(); // durably injected into the live turn
         return;
@@ -2183,18 +2186,15 @@ export class TaskLoopRunner {
         // below), which is the provider's real failure surface — a logged-out /
         // out-of-credit CLI exits fast and is caught there.
 
-        // Rate limit detection — run for every stdout-teeing provider. The
-        // RateLimitDetector phrases are scoped to error/banner forms, so this
-        // is safe to apply provider-agnostically (grok/copilot were previously
-        // excluded, letting a throttle slip through to a false [x]).
-        {
-          const rlErr = RateLimitDetector.detect(content);
-          if (rlErr) {
-            cleanup();
-            reject(rlErr);
-            return;
-          }
-        }
+        // Rate-limit detection is intentionally NOT run here mid-stream, for the
+        // same reason as auth above: for every stdout-teeing provider this
+        // growing capture IS the model's own assistant transcript, and the
+        // RateLimitDetector phrases (/api error … rate limit/, /· rate limited/)
+        // are exactly what an agent emits while building/debugging 429 handling
+        // or pasting an API-error body into its reasoning — which would falsely
+        // pause a healthy turn. The process-EXIT buffer is the provider's real
+        // throttle surface and is still scanned unconditionally (onCliExit
+        // below), so a genuine rate-limit exit is caught there.
 
         // Context length error detection (OpenCode)
         if (isOpenCodeCli) {

@@ -168,6 +168,13 @@ export class TaskLoopRunner {
   /** Resolves the idle no-task sleep early when a poller appends a new task. */
   private _idleSleepWake: (() => void) | null = null;
   private _resumeAt: Date | undefined;
+  /** When the loop is paused for reauth/rate-limit, the event+payload to re-emit
+   *  on a WS reconnect INSTEAD of agent_online/task_start. Reconnects are routine
+   *  (heartbeat, NAT blips, server restart); without this a reconnect during a
+   *  pause flips the server status back to active/working and erases the
+   *  operator's 'needs reauth' / 'rate limited' badge, stranding the agent.
+   *  Cleared on retry()/resume. */
+  private _pauseReason: { event: WebhookEvent; payload: Record<string, unknown> } | null = null;
   /** When fallback is active: the saved main provider and when to switch back. */
   private _mainProviderBeforeFallback: ProviderId | null = null;
   private _mainProviderResumeAt: Date | undefined;
@@ -275,6 +282,7 @@ export class TaskLoopRunner {
     if (this._state !== 'paused') { return; }
     this._retryScheduler.clear();
     this._resumeAt = undefined;
+    this._pauseReason = null;
     this._mainProviderBeforeFallback = null;
     this._mainProviderResumeAt = undefined;
     this._setState('running');
@@ -373,6 +381,17 @@ export class TaskLoopRunner {
             gitRepo:   this._gitRepo,
             gitBranch: this._gitBranch,
           });
+          return;
+        }
+        // If the loop is paused (reauth / rate-limit), a routine reconnect must
+        // NOT re-emit agent_online + task_start — that flips the server status
+        // back to active/working and erases the reauth/rate-limit alert, so a
+        // stranded agent looks like it is busy working. Re-assert the pause
+        // reason instead and never send task_start while paused.
+        if (this._state === 'paused') {
+          if (this._pauseReason) {
+            this._notifyWebhook(this._pauseReason.event, this._pauseReason.payload);
+          }
           return;
         }
         this._notifyWebhook('agent_online', {
@@ -562,6 +581,7 @@ export class TaskLoopRunner {
     this._setState('stopping');
     this._retryScheduler.clear();
     this._resumeAt = undefined;
+    this._pauseReason = null;
     this._mainProviderBeforeFallback = null;
     this._mainProviderResumeAt = undefined;
     // Unblock _pause() if we're currently suspended
@@ -1644,6 +1664,20 @@ export class TaskLoopRunner {
               this._cb?.log(`⚠️ Failed to evict ${currentProvider} client before reauth pause: ${evictErr instanceof Error ? evictErr.message : String(evictErr)}`);
             }
           }
+          // Remember the pause reason so a WS reconnect during the pause re-emits
+          // reauth_required instead of clobbering it with agent_online/task_start.
+          this._pauseReason = {
+            event: 'reauth_required',
+            payload: {
+              iteration: this._iterations,
+              task:      { text: task.text },
+              message:   rawMsg,
+              provider:  currentProvider,
+              workDir:   this._workspaceRoot,
+              gitRepo:   this._gitRepo,
+              gitBranch: this._gitBranch,
+            },
+          };
           // Pause indefinitely (no auto-resume) — operator must re-auth + Retry.
           await this._pauseLoop();
           if (this._state !== 'running') { break; }
@@ -1710,6 +1744,21 @@ export class TaskLoopRunner {
           });
           // Reset task so it gets picked up again after resume
           await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+          // Remember the pause reason so a WS reconnect during the pause re-emits
+          // rate_limit instead of clobbering it with agent_online/task_start.
+          this._pauseReason = {
+            event: 'rate_limit',
+            payload: {
+              iteration:   this._iterations,
+              task:        { text: task.text },
+              message:     rawMsg,
+              resumeAt:    resumeAt.toISOString(),
+              provider:    currentProvider,
+              workDir:     this._workspaceRoot,
+              gitRepo:     this._gitRepo,
+              gitBranch:   this._gitBranch,
+            },
+          };
           // Block here until resumed (timer or user clicks Retry Now)
           this._resumeAt = resumeAt;
           await this._pauseLoop(resumeMs);
@@ -1838,6 +1887,21 @@ export class TaskLoopRunner {
             gitBranch:   this._gitBranch,
           });
           await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+          // Remember the pause reason so a WS reconnect during the pause re-emits
+          // it instead of clobbering it with agent_online/task_start.
+          this._pauseReason = {
+            event: 'rate_limit',
+            payload: {
+              iteration:   this._iterations,
+              task:        { text: task.text },
+              message:     rawMsg,
+              resumeAt:    new Date(Date.now() + 60 * 60_000).toISOString(),
+              provider,
+              workDir:     this._workspaceRoot,
+              gitRepo:     this._gitRepo,
+              gitBranch:   this._gitBranch,
+            },
+          };
           // No auto-resume time — user must click Retry manually
           this._resumeAt = undefined;
           await this._pauseLoop(); // pause indefinitely

@@ -46,7 +46,14 @@ export class WebSocketPoller {
   private _onRestoreRequest: ((agentId: string, downloadUrl: string) => void) | null = null;
   private _onExportConfig: ((exportEnabled: boolean, exportDailyBackup: boolean, agentId: string) => void) | null = null;
   private _pendingFrames: unknown[] = [];
+  // Delivery dedup. In-memory set for O(1) lookup + a FIFO order list that is
+  // mirrored to .autodev/seen-deliveries.json so a restart / @latest respawn
+  // (which starts a fresh process) does NOT re-ingest deliveries the server
+  // replays on resubscribe. Bounded so it never grows without limit.
   private _seenTaskIds = new Set<string>();
+  private _seenOrder: string[] = [];
+  private _seenDeliveriesFile: string | null = null;
+  private static readonly MAX_SEEN_DELIVERIES = 2000;
 
   // Heartbeat: send a WS Ping every 25 s and expect a Pong. If 2 pings in a
   // row come back without a pong (≈55 s), force-reconnect. Without this the
@@ -92,8 +99,43 @@ export class WebSocketPoller {
     this._todoPath = todoPath;
     this._workspaceRoot = workspaceRoot;
     if (log) { this._log = log; }
+    this._loadSeenDeliveries();
     this._log(`WS connecting → ${this.wsUrl} (slug: ${this.slug})`);
     this._connect();
+  }
+
+  /** Reload persisted delivery IDs so a restart doesn't re-ingest replayed tasks. */
+  private _loadSeenDeliveries(): void {
+    if (!this._workspaceRoot) { return; }
+    this._seenDeliveriesFile = path.join(this._workspaceRoot, '.autodev', 'seen-deliveries.json');
+    try {
+      const ids = JSON.parse(fs.readFileSync(this._seenDeliveriesFile, 'utf8')) as unknown;
+      if (Array.isArray(ids)) {
+        for (const id of ids) {
+          if (typeof id === 'string' && !this._seenTaskIds.has(id)) {
+            this._seenTaskIds.add(id);
+            this._seenOrder.push(id);
+          }
+        }
+        this._log(`WS loaded ${this._seenOrder.length} seen delivery id(s) from disk`);
+      }
+    } catch { /* no file / bad json — start fresh */ }
+  }
+
+  /** Record a delivery id as processed (in-memory + persisted, bounded FIFO). */
+  private _markSeenDelivery(taskId: string): void {
+    if (this._seenTaskIds.has(taskId)) { return; }
+    this._seenTaskIds.add(taskId);
+    this._seenOrder.push(taskId);
+    while (this._seenOrder.length > WebSocketPoller.MAX_SEEN_DELIVERIES) {
+      const oldest = this._seenOrder.shift();
+      if (oldest) { this._seenTaskIds.delete(oldest); }
+    }
+    if (!this._seenDeliveriesFile) { return; }
+    try {
+      fs.mkdirSync(path.dirname(this._seenDeliveriesFile), { recursive: true });
+      fs.writeFileSync(this._seenDeliveriesFile, JSON.stringify(this._seenOrder), 'utf8');
+    } catch { /* best-effort persistence */ }
   }
 
   /** Tear down the connection permanently. */
@@ -582,12 +624,9 @@ export class WebSocketPoller {
           this._log(`WS task already processed (id=${taskId}), skipping`);
           return;
         }
-        this._seenTaskIds.add(taskId);
-        // Bound the set to avoid unbounded growth over long-running sessions
-        if (this._seenTaskIds.size > 1000) {
-          const oldest = this._seenTaskIds.values().next().value;
-          if (oldest) { this._seenTaskIds.delete(oldest); }
-        }
+        // Persisted + bounded so a restart/@latest respawn doesn't re-ingest
+        // deliveries the server replays on resubscribe.
+        this._markSeenDelivery(taskId);
       }
       const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
 

@@ -895,6 +895,19 @@ export class WebSocketPoller {
     if (!root) { respond(false, undefined, 'No workspace root'); return; }
     if (!this._gitEnabled) { respond(false, undefined, 'Git not enabled'); return; }
 
+    // Containment guard — mirror _handleFbRequest. Every path-bearing arg
+    // (filePath) must resolve inside the workspace root both lexically AND after
+    // resolving symlinks; otherwise a git_request could read arbitrary host
+    // files (e.g. path '../../.claude/.credentials.json' via the readFileSync
+    // fallback in getDiff, or leak them through `git diff -- <path>`). An empty
+    // filePath means "whole repo" and is permitted (allowRoot).
+    if (filePath !== undefined && filePath !== '') {
+      if (resolveWithinRoot(root, filePath, true) === null) {
+        respond(false, undefined, 'Path outside workspace');
+        return;
+      }
+    }
+
     (async () => {
       try {
         switch (action) {

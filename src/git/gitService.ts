@@ -97,7 +97,13 @@ export async function getDiff(cwd: string, filePath: string, staged: boolean): P
   if (!out && !staged) {
     const content = await git(cwd, ['show', `:${filePath}`]).catch(async () => {
       const { readFileSync } = await import('fs');
-      try { return readFileSync(require('path').join(cwd, filePath), 'utf8'); } catch { return ''; }
+      const pathMod = await import('path');
+      // Containment guard: never read outside the repo even if a caller passes a
+      // traversing path. The WS handler already validates, but keep this defensive
+      // so getDiff cannot be turned into an arbitrary-file read by another caller.
+      const abs = pathMod.resolve(cwd, filePath);
+      if (abs !== cwd && !abs.startsWith(cwd + pathMod.sep)) { return ''; }
+      try { return readFileSync(abs, 'utf8'); } catch { return ''; }
     });
     if (content) {
       return content.split('\n').map(l => `+${l}`).join('\n');

@@ -123,25 +123,65 @@ export function countRemaining(tasks: Task[]): number {
 // TODO.md writer — mark tasks in-progress or done
 // ---------------------------------------------------------------------------
 
-export function markInProgress(filePath: string, task: Task): void {
+/**
+ * Rewrite only the checkbox token of the line belonging to `task`, preserving
+ * the rest of the line verbatim (including any `[task-id]` prefix). Locates the
+ * line by line number first, then falls back to scanning for a line whose parsed
+ * id (or, failing that, stripped text) matches. `fromMarker` matches the current
+ * marker; `newMarker` is the literal replacement (e.g. "[~]" or "[ ]").
+ *
+ * This mirrors markDone's working strategy. The previous regex approach anchored
+ * the bare task text immediately after the marker, which never matched real
+ * id-prefixed lines (`- [~] [task-id] text`) and silently no-op'd.
+ */
+function rewriteCheckbox(filePath: string, task: Task, fromMarker: RegExp, newMarker: string): void {
   const content = fs.readFileSync(filePath, 'utf8');
-  const escaped = escapeRegex(task.text);
-  const updated = content.replace(
-    new RegExp(`(^\\s*(?:-\\s*)?)(\\[\\s+\\])(\\s+${escaped}.*)$`, 'mu'),
-    '$1[~]$3'
-  );
-  fs.writeFileSync(filePath, updated, 'utf8');
+  const lines = content.split('\n');
+  const src = fromMarker.source;
+
+  const rewrite = (ln: string): string | null => {
+    const m = ln.match(new RegExp(`^(\\s*(?:-\\s*)?)(?:${src})(\\s+.+)$`, 'iu'));
+    return m ? `${m[1]}${newMarker}${m[2]}` : null;
+  };
+
+  // Primary: by line number — preserves the full original text.
+  const lineIdx = task.line - 1;
+  if (lineIdx >= 0 && lineIdx < lines.length) {
+    const rewritten = rewrite(lines[lineIdx]);
+    if (rewritten !== null) {
+      lines[lineIdx] = rewritten;
+      fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+      return;
+    }
+  }
+
+  // Fallback: scan — the line number may have shifted since parse. Match by task
+  // ID when available, otherwise by stripped text (accounting for [task-id] prefix).
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(new RegExp(`^(\\s*(?:-\\s*)?)(?:${src})\\s+(.+)$`, 'iu'));
+    if (!m) { continue; }
+    const rawText = m[2].trim();
+    const idMatch = rawText.match(/^\[(task-(?:\d{4}-\d{2}-\d{2}|\d{8})-[a-f0-9]{6})\]\s+(.+)$/i);
+    const lineId   = idMatch ? idMatch[1] : undefined;
+    const lineText = idMatch ? idMatch[2] : rawText;
+    if ((task.id && lineId === task.id) || lineText === task.text) {
+      lines[i] = `${m[1]}${newMarker} ${rawText}`;
+      fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+      return;
+    }
+  }
+
+  // Nothing matched — write unchanged (better than corrupting the file).
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+export function markInProgress(filePath: string, task: Task): void {
+  rewriteCheckbox(filePath, task, /\[\s+\]/, '[~]');
 }
 
 /** Reset a [~] in-progress task back to [ ] todo. */
 export function resetToTodo(filePath: string, task: Task): void {
-  const content = fs.readFileSync(filePath, 'utf8');
-  const escaped = escapeRegex(task.text);
-  const updated = content.replace(
-    new RegExp(`(^\\s*(?:-\\s*)?)\\[~\\](\\s+${escaped}.*)$`, 'mu'),
-    '$1[ ]$2'
-  );
-  fs.writeFileSync(filePath, updated, 'utf8');
+  rewriteCheckbox(filePath, task, /\[~\]/, '[ ]');
 }
 
 /** Reset ALL [~] in-progress tasks back to [ ] todo. */

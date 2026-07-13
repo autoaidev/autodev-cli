@@ -11,6 +11,7 @@ import { officeWsUrl, describePush } from '../out/commands/mcpOperate.js';
 import { saveAttachment } from '../out/messageBuilder.js';
 import { RateLimitDetector, AuthDetector } from '../out/rateLimit.js';
 import { isKnownSlashCommand } from '../out/core/commands.js';
+import { resolveWithinRoot } from '../out/core/pathSafe.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
 
 let pass = 0;
@@ -217,6 +218,24 @@ ok('sanitizeRemoteMcpEntries drops unsafe stdio + non-http remotes', () => {
   assert.ok(!('evalarg' in safe) && !('evalenv' in safe));
   assert.ok(rejected.includes('evil') && rejected.includes('badurl'));
   assert.ok(rejected.includes('evalarg') && rejected.includes('evalenv'));
+});
+
+// File-browser containment: lexical + realpath, so a workspace symlink can't escape.
+ok('resolveWithinRoot canonicalizes symlinks and rejects escapes', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-fb-')));
+  try {
+    fs.writeFileSync(path.join(root, 'inside.txt'), 'hi');
+    fs.symlinkSync('/etc/passwd', path.join(root, 'pwn'));           // file symlink escape
+    fs.symlinkSync(os.tmpdir(), path.join(root, 'linkdir'));         // dir symlink escape
+    // Legitimate in-workspace paths resolve.
+    assert.ok(resolveWithinRoot(root, 'inside.txt', true) !== null);
+    assert.ok(resolveWithinRoot(root, 'newfile.txt', false) !== null); // create op (leaf absent)
+    // Escapes are refused.
+    assert.equal(resolveWithinRoot(root, 'pwn', true), null);          // symlink -> /etc/passwd
+    assert.equal(resolveWithinRoot(root, 'linkdir/secret', false), null); // via symlinked dir
+    assert.equal(resolveWithinRoot(root, '../escape', true), null);   // lexical traversal
+    assert.equal(resolveWithinRoot(root, '.', false), null);          // root, mutation disallowed
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 // restore_request SSRF guard: only the configured server origin is trusted.

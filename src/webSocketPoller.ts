@@ -10,6 +10,7 @@ import { saveAttachment } from './messageBuilder';
 import { shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
 import { isKnownSlashCommand } from './core/commands';
+import { resolveWithinRoot } from './core/pathSafe';
 import * as gitService from './git/gitService';
 
 // ---------------------------------------------------------------------------
@@ -738,11 +739,10 @@ export class WebSocketPoller {
 
     // Resolve and validate path is within workspace root. The root itself is
     // permitted for read-only actions (list/search) but never for mutations.
-    const resolveSafe = (rel: string, allowRoot: boolean): string | null => {
-      const resolved = path.resolve(root, rel);
-      if (resolved === root) { return allowRoot ? resolved : null; }
-      return resolved.startsWith(root + path.sep) ? resolved : null;
-    };
+    // Containment is lexical AND canonical (realpath) — a workspace symlink
+    // pointing outside must not let a remote fb_request read/write host files.
+    const resolveSafe = (rel: string, allowRoot: boolean): string | null =>
+      resolveWithinRoot(root, rel, allowRoot);
 
     const MUTATING = new Set(['write', 'delete', 'rename', 'mkdir']);
     const allowRoot = !MUTATING.has(action);

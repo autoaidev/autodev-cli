@@ -1856,6 +1856,13 @@ export class TaskLoopRunner {
     const iscopilotSdkProvider = this._cb?.getActiveProvider() === 'copilot-sdk';
     const isOpenCodeCli = this._cb?.getActiveProvider() === 'opencode-cli';
     const isOpencodeSdk = this._cb?.getActiveProvider() === 'opencode-sdk';
+    // grok-cli / grok-tui / copilot-cli all tee stdout too — without these flags
+    // the rate-limit / context-length / thrash detectors never ran for them, so
+    // a throttled or context-blown turn was silently walked to give_up and the
+    // task was falsely marked [x].
+    const isGrokCli    = this._cb?.getActiveProvider() === 'grok-cli';
+    const isGrokTui    = this._cb?.getActiveProvider() === 'grok-tui';
+    const isCopilotCli = this._cb?.getActiveProvider() === 'copilot-cli';
     return new Promise<void>((resolve, reject) => {
       if (this._state !== 'running') { resolve(); return; }
 
@@ -1987,8 +1994,13 @@ export class TaskLoopRunner {
       let lastStdoutLen = 0;
 
       // Check stdout file: forward any new content to Discord/webhook, detect rate limit / context errors
+      // Providers that write a stdout capture file we can scan for failure
+      // banners (rate-limit / context-length / thrash). Every CLI/TUI provider
+      // tees stdout; the two Claude ones and OpenCode also stream/parse extra.
+      const teesStdout = isClaudeCli || isClaudeTui || iscopilotSdkProvider || isOpenCodeCli
+        || isGrokCli || isGrokTui || isCopilotCli;
       const checkStdout = () => {
-        if (!isClaudeCli && !isClaudeTui && !iscopilotSdkProvider && !isOpenCodeCli) { return; } // only CLI providers tee stdout
+        if (!teesStdout) { return; }
         const content = readStdoutFile();
 
         // Forward new output lines to Discord / webhook.
@@ -2014,8 +2026,11 @@ export class TaskLoopRunner {
           lastStdoutLen = content.length; // keep cursor up to date
         }
 
-        // Rate limit detection (Claude CLI + TUI)
-        if (isClaudeCli || isClaudeTui) {
+        // Rate limit detection — run for every stdout-teeing provider. The
+        // RateLimitDetector phrases are scoped to error/banner forms, so this
+        // is safe to apply provider-agnostically (grok/copilot were previously
+        // excluded, letting a throttle slip through to a false [x]).
+        {
           const rlErr = RateLimitDetector.detect(content);
           if (rlErr) {
             cleanup();
@@ -2034,12 +2049,13 @@ export class TaskLoopRunner {
           }
         }
 
-        // Context length error detection (Claude). Patterns observed:
+        // Context-length / thrash detection for the remaining CLI+TUI providers.
+        // Patterns observed:
         //   "prompt is too long: 1018289 tokens > 1000000 maximum"
         //   "Prompt is too long" (last_assistant_message in StopFailure hook)
-        //   "context_length_exceeded"
+        //   "context_length_exceeded" / "maximum context length"
         //   "Autocompact is thrashing" (context refills immediately after compact)
-        if (isClaudeCli) {
+        if (isClaudeCli || isClaudeTui || isGrokCli || isGrokTui || isCopilotCli) {
           const lc = content.toLowerCase();
           if (lc.includes('autocompact is thrashing')) {
             cleanup();
@@ -2048,23 +2064,7 @@ export class TaskLoopRunner {
           }
           if (lc.includes('prompt is too long')
               || lc.includes('context_length_exceeded')
-              || /tokens?\s*>\s*\d+\s*maximum/.test(lc)) {
-            cleanup();
-            reject(new ContextLengthError(content.trim()));
-            return;
-          }
-        }
-
-        // Context length detection for claude-tui (same patterns)
-        if (isClaudeTui) {
-          const lc = content.toLowerCase();
-          if (lc.includes('autocompact is thrashing')) {
-            cleanup();
-            reject(new ThrashingError(content.trim()));
-            return;
-          }
-          if (lc.includes('prompt is too long')
-              || lc.includes('context_length_exceeded')
+              || lc.includes('maximum context length')
               || /tokens?\s*>\s*\d+\s*maximum/.test(lc)) {
             cleanup();
             reject(new ContextLengthError(content.trim()));
@@ -2104,9 +2104,11 @@ export class TaskLoopRunner {
         if (cancelled) { return; }
 
         // Fast-path: if the stdout capture file already contains a rate-limit
-        // or context-length phrase at exit time, raise immediately.
+        // or context-length phrase at exit time, raise immediately. Applies to
+        // every stdout-teeing provider so a throttled grok/copilot exit pauses
+        // instead of being force-marked done.
         const exitStdout = readStdoutFile();
-        if (isClaudeCli) {
+        if (teesStdout) {
           const rlFromStdout = RateLimitDetector.detect(exitStdout);
           if (rlFromStdout) {
             cleanup();

@@ -29,6 +29,65 @@ export interface EmailPollerOptions {
   allowedSenders: string[];
   /** Verify TLS cert. Default true. */
   rejectUnauthorized?: boolean;
+  /**
+   * Require the receiving MTA's Authentication-Results header to show
+   * dkim/spf=pass aligned to the sender domain before ingesting a message.
+   * Default true — the From header is trivially spoofable and inbound mail runs
+   * autonomous full-tool tasks. Set false only on a trusted internal relay.
+   */
+  requireAuth?: boolean;
+  /**
+   * Optional authserv-id of the trusted receiving MTA (the token that opens its
+   * Authentication-Results header, e.g. "mx.google.com"). When set, only an AR
+   * header stamped by this id is trusted — hardening against a forged topmost
+   * header on an MTA that adds none of its own.
+   */
+  authServId?: string;
+}
+
+/** Relaxed domain alignment (RFC 5322.From domain vs DKIM d= / SPF mailfrom). */
+function _domainAligned(a: string, b: string): boolean {
+  a = a.replace(/\.$/, '').toLowerCase().trim();
+  b = b.replace(/\.$/, '').toLowerCase().trim();
+  if (!a || !b) { return false; }
+  return a === b || b.endsWith('.' + a) || a.endsWith('.' + b);
+}
+
+/**
+ * Decide whether a message is authenticated as genuinely from `senderDomain`.
+ *
+ * The From header is forgeable, so authorization must rest on the receiving
+ * MTA's DKIM/SPF verdict. Only the TOPMOST Authentication-Results header is
+ * trusted: a conformant MTA strips forged copies bearing its own authserv-id
+ * and prepends its own, so the first AR line (as it appears in the raw header
+ * block) is the one our server added; lines below it may be attacker-supplied
+ * and are ignored. Requires dkim=pass with header.d aligned to the sender
+ * domain, or spf=pass with smtp.mailfrom aligned. Returns false when no AR
+ * header is present (fail closed).
+ *
+ * Exported for unit testing.
+ */
+export function emailPassesAuth(arLines: string[], senderDomain: string, authServId?: string): boolean {
+  const domain = (senderDomain || '').toLowerCase().trim();
+  if (!domain || arLines.length === 0) { return false; }
+  // Trust only the topmost AR header (index 0 = first in the raw header block).
+  const lc = arLines[0].toLowerCase().replace(/^authentication-results:\s*/, '');
+  if (authServId) {
+    const id = lc.split(/[;\s]/)[0].replace(/\.$/, '');
+    if (id !== authServId.toLowerCase().trim().replace(/\.$/, '')) { return false; }
+  }
+  for (const m of lc.matchAll(/dkim=pass\b([^;]*)/g)) {
+    const d = /header\.d=([a-z0-9.\-]+)/.exec(m[1]);
+    if (d && _domainAligned(d[1], domain)) { return true; }
+  }
+  for (const m of lc.matchAll(/spf=pass\b([^;]*)/g)) {
+    const f = /smtp\.mailfrom=([^;\s]+)/.exec(m[1]);
+    if (f) {
+      const mf = f[1].includes('@') ? f[1].split('@')[1] : f[1];
+      if (_domainAligned(mf, domain)) { return true; }
+    }
+  }
+  return false;
 }
 
 export class EmailTaskPoller {
@@ -49,6 +108,9 @@ export class EmailTaskPoller {
   /** Force a fresh IMAP connection every 15 minutes regardless of state. */
   private static readonly MAX_CONN_AGE_MS = 15 * 60 * 1000;
 
+  private readonly requireAuth: boolean;
+  private readonly authServId?: string;
+
   constructor(private readonly opts: EmailPollerOptions) {
     // Pre-compile each pattern to a regex — '*' acts as a wildcard.
     // e.g. "agent-*@company.com" matches "agent-bot@company.com".
@@ -56,6 +118,8 @@ export class EmailTaskPoller {
       .map(s => s.toLowerCase().trim())
       .filter(Boolean)
       .map(p => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$'));
+    this.requireAuth = opts.requireAuth !== false; // default: require DKIM/SPF
+    this.authServId = opts.authServId?.trim() || undefined;
   }
 
   /**
@@ -93,12 +157,23 @@ export class EmailTaskPoller {
               await this.client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true });
               continue;
             }
-            if (!this._senderAllowed(msg.envelope?.from?.[0]?.address)) {
+            const parsed: ParsedMail = await simpleParser(msg.source);
+            const senderAddr = parsed.from?.value?.[0]?.address ?? msg.envelope?.from?.[0]?.address;
+            if (!this._senderAllowed(senderAddr)) {
               // Don't \Seen — leave for the human user to read.
               processed = true;
               continue;
             }
-            const taskText = await this._buildTaskFromMessage(msg.source, msg.envelope, workspaceRoot);
+            // The From header is trivially spoofable, so a matching allowlist
+            // entry is NOT proof of origin. Require the receiving MTA's
+            // Authentication-Results (DKIM/SPF) to align with the sender domain
+            // before turning the message into an autonomous, full-tool task.
+            // Unauthenticated mail is left UNSEEN for the human to review.
+            if (this.requireAuth && !this._isAuthenticated(parsed, senderAddr)) {
+              processed = true;
+              continue;
+            }
+            const taskText = await this._buildTaskFromMessage(parsed, msg.envelope, workspaceRoot);
             if (taskText) {
               await todoWriter.append(todoPath, taskText, shortId());
               appended = true;
@@ -182,8 +257,20 @@ export class EmailTaskPoller {
     return this.allowed.some(p => p.test(addr));
   }
 
-  private async _buildTaskFromMessage(source: Buffer, envelope: any, workspaceRoot: string): Promise<string> {
-    const parsed: ParsedMail = await simpleParser(source);
+  /**
+   * True if the receiving MTA authenticated this message as genuinely from the
+   * sender's domain (DKIM or SPF pass, topmost Authentication-Results only).
+   */
+  private _isAuthenticated(parsed: ParsedMail, senderAddress?: string | null): boolean {
+    const domain = senderAddress?.split('@')[1]?.toLowerCase().trim();
+    if (!domain) { return false; }
+    const arLines = (parsed.headerLines || [])
+      .filter(h => h.key === 'authentication-results')
+      .map(h => h.line);
+    return emailPassesAuth(arLines, domain, this.authServId);
+  }
+
+  private async _buildTaskFromMessage(parsed: ParsedMail, envelope: any, workspaceRoot: string): Promise<string> {
     const subject = (parsed.subject || envelope?.subject || '(no subject)').trim();
     const fromAddr = parsed.from?.value?.[0]?.address ?? envelope?.from?.[0]?.address ?? 'unknown';
     const fromName = parsed.from?.value?.[0]?.name ?? '';

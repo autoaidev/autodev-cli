@@ -904,7 +904,16 @@ export class TaskLoopRunner {
       this._cb?.log('🔒 Inbound email tasks disabled — set AUTODEV_EMAIL_ALLOWED_SENDERS to an explicit sender allowlist to enable them.');
       return null;
     }
-    return new EmailTaskPoller({ host, port, secure, user, pass, allowedSenders: allowed, rejectUnauthorized: verify });
+    // The allowlist matches the (spoofable) From header, so additionally require
+    // the receiving MTA's DKIM/SPF verdict by default. An operator on a trusted
+    // internal relay can opt out with AUTODEV_EMAIL_REQUIRE_AUTH=false, and pin
+    // the trusted receiver with AUTODEV_EMAIL_AUTHSERV_ID.
+    const requireAuth = String(env.AUTODEV_EMAIL_REQUIRE_AUTH ?? 'true').toLowerCase() !== 'false';
+    const authServId = env.AUTODEV_EMAIL_AUTHSERV_ID || undefined;
+    if (!requireAuth) {
+      this._cb?.log('⚠️ Inbound email DKIM/SPF verification is OFF (AUTODEV_EMAIL_REQUIRE_AUTH=false) — From-header spoofing can trigger tasks. Only safe on a trusted relay.');
+    }
+    return new EmailTaskPoller({ host, port, secure, user, pass, allowedSenders: allowed, rejectUnauthorized: verify, requireAuth, authServId });
   }
 
   /**

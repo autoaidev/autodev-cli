@@ -14,6 +14,7 @@ import { isKnownSlashCommand } from '../out/core/commands.js';
 import { resolveWithinRoot } from '../out/core/pathSafe.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
 import { isSafeChildSegment } from '../out/agentBackup/sessionProviders.js';
+import { emailPassesAuth } from '../out/emailPoller.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -144,6 +145,34 @@ ok('isSafeChildSegment rejects traversal / separator segments', () => {
   assert.ok(!isSafeChildSegment('a/b'));
   assert.ok(!isSafeChildSegment('a\\b'));
   assert.ok(!isSafeChildSegment('a\0b'));
+});
+
+// Email ingress authentication: a spoofed From is not enough — the receiving
+// MTA's Authentication-Results must show DKIM/SPF pass aligned to the sender
+// domain. Autonomous full-tool tasks must never run on an unauthenticated msg.
+ok('emailPassesAuth requires aligned DKIM/SPF from the topmost AR header', () => {
+  const AR = (s) => [`Authentication-Results: mx.company.com; ${s}`];
+  // Genuine DKIM pass aligned to the sender domain.
+  assert.ok(emailPassesAuth(AR('dkim=pass header.d=company.com; spf=pass'), 'company.com'));
+  // Relaxed alignment: subdomain sender, org-domain DKIM.
+  assert.ok(emailPassesAuth(AR('dkim=pass header.d=company.com'), 'mail.company.com'));
+  // SPF pass aligned via smtp.mailfrom.
+  assert.ok(emailPassesAuth(AR('spf=pass smtp.mailfrom=bot@company.com'), 'company.com'));
+  // No AR header at all → fail closed.
+  assert.ok(!emailPassesAuth([], 'company.com'));
+  // DKIM/SPF fail → reject.
+  assert.ok(!emailPassesAuth(AR('dkim=fail header.d=company.com; spf=fail'), 'company.com'));
+  // Spoof: pass but for a DIFFERENT (attacker) domain → not aligned → reject.
+  assert.ok(!emailPassesAuth(AR('dkim=pass header.d=evil.com; spf=pass smtp.mailfrom=x@evil.com'), 'company.com'));
+  // Forged AR appended BELOW the trusted topmost header must be ignored: the
+  // real (topmost) verdict is a fail, the attacker's is a pass — must reject.
+  assert.ok(!emailPassesAuth([
+    'Authentication-Results: mx.company.com; dkim=fail header.d=company.com',
+    'Authentication-Results: mx.company.com; dkim=pass header.d=company.com',
+  ], 'company.com'));
+  // authserv-id pin: a topmost header from an untrusted id is rejected even on pass.
+  assert.ok(emailPassesAuth(AR('dkim=pass header.d=company.com'), 'company.com', 'mx.company.com'));
+  assert.ok(!emailPassesAuth(['Authentication-Results: evil.relay; dkim=pass header.d=company.com'], 'company.com', 'mx.company.com'));
 });
 
 // Rate-limit detection: real banners match, ordinary prose does not.

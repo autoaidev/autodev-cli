@@ -41,6 +41,17 @@ export interface SessionBackupProvider {
   restore(destRoot: string, archive: Archive): Promise<number>;
 }
 
+/**
+ * A path segment safe to `path.join()` onto a state directory: non-empty, not a
+ * traversal token, and containing no separators or null bytes. Rejects the
+ * zip-slip vector where a crafted archive entry (`copilot-cli/../evil/x`) yields
+ * a `..` segment that would escape the destination directory.
+ */
+export function isSafeChildSegment(name: string): boolean {
+  return !!name && name !== '.' && name !== '..'
+    && !name.includes('/') && !name.includes('\\') && !name.includes('\0');
+}
+
 /** List the immediate child folder names under an archive directory prefix. */
 function archiveChildDirs(archive: Archive, prefix: string): string[] {
   const base = prefix.replace(/\/$/, '') + '/';
@@ -48,7 +59,9 @@ function archiveChildDirs(archive: Archive, prefix: string): string[] {
   for (const entry of archive.entryPaths()) {
     if (!entry.startsWith(base)) { continue; }
     const top = entry.slice(base.length).split('/')[0];
-    if (top) { names.add(top); }
+    // Drop traversal/separator segments so a malicious archive cannot write
+    // outside the provider's session-state directory.
+    if (isSafeChildSegment(top)) { names.add(top); }
   }
   return [...names];
 }

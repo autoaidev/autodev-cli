@@ -13,6 +13,7 @@ import { RateLimitDetector, AuthDetector } from '../out/rateLimit.js';
 import { isKnownSlashCommand } from '../out/core/commands.js';
 import { resolveWithinRoot } from '../out/core/pathSafe.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
+import { isSafeChildSegment } from '../out/agentBackup/sessionProviders.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -130,6 +131,19 @@ ok('saveAttachment contains path-traversal filenames', () => {
     // The escaping target must NOT exist.
     assert.ok(!fs.existsSync(path.resolve(root, '../../../../evil.sh')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// Backup restore zip-slip: a crafted archive segment must not escape the
+// provider's session-state dir. The restore path derives a dir name from
+// attacker-controlled archive entries, so traversal tokens must be dropped.
+ok('isSafeChildSegment rejects traversal / separator segments', () => {
+  assert.ok(isSafeChildSegment('a1b2-uuid'));
+  assert.ok(!isSafeChildSegment('..'));   // copilot-cli/../evil → uuid='..' escaped to ~/.copilot
+  assert.ok(!isSafeChildSegment('.'));
+  assert.ok(!isSafeChildSegment(''));
+  assert.ok(!isSafeChildSegment('a/b'));
+  assert.ok(!isSafeChildSegment('a\\b'));
+  assert.ok(!isSafeChildSegment('a\0b'));
 });
 
 // Rate-limit detection: real banners match, ordinary prose does not.

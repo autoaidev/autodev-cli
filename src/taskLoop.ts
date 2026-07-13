@@ -663,6 +663,13 @@ export class TaskLoopRunner {
   private async _handleExportRequest(agentId: string): Promise<void> {
     const root = this._workspaceRoot;
     const settings = this._settings;
+    // Opt-in gate: export reads session traces from outside the workspace
+    // (~/.claude, ~/.copilot, opencode.db). Ignore unless explicitly enabled,
+    // mirroring mcpUpdateEnabled / enableFileBrowser / gitEnabled.
+    if (!settings?.exportEnabled) {
+      this._cb?.log('🔒 export_request ignored — exportEnabled is off (set it in .autodev/settings.json to allow)');
+      return;
+    }
     if (!root || !settings?.serverBaseUrl || !settings?.serverApiKey) {
       this._cb?.log('⚠️ export_request ignored — serverBaseUrl/serverApiKey not configured');
       return;
@@ -686,6 +693,13 @@ export class TaskLoopRunner {
   private async _handleRestoreRequest(agentId: string, downloadUrl: string): Promise<void> {
     const root = this._workspaceRoot;
     const settings = this._settings;
+    // Opt-in gate: restore writes files OUTSIDE the workspace (~/.claude/projects,
+    // ~/.copilot/session-state, opencode.db) — a host-mutating primitive. Ignore
+    // unless explicitly enabled, mirroring mcpUpdateEnabled / enableFileBrowser.
+    if (!settings?.exportEnabled) {
+      this._cb?.log('🔒 restore_request ignored — exportEnabled is off (set it in .autodev/settings.json to allow)');
+      return;
+    }
     if (!root || !settings?.serverApiKey) {
       this._cb?.log('⚠️ restore_request ignored — serverApiKey not configured');
       return;

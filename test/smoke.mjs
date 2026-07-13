@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { providerRegistry } from '../out/core/provider/ProviderRegistry.js';
-import { parseTodoContent, countRemaining } from '../out/todo.js';
+import { parseTodoContent, countRemaining, parseTodo, appendTask, markInProgress, resetToTodo } from '../out/todo.js';
 import { replaceProjectBuiltinMcp, saveProjectUserMcp, loadProjectAllMcp, isRemoteMcp } from '../out/core/projectMcp.js';
 import { officeWsUrl, describePush } from '../out/commands/mcpOperate.js';
+import { saveAttachment } from '../out/messageBuilder.js';
+import { RateLimitDetector } from '../out/rateLimit.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -88,6 +90,52 @@ ok('describePush maps task/message pushes, ignores noise', () => {
   assert.equal(describePush({ task: { metadata: { event: 'user_message', task: { text: 'hi' } } } }), 'New message: hi');
   assert.equal(describePush({ type: 'agent_update', data: {} }), null);
   assert.equal(describePush({ type: 'task_deleted', data: { id: 'x' } }), null);
+});
+
+// resetToTodo / markInProgress must work on id-prefixed task lines (the real format).
+ok('resetToTodo flips an id-prefixed [~] task back to [ ]', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-todo-'));
+  try {
+    const f = path.join(root, 'TODO.md');
+    fs.writeFileSync(f, '## Todo\n\n');
+    appendTask(f, 'do the thing', 'task-2026-07-13-abc123');
+    let tasks = parseTodo(f);
+    assert.equal(tasks.length, 1);
+    // to in-progress
+    markInProgress(f, tasks[0]);
+    tasks = parseTodo(f);
+    assert.equal(tasks[0].status, 'in-progress', 'markInProgress should set [~]');
+    // back to todo
+    resetToTodo(f, tasks[0]);
+    tasks = parseTodo(f);
+    assert.equal(tasks[0].status, 'todo', 'resetToTodo should restore [ ]');
+    assert.equal(tasks[0].id, 'task-2026-07-13-abc123', 'id prefix preserved');
+    assert.equal(tasks[0].text, 'do the thing', 'text preserved');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// saveAttachment must never escape the attachments dir via a traversal filename.
+ok('saveAttachment contains path-traversal filenames', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-att-'));
+  try {
+    const rel = saveAttachment(root, '../../../../evil.sh', Buffer.from('x'), 'grp');
+    assert.ok(!rel.includes('..'), 'returned path should not contain ..');
+    const abs = path.resolve(root, rel);
+    const attachRoot = path.resolve(root, '.autodev/messages/attachments');
+    assert.ok(abs.startsWith(attachRoot + path.sep), 'file must stay under attachments dir');
+    assert.ok(fs.existsSync(abs), 'file written to the safe location');
+    // The escaping target must NOT exist.
+    assert.ok(!fs.existsSync(path.resolve(root, '../../../../evil.sh')));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// Rate-limit detection: real banners match, ordinary prose does not.
+ok('RateLimitDetector matches banners, not prose', () => {
+  assert.ok(RateLimitDetector.matches("You've hit your limit · resets 9pm (Europe/Sofia)"));
+  assert.ok(RateLimitDetector.matches('API Error: 429 rate limit exceeded'));
+  assert.ok(RateLimitDetector.matches('Working... · Rate limited'));
+  assert.ok(!RateLimitDetector.matches('I added rate limiting to the API endpoint'));
+  assert.ok(!RateLimitDetector.matches('The rate limit is 100 requests per second'));
 });
 
 Promise.resolve().then(() => console.log(`\n${pass} checks passed`));

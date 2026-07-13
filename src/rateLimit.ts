@@ -18,11 +18,17 @@ export class RateLimitError extends Error {
  * in the codebase needs to change.
  */
 const PHRASES: ReadonlyArray<RegExp> = [
+  // High-signal Anthropic reset banners — these carry the reset time and never
+  // false-positive against ordinary assistant prose.
   /hit your limit/i,                // "You've hit your limit · resets 9pm (Europe/Sofia)"
-  /rate limit/i,                    // "API Error: ... · Rate limited"
   /out of extra usage/i,            // "You're out of extra usage · resets 8:20pm (Europe/Sofia)"
-  /\bout of\b.*\busage\b/i,         // future variants of "out of … usage"
   /usage limit reached/i,
+  // "rate limit" ONLY in its throttle-banner form — bare /rate limit/i matched
+  // ordinary text like "I added rate limiting" or "the rate limit is 100 req/s",
+  // pausing the loop for minutes/hours with no actual throttling. Require the
+  // provider's error/banner context.
+  /api error[^\n]{0,120}rate limit/i,   // "API Error: 429 ... rate limit(ed)"
+  /·\s*rate limited/i,                  // "... · Rate limited" suffix banner
 ];
 
 export class RateLimitDetector {

@@ -183,10 +183,22 @@ export function saveAttachment(
   data: Buffer | string,
   groupId?: string,
 ): string {
-  const group = groupId ?? `${timestamp()}_${crypto.randomBytes(4).toString('hex')}`;
-  const dir = path.join(workspaceRoot, ATTACHMENTS_DIR, group);
+  // Reduce group + filename to leaf names and strip leading dots/whitespace so a
+  // fully attacker-controlled attachment name can't escape the attachments dir
+  // (e.g. "../../../../home/autodev/.bashrc" or "../../.ssh/authorized_keys").
+  const rawGroup = groupId ?? `${timestamp()}_${crypto.randomBytes(4).toString('hex')}`;
+  const safeGroup = path.basename(rawGroup).replace(/^[.\s]+/, '')
+    || `${timestamp()}_${crypto.randomBytes(4).toString('hex')}`;
+  const dir = path.join(workspaceRoot, ATTACHMENTS_DIR, safeGroup);
   if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-  const filePath = path.join(dir, filename);
+  const safeName = path.basename(filename).replace(/^[.\s]+/, '') || 'attachment';
+  const filePath = path.join(dir, safeName);
+  // Belt-and-suspenders containment check — never write outside the attachments dir.
+  const resolvedDir = path.resolve(dir);
+  if (path.resolve(filePath) !== path.join(resolvedDir, safeName)
+    || !path.resolve(filePath).startsWith(resolvedDir + path.sep)) {
+    throw new Error('saveAttachment: refusing to write outside attachments directory');
+  }
   if (Buffer.isBuffer(data)) {
     fs.writeFileSync(filePath, data);
   } else {

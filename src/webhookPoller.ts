@@ -5,6 +5,7 @@ import { saveAttachment } from './messageBuilder';
 import { shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
 import { WebSocketPoller } from './webSocketPoller';
+import { isKnownSlashCommand } from './core/commands';
 
 // ---------------------------------------------------------------------------
 // WebhookPoller — mirrors PHP AutodevWebhookTaskProvider
@@ -262,13 +263,20 @@ class HttpWebhookPoller {
 
       const detail = await this._get<LogDetail>(`/v1/logs/${logId}`);
 
-      // Mark received immediately regardless of outcome (don't re-deliver)
-      this.lastProcessedId = logId;
-      this._patch(`/v1/logs/${logId}`, { status: 'received' }).catch(() => {});
+      // Acknowledge (advance the cursor + PATCH status='received') only once the
+      // delivery has been durably handled. Marking it received before the TODO
+      // append meant a transient append failure told the server 'received' and
+      // permanently dropped the user's message. For non-task logs (wrong event,
+      // empty text, control command) there is nothing durable to gate on, so we
+      // ack them immediately to avoid re-fetching the same log forever.
+      const ackReceived = () => {
+        this.lastProcessedId = logId;
+        this._patch(`/v1/logs/${logId}`, { status: 'received' }).catch(() => {});
+      };
 
       // Extract payload — try both nesting styles
       const payload = detail.data?.payload ?? detail.payload;
-      if (!payload || payload.event !== 'user_message') { return false; }
+      if (!payload || payload.event !== 'user_message') { ackReceived(); return false; }
 
       let taskText = payload.task?.text ?? '';
       // Pre-generate task ID so attachments share the same prefix
@@ -295,12 +303,15 @@ class HttpWebhookPoller {
       }
       // Use parts text only as fallback when task.text is absent
       if (!taskText && textParts.length > 0) { taskText = textParts.join(' '); }
-      if (!taskText) { return false; }
+      if (!taskText) { ackReceived(); return false; }
       // Collapse newlines so the entire message becomes a single TODO.md line
       taskText = taskText.replace(/\r\n|\r|\n/g, ' ').trim();
 
-      // Handle slash commands — don't append as tasks
-      if (taskText.startsWith('/')) {
+      // Divert ONLY exact known control commands. Any other slash-prefixed text
+      // ("/login is broken", "/etc/nginx ...") is an ordinary task and must
+      // still be queued — never silently discarded.
+      if (isKnownSlashCommand(taskText)) {
+        ackReceived();
         this._onCommand?.(taskText);
         return false;
       }
@@ -310,6 +321,9 @@ class HttpWebhookPoller {
         : taskText;
 
       await todoWriter.append(todoPath, fullText, httpTaskId);
+      // Ack only after the durable append succeeds. If append throws, the outer
+      // catch returns without acking, so the next poll re-delivers this log.
+      ackReceived();
       return true;
     } catch {
       return false;

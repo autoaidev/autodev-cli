@@ -9,6 +9,7 @@ import type { RdpConnectOptions } from './rdp';
 import { saveAttachment } from './messageBuilder';
 import { shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
+import { isKnownSlashCommand } from './core/commands';
 import * as gitService from './git/gitService';
 
 // ---------------------------------------------------------------------------
@@ -619,15 +620,15 @@ export class WebSocketPoller {
       // Deduplicate by task ID so the same delivery isn't re-processed on reconnect,
       // but a new task with identical text is still accepted.
       const taskId = t['id'] as string | undefined;
-      if (taskId) {
-        if (this._seenTaskIds.has(taskId)) {
-          this._log(`WS task already processed (id=${taskId}), skipping`);
-          return;
-        }
-        // Persisted + bounded so a restart/@latest respawn doesn't re-ingest
-        // deliveries the server replays on resubscribe.
-        this._markSeenDelivery(taskId);
+      if (taskId && this._seenTaskIds.has(taskId)) {
+        this._log(`WS task already processed (id=${taskId}), skipping`);
+        return;
       }
+      // NOTE: the delivery is marked seen only AFTER it has been durably handled
+      // (TODO append resolved / steer or command dispatched) — see below. Marking
+      // it here at parse time meant a transient append failure permanently
+      // dropped the user's message because the server's reconnect replay was
+      // then skipped by the dedup check above.
       const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
 
       // ── Instant / steer message ────────────────────────────────────────────
@@ -648,6 +649,7 @@ export class WebSocketPoller {
         steerText = steerText.replace(/\r\n|\r|\n/g, ' ').trim();
         if (!steerText) { return; }
         this._log(`WS steer received: "${steerText}"`);
+        if (taskId) { this._markSeenDelivery(taskId); }
         this._onSteer?.(steerText);
         return;
       }
@@ -695,15 +697,24 @@ export class WebSocketPoller {
 
       this._log(`WS task received: "${taskText}"${attRefs.length > 0 ? ` (+${attRefs.length} attachment(s))` : ''}`);
 
-      // Handle slash commands — don't append as tasks
-      if (fullText.startsWith('/')) {
+      // Divert ONLY exact known control commands (/restart, /clear, /retry, …).
+      // Any other slash-prefixed text ("/login is broken", "/etc/nginx ...") is
+      // an ordinary task and must still be queued — never silently discarded.
+      if (isKnownSlashCommand(fullText)) {
+        if (taskId) { this._markSeenDelivery(taskId); }
         this._onCommand?.(fullText);
         return;
       }
 
       if (!this._todoPath) { this._log('WS failed to append task to TODO.md: todoPath is empty'); return; }
       todoWriter.append(this._todoPath, fullText, wsTaskId)
-        .then(() => { this._onTaskAppend?.(); })
+        .then(() => {
+          // At-least-once: only record the delivery as seen AFTER the durable
+          // TODO append succeeds. On failure we leave it unseen so the server's
+          // reconnect replay re-delivers it instead of dropping it.
+          if (taskId) { this._markSeenDelivery(taskId); }
+          this._onTaskAppend?.();
+        })
         .catch(err => { this._log(`WS failed to append task to TODO.md: ${err}`); });
     }
   }

@@ -14,7 +14,7 @@ import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession,
 import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/opencodeCliProvider';
 import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedCleanly } from './openCodeHooksManager';
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
-import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui } from './providers/claudeTuiProvider';
+import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk } from './providers/opencodeSdkProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
@@ -743,6 +743,16 @@ export class TaskLoopRunner {
       this._cb?.log('🔄 /restart received — restarting loop…');
       this._notifyDiscord('🔄 Restarting loop (/restart received)');
       void this.restart();
+      return;
+    }
+    if (c === '/retry' || c === '/resume') {
+      if (this._state === 'paused') {
+        this._cb?.log(`▶️ ${c} received — resuming paused loop…`);
+        this._notifyDiscord(`▶️ Resuming loop (\`${c}\` received)`);
+        this.retry();
+      } else {
+        this._cb?.log(`▶️ ${c} received but loop is not paused (state=${this._state}) — ignoring.`);
+      }
       return;
     }
     if (c === '/clear') {
@@ -1606,6 +1616,22 @@ export class TaskLoopRunner {
           });
           // Never markDone — restore the task so it is retried after re-auth.
           await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+          // Evict the cached persistent provider process. claude-tui / opencode-sdk
+          // / copilot-sdk cache one live process per root that is still holding the
+          // dead token, so re-login on disk would otherwise never be picked up and
+          // Retry would spawn straight back into the same auth failure. Closing it
+          // forces a fresh process (reading the new credentials) on resume.
+          const evictRoot = this._workspaceRoot;
+          if (evictRoot) {
+            try {
+              const evictLog = (m: string) => this._cb?.log(m);
+              if (currentProvider === 'claude-tui') { closeClaudeTuiClient(evictRoot, evictLog); }
+              else if (currentProvider === 'opencode-sdk') { closeOpencodeSdkClient(evictRoot, evictLog); }
+              else if (currentProvider === 'copilot-sdk') { closeCopilotSdkSession(evictRoot, evictLog); }
+            } catch (evictErr) {
+              this._cb?.log(`⚠️ Failed to evict ${currentProvider} client before reauth pause: ${evictErr instanceof Error ? evictErr.message : String(evictErr)}`);
+            }
+          }
           // Pause indefinitely (no auto-resume) — operator must re-auth + Retry.
           await this._pauseLoop();
           if (this._state !== 'running') { break; }

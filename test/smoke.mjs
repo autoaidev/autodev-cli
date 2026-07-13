@@ -10,6 +10,7 @@ import { replaceProjectBuiltinMcp, saveProjectUserMcp, loadProjectAllMcp, isRemo
 import { officeWsUrl, describePush } from '../out/commands/mcpOperate.js';
 import { saveAttachment } from '../out/messageBuilder.js';
 import { RateLimitDetector, AuthDetector } from '../out/rateLimit.js';
+import { isKnownSlashCommand } from '../out/core/commands.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
 
 let pass = 0;
@@ -157,6 +158,20 @@ ok('AuthDetector matches auth-failure banners, not prose', () => {
   // detect() returns a non-null AuthError only for a real banner.
   assert.ok(AuthDetector.detect('Invalid API key · Please run /login') !== null);
   assert.ok(AuthDetector.detect('just some normal output') === null);
+});
+
+// Slash-command whitelist: only exact known controls divert; other slash text is a task.
+ok('isKnownSlashCommand matches only exact known controls', () => {
+  assert.ok(isKnownSlashCommand('/restart'));
+  assert.ok(isKnownSlashCommand('/clear'));
+  assert.ok(isKnownSlashCommand('/retry'));
+  assert.ok(isKnownSlashCommand('  /RESUME  '));
+  // Ordinary messages that merely start with '/' must NOT be diverted (they are
+  // real tasks and were previously silently discarded).
+  assert.ok(!isKnownSlashCommand('/login is broken'));
+  assert.ok(!isKnownSlashCommand('/etc/nginx needs a tweak'));
+  assert.ok(!isKnownSlashCommand('/restart the server please'));
+  assert.ok(!isKnownSlashCommand('hello'));
 });
 
 // mcp_update hardening: shell/path commands are rejected, launchers + remote allowed.

@@ -29,7 +29,7 @@
     "dev": "tsc -p ./ --watch",
     "prepublishOnly": "npm run build",
     "start": "node bin/autodev.js",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/liveNarration.smoke.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",

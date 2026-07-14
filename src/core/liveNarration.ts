@@ -107,6 +107,11 @@ export class LiveNarrationStreamer {
   private readonly _flushChars: number;
   private readonly _flushMs: number;
   private readonly _previewLen: number;
+  // Lifetime counters for low-noise telemetry: incremented once per push() (NOT
+  // per char) so the running totals prove — from stderr logs alone — that a given
+  // provider is actually streaming chunks rather than emitting once at turn end.
+  private _chunks = 0;
+  private _bytes = 0;
 
   constructor(
     private readonly provider: string,
@@ -122,6 +127,8 @@ export class LiveNarrationStreamer {
   /** Feed newly-produced assistant text. Emits when the buffer is large enough. */
   push(text: string): void {
     if (!text) { return; }
+    this._chunks++;
+    this._bytes += Buffer.byteLength(text, 'utf8');
     this._buf += text;
     if (this._buf.length >= this._flushChars) { this.flush(); return; }
     if (!this._timer) { this._timer = setTimeout(() => this.flush(), this._flushMs); }
@@ -135,6 +142,17 @@ export class LiveNarrationStreamer {
     if (!t) { return; }
     const preview = t.length > this._previewLen ? t.slice(0, this._previewLen - 1) + '…' : t;
     this.emit(buildNotificationEvent(this.provider, this.root, preview));
+    // One structured stderr line per emit (never per char): running proof that
+    // THIS provider streamed. `stripped` = the coalesced text still carried
+    // ANSI/CR that stripAnsi would remove (raw-terminal providers), computed
+    // without mutating the emitted Notification JSON. Best-effort — telemetry
+    // must never break a task.
+    try {
+      const stripped = stripAnsi(t) !== t;
+      process.stderr.write(
+        `[live-narration] provider=${this.provider} chunks=${this._chunks} bytes=${this._bytes} stripped=${stripped}\n`,
+      );
+    } catch { /* non-critical — logging must never throw into the task */ }
   }
 
   /** Drop buffered text and clear the timer WITHOUT emitting (call on abort/close). */

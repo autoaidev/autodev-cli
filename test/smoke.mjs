@@ -17,6 +17,7 @@ import { isSafeChildSegment } from '../out/agentBackup/sessionProviders.js';
 import { emailPassesAuth } from '../out/emailPoller.js';
 import { CLI_VERSION } from '../out/version.js';
 import { buildWsUpgradeRequest } from '../out/wsHandshake.js';
+import { LiveNarrationStreamer, buildNotificationEvent, stripAnsi } from '../out/core/liveNarration.js';
 import { createRequire } from 'node:module';
 
 let pass = 0;
@@ -323,6 +324,79 @@ ok('buildWsUpgradeRequest sends X-Agent-Key header + keeps query token', () => {
     upgradePath: '/ws?token=t', host: 'h', port: 80, secWebSocketKey: 'k',
   });
   assert.ok(!noKey.includes('X-Agent-Key'), 'no header when key absent');
+});
+
+// Live chat streaming for NON-Claude providers: the LiveNarrationStreamer
+// coalesces streamed assistant text into `Notification` hook events (the SAME
+// frame type Claude's native hooks produce), so grok / copilot / opencode show
+// live output in the pixel-office chat instead of only at turn boundaries.
+// The `emit` callback stands in for the WS-emit sink (append→poller→sendFrame);
+// mocking it lets us assert incremental frames are sent DURING a turn.
+ok('LiveNarrationStreamer emits incremental Notification frames while streaming', () => {
+  const frames = [];
+  const emit = (ev) => frames.push(ev);
+  // Small flush threshold so char-driven flushes fire synchronously (no timers).
+  const s = new LiveNarrationStreamer('copilot-sdk', '/tmp/ws', emit, { flushChars: 8, previewLen: 100 });
+
+  // Nothing emitted until the buffer crosses the threshold — proves it coalesces
+  // rather than emitting one frame per token.
+  s.push('abc');
+  assert.equal(frames.length, 0, 'sub-threshold text is buffered, not emitted');
+
+  // Crossing flushChars emits ONE frame mid-turn (incremental, before any flush()).
+  s.push('defghij');
+  assert.equal(frames.length, 1, 'threshold crossed → one incremental frame');
+
+  // A second burst emits a SECOND frame — the hallmark of live streaming.
+  s.push('klmnopqrstuvwxyz');
+  assert.equal(frames.length, 2, 'continued streaming → more incremental frames');
+
+  // Every emitted frame is a well-formed Notification hook event that pixel-office
+  // renders as an assistant bubble (event_type 'notification').
+  for (const f of frames) {
+    assert.equal(f.hook_event_name, 'Notification');
+    assert.equal(f.event_type, 'notification');
+    assert.equal(f.provider, 'copilot-sdk');
+    assert.ok(typeof f.message === 'string' && f.message.length > 0, 'frame carries text');
+    assert.ok(typeof f.timestamp === 'string' && f.timestamp.length > 0, 'frame is timestamped');
+  }
+
+  // flush() ships trailing buffered text at the turn boundary…
+  s.push('tail');
+  s.flush();
+  assert.equal(frames.length, 3, 'flush() emits the trailing chunk');
+  assert.equal(frames[2].message, 'tail');
+
+  // …and is a no-op when the buffer is empty (no phantom empty bubbles).
+  s.flush();
+  assert.equal(frames.length, 3, 'flush() on an empty buffer emits nothing');
+});
+
+ok('LiveNarrationStreamer.dispose drops buffered text without emitting', () => {
+  const frames = [];
+  const s = new LiveNarrationStreamer('opencode-cli', '/tmp/ws', (ev) => frames.push(ev), { flushChars: 1000 });
+  s.push('half a sentence that never finished');
+  s.dispose();              // abort/close path — must NOT emit a partial bubble
+  s.flush();                // even a later flush finds nothing buffered
+  assert.equal(frames.length, 0, 'disposed buffer is dropped, not emitted');
+});
+
+ok('stripAnsi removes escape codes so raw CLI stdout is clean chat text', () => {
+  const ESC = '\u001b';
+  const raw = `${ESC}[32mBuilding${ESC}[0m project...\r\n${ESC}[1mDone${ESC}[0m`;
+  const clean = stripAnsi(raw);
+  assert.ok(!clean.includes(ESC), 'no ANSI escapes remain');
+  assert.ok(!clean.includes('\r'), 'carriage returns stripped');
+  assert.equal(clean, 'Building project...\nDone', 'visible text preserved verbatim');
+})
+
+ok('buildNotificationEvent produces the render-able unified schema', () => {
+  const ev = buildNotificationEvent('grok-cli', '/work/root', 'hello world');
+  assert.equal(ev.hook_event_name, 'Notification');
+  assert.equal(ev.event_type, 'notification'); // NARRATION_EVENTS in pixel-office
+  assert.equal(ev.provider, 'grok-cli');
+  assert.equal(ev.cwd, '/work/root');
+  assert.equal(ev.message, 'hello world');
 });
 
 Promise.resolve().then(() => console.log(`\n${pass} checks passed`));

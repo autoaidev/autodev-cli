@@ -42,6 +42,7 @@ export type LoopState = 'idle' | 'running' | 'stopping' | 'paused';
 
 import { RateLimitError, RateLimitDetector, AuthError, AuthDetector } from './rateLimit';
 import { CliExitHandler } from './cliExit';
+import { LiveNarrationStreamer, appendHookEventLine, stripAnsi } from './core/liveNarration';
 
 class ContextLengthError extends Error {
   constructor(readonly rawMessage: string) {
@@ -2028,6 +2029,27 @@ export class TaskLoopRunner {
     const isGrokCli    = this._cb?.getActiveProvider() === 'grok-cli';
     const isGrokTui    = this._cb?.getActiveProvider() === 'grok-tui';
     const isCopilotCli = this._cb?.getActiveProvider() === 'copilot-cli';
+
+    // Live chat streaming for the two shell-command CLI providers. copilot-cli
+    // and opencode-cli run as teed shell commands, so — unlike Claude (native
+    // hooks), grok (streaming-json → Notification) and the SDK providers
+    // (in-process event callbacks) — they emit NO incremental hook events during
+    // a turn; the chat only updated at the SessionStart/SessionEnd boundaries.
+    // Their only live signal is the growing teed stdout file, which checkStdout()
+    // already tails. Feed that stdout (ANSI-stripped) through a narrator so each
+    // chunk becomes a `Notification` hook event, giving line/chunk-granularity
+    // live output. (Claude/grok/SDK providers already stream and are untouched.)
+    const cliNarrator = (this._workspaceRoot && (isCopilotCli || isOpenCodeCli))
+      ? new LiveNarrationStreamer(
+          this._cb!.getActiveProvider() ?? 'cli',
+          this._workspaceRoot,
+          ev => appendHookEventLine(this._workspaceRoot!, ev),
+        )
+      : null;
+    // Independent cursor so narration doesn't disturb the claude-cli Discord
+    // forwarding cursor (lastStdoutLen) below.
+    let lastNarratedLen = 0;
+
     return new Promise<void>((resolve, reject) => {
       if (this._state !== 'running') { resolve(); return; }
 
@@ -2081,6 +2103,9 @@ export class TaskLoopRunner {
       const cleanup = () => {
         cancelled = true;
         this._taskCompletionAbort = null;
+        // Emit any trailing streamed CLI output so the turn's final lines reach
+        // the chat before the watchers are torn down.
+        cliNarrator?.flush();
         clearInterval(poller);
         for (const t of endTurnTimers) { clearTimeout(t); }
         endTurnTimers.length = 0;
@@ -2167,6 +2192,15 @@ export class TaskLoopRunner {
       const checkStdout = () => {
         if (!teesStdout) { return; }
         const content = readStdoutFile();
+
+        // Stream new stdout to the chat live for the shell-command CLI providers
+        // (copilot-cli / opencode-cli). Uses its own cursor so it is independent
+        // of the claude-cli Discord-forwarding cursor below.
+        if (cliNarrator && content.length > lastNarratedLen) {
+          const chunk = content.slice(lastNarratedLen);
+          lastNarratedLen = content.length;
+          cliNarrator.push(stripAnsi(chunk));
+        }
 
         // Forward new output lines to Discord / webhook.
         // claude-cli: stream partial chunks so the operator can see live progress.

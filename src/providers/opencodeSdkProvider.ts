@@ -15,6 +15,7 @@ import * as path from 'path';
 import * as net from 'net';
 import { pathToFileURL } from 'url';
 import { normalizeEvent } from '../hookEventNormalizer';
+import { LiveNarrationStreamer, appendHookEventLine } from '../core/liveNarration';
 
 // ---------------------------------------------------------------------------
 // Minimal TypeScript interfaces for the parts of the SDK we use.
@@ -207,6 +208,23 @@ const _SKIP_LOG = new Set([
 /** Accumulated assistant text per root — flushed to the output channel on session.idle. */
 const _textBuffer = new Map<string, string>();
 
+/**
+ * Per-root live-narration streamer: coalesces the SDK's streamed text deltas into
+ * periodic `Notification` hook events so the assistant's message shows up in the
+ * pixel-office chat LIVE, instead of only at session.idle (turn boundary).
+ */
+const _narrators = new Map<string, LiveNarrationStreamer>();
+
+/** Get (or lazily create) the live-narration streamer for a root. */
+function _getNarrator(root: string): LiveNarrationStreamer {
+  let n = _narrators.get(root);
+  if (!n) {
+    n = new LiveNarrationStreamer('opencode-sdk', root, ev => appendHookEventLine(root, ev));
+    _narrators.set(root, n);
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // JSONL sink — normalizes raw SDK events to the unified hook schema and
 // appends them to <root>/.autodev/hooks-events.jsonl for the WS poller.
@@ -245,6 +263,8 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
           const delta = props?.delta as string | undefined;
           if (delta) {
             _textBuffer.set(root, (_textBuffer.get(root) ?? '') + delta);
+            // Stream this delta to the chat live (coalesced Notification events).
+            _getNarrator(root).push(delta);
           }
         }
         continue;
@@ -325,6 +345,11 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
         _activity.delete(root);
         const text = _textBuffer.get(root);
         _textBuffer.delete(root);
+        // Flush the trailing streamed text so the turn's final words reach the chat.
+        // The assistant message was already streamed live as Notification events,
+        // so emit a PLAIN session.idle (→ Stop) here WITHOUT _assistantText —
+        // re-attaching the full text would duplicate it as one big trailing bubble.
+        _narrators.get(root)?.flush();
         if (text?.trim()) {
           logger(`[OC] ── Assistant ──────────────────────────`);
           for (const line of text.split('\n')) { logger(line); }
@@ -332,8 +357,7 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
         } else {
           logger(`[OC] session.idle`);
         }
-        const idleProps = text?.trim() ? { ...(props ?? {}), _assistantText: text.slice(0, 3000) } : (props ?? {});
-        _appendHookEvent(root, { payload: { type: 'session.idle', properties: idleProps } });
+        _appendHookEvent(root, { payload: { type: 'session.idle', properties: props ?? {} } });
         continue;
       }
 
@@ -356,6 +380,8 @@ function _evictClient(root: string): void {
     _state.delete(root);
     _loggers.delete(root);
     _textBuffer.delete(root);
+    _narrators.get(root)?.dispose();
+    _narrators.delete(root);
   }
 }
 
@@ -531,6 +557,8 @@ export function closeOpencodeSdkClient(root: string, log: (msg: string) => void)
     _loggers.delete(root);
     _activity.delete(root);
     _textBuffer.delete(root);
+    _narrators.get(root)?.dispose();
+    _narrators.delete(root);
   }
 }
 
@@ -553,6 +581,8 @@ export function closeAllOpencodeSdkClients(): void {
     _loggers.delete(root);
     _activity.delete(root);
     _textBuffer.delete(root);
+    _narrators.get(root)?.dispose();
+    _narrators.delete(root);
     _busyRoots.delete(root);
   }
 }

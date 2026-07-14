@@ -16,6 +16,7 @@ import * as fs   from 'fs';
 import * as os   from 'os';
 import * as path from 'path';
 import { appendHookEvent } from '../hookEventNormalizer';
+import { LiveNarrationStreamer, appendHookEventLine } from '../core/liveNarration';
 
 // ---------------------------------------------------------------------------
 // Minimal runtime types mirroring @github/copilot sdk/index.d.ts
@@ -186,6 +187,8 @@ interface CopilotSdkState {
   deltasSeen: boolean;
   /** Set when session.error fires — next idle should dispose & fail the task */
   sessionErrored: boolean;
+  /** Coalesces streamed assistant text into live `Notification` hook events. */
+  narrator:   LiveNarrationStreamer | null;
 }
 
 const _sessions  = new Map<string, CopilotSdkState>();
@@ -282,7 +285,7 @@ async function _sendAsync(
       permissionRequestHandler: async (_req: unknown) => ({ kind: 'approved' as const }),
     } as unknown as Record<string, unknown>);
 
-    state = { session, stdoutFile: null, exitFile: null, log: null, offIdle: null, deltasSeen: false, sessionErrored: false };
+    state = { session, stdoutFile: null, exitFile: null, log: null, offIdle: null, deltasSeen: false, sessionErrored: false, narrator: null };
     _sessions.set(root, state);
 
     // Wire up output streaming to stdoutFile (registered once per session)
@@ -311,12 +314,18 @@ async function _sendAsync(
           localState.sessionErrored = true;
           localState.log?.('Copilot SDK: session.error — will dispose session on next idle');
         }
-        appendHookEvent(
-          hooksJsonlPath, 'copilot-sdk',
-          ev as unknown as Record<string, unknown>,
-          fs, path,
-          (e) => localState.log?.('Copilot SDK [hooks write error]: ' + String(e)),
-        );
+        // Skip the final full-text AgentMessage when we already streamed the same
+        // text live via delta-driven Notification events (below) — otherwise the
+        // chat shows the whole message a second time as one big trailing bubble.
+        const isStreamedAssistantMessage = ev.type === 'assistant.message' && localState.deltasSeen;
+        if (!isStreamedAssistantMessage) {
+          appendHookEvent(
+            hooksJsonlPath, 'copilot-sdk',
+            ev as unknown as Record<string, unknown>,
+            fs, path,
+            (e) => localState.log?.('Copilot SDK [hooks write error]: ' + String(e)),
+          );
+        }
       }
       if (!localState.stdoutFile) { return; }
       if (ev.type === 'assistant.turn_start') {
@@ -326,6 +335,8 @@ async function _sendAsync(
         if (chunk) {
           localState.deltasSeen = true;
           try { fs.appendFileSync(localState.stdoutFile, chunk, 'utf8'); } catch { /* ignore */ }
+          // Stream the assistant's text to the chat live (coalesced Notifications).
+          localState.narrator?.push(chunk);
         }
       } else if (ev.type === 'assistant.message' && !localState.deltasSeen) {
         const content = ev.data?.['content'] as string | undefined;
@@ -347,6 +358,9 @@ async function _sendAsync(
   state.stdoutFile = stdoutFile;
   state.exitFile   = exitFile;
   state.log        = log;
+  // Fresh per-task narrator: streams this turn's assistant text to the chat live.
+  state.narrator?.dispose();
+  state.narrator = new LiveNarrationStreamer('copilot-sdk', root, ev => appendHookEventLine(root, ev));
 
   // Completion helper — safe to call multiple times (no-ops after first call)
   let completionFired = false;
@@ -360,6 +374,9 @@ async function _sendAsync(
     offIdleHandle?.();   offIdleHandle = null;
     offTaskComplete?.(); offTaskComplete = null;
     if (timeoutHandle !== null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
+    // Flush any assistant text still buffered so the turn's final words reach the chat.
+    state!.narrator?.flush();
+    state!.narrator = null;
     log('Copilot SDK: task complete (' + reason + ')');
     const ef = state!.exitFile;
     state!.exitFile   = null;
@@ -375,6 +392,8 @@ async function _sendAsync(
     completionFired = true;
     offIdleHandle?.();   offIdleHandle = null;
     offTaskComplete?.(); offTaskComplete = null;
+    state!.narrator?.flush();
+    state!.narrator = null;
     // Dispose the session (it's stuck on a tool execution — can't recover)
     const s = _sessions.get(root);
     if (s) {
@@ -428,6 +447,7 @@ export function closeCopilotSdkSession(root: string, log: (msg: string) => void)
   if (s) {
     log('Copilot SDK: disposing session');
     s.offIdle?.();
+    s.narrator?.dispose();
     try { s.session.dispose(); } catch { /* ignore */ }
     _sessions.delete(root);
     _busyRoots.delete(root);
@@ -437,6 +457,7 @@ export function closeCopilotSdkSession(root: string, log: (msg: string) => void)
 export function closeAllCopilotSdkSessions(): void {
   for (const [root, s] of _sessions) {
     s.offIdle?.();
+    s.narrator?.dispose();
     try { s.session.dispose(); } catch { /* ignore */ }
     _sessions.delete(root);
   }

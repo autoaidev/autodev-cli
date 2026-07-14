@@ -27,6 +27,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { StringDecoder } from 'string_decoder';
 import { eventTypeFor } from '../hookEventNormalizer';
 
 /** A minimal live hook event in the unified schema pixel-office consumes. */
@@ -112,6 +113,16 @@ export class LiveNarrationStreamer {
   // provider is actually streaming chunks rather than emitting once at turn end.
   private _chunks = 0;
   private _bytes = 0;
+  // UTF-8 boundary safety. When a caller feeds RAW BYTES (Buffer/Uint8Array) a
+  // multibyte code point can be split across two chunks; StringDecoder holds the
+  // incomplete trailing bytes and only surfaces them once the continuation bytes
+  // arrive on a later push, so a split char never leaks as mojibake (U+FFFD).
+  // String pushes bypass the decoder entirely (already decoded) → normal path is
+  // byte-identical. `_pending` = bytes currently held back; `_splits` = number of
+  // pushes that ended mid-code-point (edge-case telemetry, only logged when >0).
+  private readonly _decoder = new StringDecoder('utf8');
+  private _pending = 0;
+  private _splits = 0;
 
   constructor(
     private readonly provider: string,
@@ -124,11 +135,37 @@ export class LiveNarrationStreamer {
     this._previewLen = opts.previewLen ?? 280;
   }
 
-  /** Feed newly-produced assistant text. Emits when the buffer is large enough. */
-  push(text: string): void {
-    if (!text) { return; }
+  /**
+   * Feed newly-produced assistant text. Accepts an already-decoded `string`
+   * (the normal path — pushed verbatim) OR raw bytes (`Buffer`/`Uint8Array`),
+   * which are run through a `StringDecoder` so a UTF-8 code point split across
+   * chunk boundaries is buffered instead of emitted as mojibake. Emits when the
+   * coalesced buffer grows past `flushChars`.
+   */
+  push(input: string | Uint8Array): void {
+    let text: string;
+    let inBytes: number;
+    if (typeof input === 'string') {
+      if (!input) { return; }
+      text = input;
+      inBytes = Buffer.byteLength(input, 'utf8');
+    } else {
+      const b = Buffer.isBuffer(input) ? input : Buffer.from(input);
+      if (b.length === 0) { return; }
+      inBytes = b.length;
+      this._pending += b.length;
+      // Returns only the bytes that form COMPLETE code points; any incomplete
+      // trailing multibyte sequence is retained until the next write() completes it.
+      text = this._decoder.write(b);
+      this._pending -= Buffer.byteLength(text, 'utf8');
+      if (this._pending > 0) { this._splits++; }
+    }
     this._chunks++;
-    this._bytes += Buffer.byteLength(text, 'utf8');
+    this._bytes += inBytes;
+    // A byte chunk that was ENTIRELY an incomplete tail decodes to '' — count it
+    // (it proves the split was absorbed) but add nothing and start no timer; the
+    // continuation arrives on a later push.
+    if (!text) { return; }
     this._buf += text;
     if (this._buf.length >= this._flushChars) { this.flush(); return; }
     if (!this._timer) { this._timer = setTimeout(() => this.flush(), this._flushMs); }
@@ -149,8 +186,12 @@ export class LiveNarrationStreamer {
     // must never break a task.
     try {
       const stripped = stripAnsi(t) !== t;
+      // Edge-case tags are appended ONLY when non-zero so a clean stream's
+      // telemetry line stays byte-identical to the pre-hardening output.
+      const splitsTag = this._splits > 0 ? ` splits=${this._splits}` : '';
+      const pendingTag = this._pending > 0 ? ` pending=${this._pending}` : '';
       process.stderr.write(
-        `[live-narration] provider=${this.provider} chunks=${this._chunks} bytes=${this._bytes} stripped=${stripped}\n`,
+        `[live-narration] provider=${this.provider} chunks=${this._chunks} bytes=${this._bytes} stripped=${stripped}${splitsTag}${pendingTag}\n`,
       );
     } catch { /* non-critical — logging must never throw into the task */ }
   }
@@ -159,5 +200,9 @@ export class LiveNarrationStreamer {
   dispose(): void {
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     this._buf = '';
+    // Discard any half-decoded multibyte tail so an aborted turn can never leak
+    // replacement chars into a later reuse of this streamer.
+    this._decoder.end();
+    this._pending = 0;
   }
 }

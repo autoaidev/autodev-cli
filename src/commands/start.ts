@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from '../sdk';
+import { CLI_VERSION } from '../version';
 
 const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui'] as const;
 
@@ -49,6 +50,7 @@ export function startCommand(program: Command): void {
       }
 
       log.section('🤖 AutoAIDev — Autonomous Task Loop');
+      log.info(`autodev-cli v${CLI_VERSION}`);
       log.info(`Workspace : ${cwd}`);
       log.info(`Provider  : ${opts.provider ?? '(from .autodev/settings.json)'}`);
       log.info(`TODO.md   : ${todoFile}`);

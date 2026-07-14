@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as net from 'net';
 import * as tls from 'tls';
 import { URL } from 'url';
+import { buildWsUpgradeRequest } from './wsHandshake';
 
 /**
  * OfficeSocket — a minimal, self-contained WebSocket client used by
@@ -89,15 +90,11 @@ export class OfficeSocket {
     const upgradePath = `${basePath}?${qs}`;
     const key = crypto.randomBytes(16).toString('base64');
 
-    const handshake = [
-      `GET ${upgradePath} HTTP/1.1`,
-      `Host: ${host}:${port}`,
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Key: ${key}`,
-      'Sec-WebSocket-Version: 13',
-      '', '',
-    ].join('\r\n');
+    // Send the agent key BOTH as the ?token= query param (above, for old
+    // pixel-office) AND as an X-Agent-Key header (preferred; keeps it out of URLs).
+    const handshake = buildWsUpgradeRequest({
+      upgradePath, host, port, secWebSocketKey: key, agentKey: this.apiKey,
+    });
 
     const sock: net.Socket = isSecure
       ? tls.connect({ host, port, servername: host })

@@ -12,6 +12,7 @@ import { todoWriter } from './todoWriteManager';
 import { isKnownSlashCommand } from './core/commands';
 import { resolveWithinRoot } from './core/pathSafe';
 import * as gitService from './git/gitService';
+import { buildWsUpgradeRequest } from './wsHandshake';
 
 // ---------------------------------------------------------------------------
 // WebSocketPoller — persistent WS connection for ws:// / wss:// endpoints
@@ -180,16 +181,11 @@ export class WebSocketPoller {
 
     const key = crypto.randomBytes(16).toString('base64');
 
-    const handshake = [
-      `GET ${upgradePath} HTTP/1.1`,
-      `Host: ${host}:${port}`,
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Key: ${key}`,
-      'Sec-WebSocket-Version: 13',
-      '',
-      '',
-    ].join('\r\n');
+    // Send the agent key BOTH as the ?token= query param (in upgradePath, for old
+    // pixel-office) AND as an X-Agent-Key header (preferred; keeps it out of URLs).
+    const handshake = buildWsUpgradeRequest({
+      upgradePath, host, port, secWebSocketKey: key, agentKey: this.apiKey,
+    });
 
     const sock: net.Socket = isSecure
       ? tls.connect({ host, port, servername: host })

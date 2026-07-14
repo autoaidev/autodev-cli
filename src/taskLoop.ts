@@ -28,6 +28,7 @@ import { EmailTaskPoller } from './emailPoller';
 import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
 import { ConfigManager } from './configManager';
 import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
+import { CLI_VERSION } from './version';
 
 // ---------------------------------------------------------------------------
 // TaskLoopRunner — mirrors PHP Loop.php
@@ -348,7 +349,10 @@ export class TaskLoopRunner {
           settings.webhookSlug,  // use slug as contextId so server can find the agent
         )
       : null;
-    this._webhook?.setMeta({ provider: settings.provider, workDir: root, hostname: this._hostname, gitRepo: this._gitRepo, gitBranch: this._gitBranch });
+    // `cliVersion` rides in the meta merged into every webhook frame — notably
+    // the agent_online (hello) frame — so pixel-office can record which CLI
+    // version each agent runs (surfacing stale, steer-incapable agents).
+    this._webhook?.setMeta({ provider: settings.provider, cliVersion: CLI_VERSION, workDir: root, hostname: this._hostname, gitRepo: this._gitRepo, gitBranch: this._gitBranch });
 
     this._discordPoller = (settings.discordToken && settings.discordChannelId && settings.discordOwners)
       ? new DiscordPoller(settings.discordToken, settings.discordChannelId, settings.discordOwners)
@@ -505,6 +509,7 @@ export class TaskLoopRunner {
     // Start independent background polling loops — run even while AI is processing a task
     this._startPollers(todoPath);
 
+    callbacks.log(`autodev-cli v${CLI_VERSION}`);
     callbacks.log(`Task loop starting — TODO: ${todoPath}`);
     this._notifyWebhook('loop_start', {
       provider:  settings.provider,

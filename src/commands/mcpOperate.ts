@@ -6,6 +6,7 @@ import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
 import { OfficeSocket } from '../officeSocket';
+import { CLI_VERSION } from '../version';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -184,7 +185,7 @@ export function mcpOperateCommand(program: Command): void {
 
         socket = new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),
-          meta: { provider: 'mcp-operator', fileBrowserEnabled: false },
+          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled: false },
           onMessage: (msg) => {
             const notice = describePush(msg);
             if (notice) {

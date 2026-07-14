@@ -15,6 +15,9 @@ import { resolveWithinRoot } from '../out/core/pathSafe.js';
 import { isTrustedDownloadUrl } from '../out/agentBackup/upload.js';
 import { isSafeChildSegment } from '../out/agentBackup/sessionProviders.js';
 import { emailPassesAuth } from '../out/emailPoller.js';
+import { CLI_VERSION } from '../out/version.js';
+import { buildWsUpgradeRequest } from '../out/wsHandshake.js';
+import { createRequire } from 'node:module';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -291,6 +294,35 @@ ok('isTrustedDownloadUrl pins the download to the server origin', () => {
   assert.ok(!isTrustedDownloadUrl('not a url', server));
   // Plain-ws dev server matches plain-http download.
   assert.ok(isTrustedDownloadUrl('http://localhost:8000/api/x', 'ws://localhost:8000/ws'));
+});
+
+// CLI version telemetry: CLI_VERSION must equal the published package.json
+// version — this is the value reported to pixel-office as metadata.cliVersion
+// in the agent_online frame and printed in the startup banner.
+ok('CLI_VERSION matches package.json version', () => {
+  const pkg = createRequire(import.meta.url)('../package.json');
+  assert.equal(CLI_VERSION, pkg.version);
+  assert.ok(/^\d+\.\d+\.\d+/.test(CLI_VERSION), 'looks like a semver');
+});
+
+// WS upgrade request: the agent key is sent as an X-Agent-Key header (preferred,
+// keeps the secret out of URLs) WHILE the existing ?token= query param is left
+// intact in the path (compat with older pixel-office that only reads the query).
+ok('buildWsUpgradeRequest sends X-Agent-Key header + keeps query token', () => {
+  const req = buildWsUpgradeRequest({
+    upgradePath: '/ws?token=agt_secret&endpoint=slug',
+    host: 'office.example', port: 443,
+    secWebSocketKey: 'abc123==', agentKey: 'agt_secret',
+  });
+  assert.ok(req.includes('\r\nX-Agent-Key: agt_secret\r\n'), 'header present');
+  assert.ok(req.includes('GET /ws?token=agt_secret&endpoint=slug HTTP/1.1'), 'query token kept');
+  assert.ok(req.includes('Upgrade: websocket'), 'still a WS upgrade');
+  assert.ok(req.endsWith('\r\n\r\n'), 'CRLF-terminated');
+  // No key → no header (never emit an empty X-Agent-Key).
+  const noKey = buildWsUpgradeRequest({
+    upgradePath: '/ws?token=t', host: 'h', port: 80, secWebSocketKey: 'k',
+  });
+  assert.ok(!noKey.includes('X-Agent-Key'), 'no header when key absent');
 });
 
 Promise.resolve().then(() => console.log(`\n${pass} checks passed`));

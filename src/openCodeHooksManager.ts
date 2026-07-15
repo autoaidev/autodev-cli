@@ -80,6 +80,22 @@ const SKIP_EVENTS = new Set([
   'session.next.tool.called',
   'session.next.tool.success',
   // session.next.tool.failed is NOT skipped — captures error message for failed tool calls
+
+  // opencode's internal registry/bookkeeping bus. These say nothing about what
+  // the AGENT is doing — they're the editor wiring itself up — but they are by
+  // far the loudest thing on the bus: one 30-minute opencode turn shipped 405
+  // plugin.added + 188 catalog.updated + 466 session.updated to the office,
+  // versus 379 actual agent messages. The office has no allowlist (unmapped
+  // names pass through verbatim), so every one of them cost a WS frame, a
+  // hook_events row, and a line in the user's chat timeline. Drop them here, at
+  // the source, rather than paying to ship and store noise we then hide.
+  'plugin.added',
+  'catalog.updated',
+  'integration.updated',
+  'reference.updated',
+  'file.watcher.updated',  // FS-watcher churn, not agent activity
+  'session.updated',       // status ping; the office tracks status itself
+  'session.status',
 ]);
 
 const SESSION_MAP: Record<string, string> = {
@@ -88,13 +104,13 @@ const SESSION_MAP: Record<string, string> = {
   'session.error':      'StopFailure',
   'session.deleted':    'SessionEnd',
   'session.compacted':  'PostCompact',
-  'session.updated':    'SessionStatus',
-  'session.status':     'SessionStatus',
+  // NB: session.updated/session.status, file.watcher.updated and the
+  // plugin/catalog/integration/reference registry events are in SKIP_EVENTS —
+  // deliberately no mapping here, so nothing looks reachable that isn't.
   'message.removed':    'MessageRemoved',
   'todo.updated':       'TaskCreated',
   'command.executed':   'CommandExecuted',
   'file.edited':        'FileEdited',
-  'file.watcher.updated': 'FileWatcherUpdated',
   'permission.asked':   'PermissionAsked',
   'permission.replied': 'PermissionReplied',
   'server.connected':   'ServerConnected',

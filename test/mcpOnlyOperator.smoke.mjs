@@ -99,6 +99,31 @@ ok('mcp-only operator entry leaks no api_key into the provider config', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 3b. Grok gets the SAME operator wiring — the mcp-only fix must not be
+//     opencode-only. Grok's config is TOML (.grok/config.toml), a separate
+//     writer, so it needs its own assertion.
+// ---------------------------------------------------------------------------
+ok('grok loop agent → .grok/config.toml pixel-office is the A2A remote url', () => {
+  const root = boundWorkspace(false);
+  ConfigManager.syncProjectMcpServers(root);
+  const toml = fs.readFileSync(path.join(root, '.grok', 'config.toml'), 'utf8');
+  assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
+  assert.ok(toml.includes('https://office.example/api/mcp/a2a'), 'loop grok points at the A2A endpoint');
+  assert.ok(!/command\s*=\s*"autodev"/.test(toml), 'loop grok has no local operator command');
+});
+
+ok('grok mcp-only agent → .grok/config.toml pixel-office is the operator command', () => {
+  const root = boundWorkspace(true);
+  ConfigManager.syncProjectMcpServers(root);
+  const toml = fs.readFileSync(path.join(root, '.grok', 'config.toml'), 'utf8');
+  assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
+  assert.ok(/command\s*=\s*"autodev"/.test(toml), 'mcp-only grok bridges via autodev');
+  assert.ok(/args\s*=\s*\[\s*"mcp-operate"/.test(toml), 'args start with mcp-operate');
+  assert.ok(!toml.includes('/api/mcp/a2a'), 'mcp-only grok does NOT use the messaging-only A2A endpoint');
+  assert.ok(!toml.includes('AGENTKEY'), 'no api_key leaked into the grok config');
+});
+
+// ---------------------------------------------------------------------------
 // 4. Same office, the only difference is the flag → the two modes really are
 //    distinct wirings (guards against a regression that ties them together).
 // ---------------------------------------------------------------------------

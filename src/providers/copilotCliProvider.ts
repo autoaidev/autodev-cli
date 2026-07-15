@@ -18,12 +18,21 @@ export function buildCopilotCliCommand(
   sessionId?: string,
   model?: string,
   sessionName?: string,
+  mcpConfigFile?: string,
 ): string {
   const resumeFlag = sessionId ? ` --resume=${sessionId}` : '';
   const modelFlag  = model ? ` --model=${model}` : '';
   // `--name` only applies to a NEW session (resume keeps the prior name).
   const nameFlag   = (!sessionId && sessionName) ? ` --name ${JSON.stringify(sessionName)}` : '';
-  const flags = `--autopilot --yolo --no-ask-user --allow-all --no-auto-update --allow-all-paths --allow-all-urls --allow-all-tools --enable-all-github-mcp-tools --no-color --max-autopilot-continues 2000${resumeFlag}${modelFlag}${nameFlag}`;
+  // Per-workspace MCP config. Copilot's own config file is GLOBAL, so on a box
+  // running several agents each sync clobbered the last and every copilot agent
+  // wound up driving whichever workspace synced most recently — i.e. operating
+  // the WRONG office character, since the pixel-office entry carries that agent's
+  // bearer token. `--additional-mcp-config @<file>` is per session, so pointing it
+  // at a file inside the workspace keeps agents from fighting over one config.
+  // (See copilotMcpConfigPath(); the `@` prefix means "read this path".)
+  const mcpFlag = mcpConfigFile ? ` --additional-mcp-config ${JSON.stringify(`@${mcpConfigFile}`)}` : '';
+  const flags = `--autopilot --yolo --no-ask-user --allow-all --no-auto-update --allow-all-paths --allow-all-urls --allow-all-tools --enable-all-github-mcp-tools --no-color --max-autopilot-continues 2000${resumeFlag}${modelFlag}${nameFlag}${mcpFlag}`;
   const fileRef = JSON.stringify(`@${combinedFile}`);
   return `copilot ${flags} -p ${fileRef}`;
 

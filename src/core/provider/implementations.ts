@@ -5,7 +5,9 @@
 // pre-refactor switch in dispatcher.ts exactly.
 // ---------------------------------------------------------------------------
 
+import * as fs from 'fs';
 import * as path from 'path';
+import { copilotMcpConfigPath } from '../../configManager';
 import { ProviderId } from '../../providers';
 import { BaseProvider } from './BaseProvider';
 import {
@@ -54,7 +56,15 @@ export class CopilotCliProvider extends BaseProvider {
       process.env['COPILOT_GITHUB_TOKEN'] = req.settings.copilotGithubToken;
       if (! process.env['GH_TOKEN']) { process.env['GH_TOKEN'] = req.settings.copilotGithubToken; }
     }
-    let cmd = buildCopilotCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.copilotModel || undefined, req.settings.sessionName || undefined);
+    // Hand copilot THIS workspace's MCP config. Its own config file is global, so
+    // without this every copilot agent on a multi-agent box points at whichever
+    // workspace synced last — i.e. drives the wrong office character. Only passed
+    // when the file exists, so a workspace whose config sync hasn't run yet simply
+    // behaves as before rather than failing on a missing path.
+    const mcpCfg = copilotMcpConfigPath(req.root);
+    const mcpCfgFile = fs.existsSync(mcpCfg) ? mcpCfg : undefined;
+
+    let cmd = buildCopilotCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.copilotModel || undefined, req.settings.sessionName || undefined, mcpCfgFile);
     cmd = teeCommand(cmd, req.stdoutFile);
     if (req.settings.hooksEnabled) {
       cmd = wrapWithSyntheticHooks(cmd, 'copilot-cli', req.root, path.basename(req.root));

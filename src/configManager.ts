@@ -20,6 +20,21 @@ import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProje
 // This class is vscode-free so it can be tested or called independently.
 // ---------------------------------------------------------------------------
 
+/**
+ * Where this workspace's Copilot MCP config lives.
+ *
+ * Copilot's own config (~/.copilot/mcp-config.json) is GLOBAL, so on a box with
+ * several agents each sync clobbered the last and every copilot agent ended up
+ * driving whichever workspace synced most recently. We therefore keep a
+ * per-workspace file and hand it to copilot with `--additional-mcp-config @<file>`.
+ *
+ * Exported so the writer (syncProjectMcpServers) and the reader
+ * (buildCopilotCliCommand) can never disagree about the path.
+ */
+export function copilotMcpConfigPath(root: string): string {
+  return path.join(root, '.autodev', 'copilot-mcp.json');
+}
+
 export class ConfigManager {
   // -------------------------------------------------------------------------
   // Claude CLI
@@ -320,21 +335,41 @@ export class ConfigManager {
       cfg['mcp'] = mcp;
     }, log, 'OpenCode project MCP (opencode.json)');
 
-    // Copilot CLI config: ~/.copilot/mcp-config.json — supports remote { type:'http', url, headers }.
-    // NOTE: Copilot's MCP config is GLOBAL (not per-workspace), so on a box running
-    // multiple agents the pixel-office token is the last-synced agent's. Fine for
-    // single-agent boxes; opt out with disabledBuiltinMcp:['pixel-office'].
-    _mergeJson(path.join(os.homedir(), '.copilot', 'mcp-config.json'), (cfg) => {
-      const srv = _obj(cfg['mcpServers']);
+    // Copilot CLI MCP — PER-WORKSPACE, not the global ~/.copilot/mcp-config.json.
+    //
+    // Copilot's own config file is global, so on a box running several agents each
+    // sync clobbered the last one: every copilot agent ended up pointing at
+    // whichever workspace synced most recently — i.e. operating the WRONG office
+    // character (its `pixel-office` entry carries that agent's bearer token). The
+    // deployer runs many agents per box, so this was the normal case, not an edge.
+    //
+    // Copilot takes `--additional-mcp-config @<file>` (per session, augments the
+    // global file), so write our servers to a file inside the WORKSPACE and let
+    // the command builder pass it. Each agent then carries its own MCP config and
+    // they stop fighting. See buildCopilotCliCommand().
+    _writeJson(copilotMcpConfigPath(root), () => {
+      const srv: Record<string, unknown> = {};
       for (const name of managedNames) {
         const e = effective[name];
-        if (!e) { delete srv[name]; continue; }
+        if (!e) { continue; }
         srv[name] = isRemoteMcp(e)
           ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}), tools: ['*'] }
           : { type: 'local', command: e.command, args: e.args ?? [], env: e.env ?? {}, tools: ['*'] };
       }
-      cfg['mcpServers'] = srv;
-    }, log, 'Copilot MCP (~/.copilot/mcp-config.json)');
+      return { mcpServers: srv };
+    }, log, 'Copilot MCP (per-workspace)');
+
+    // Belt and braces: strip the servers we used to write into the GLOBAL file, so
+    // an agent upgrading from an older CLI doesn't keep a stale pixel-office entry
+    // (with another agent's token) that `--additional-mcp-config` would augment.
+    const globalCopilot = path.join(os.homedir(), '.copilot', 'mcp-config.json');
+    if (fs.existsSync(globalCopilot)) {
+      _mergeJson(globalCopilot, (cfg) => {
+        const srv = _obj(cfg['mcpServers']);
+        for (const name of managedNames) { delete srv[name]; }
+        cfg['mcpServers'] = srv;
+      }, log, 'Copilot MCP (pruned stale global entries)');
+    }
 
     // Grok project config: ./.grok/config.toml — [mcp_servers.<name>] blocks.
     // Remote servers carry a nested [mcp_servers.<name>.headers] table for the
@@ -486,6 +521,28 @@ function _mergeJson(
     }
     mutate(cfg);
     fs.writeFileSync(filePath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    log?.(`ConfigManager: applied ${label}`);
+  } catch (err) {
+    log?.(`ConfigManager: failed ${label}: ${err}`);
+  }
+}
+
+/**
+ * Write a file we fully own (unlike _mergeJson, which preserves foreign keys).
+ * Used for the per-workspace copilot MCP config: it is generated wholesale from
+ * the effective server set, so a removed/disabled server must actually vanish
+ * rather than linger from a previous write.
+ */
+function _writeJson(
+  filePath: string,
+  build: () => unknown,
+  log: ((m: string) => void) | undefined,
+  label: string,
+): void {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+    fs.writeFileSync(filePath, JSON.stringify(build(), null, 2) + '\n', 'utf8');
     log?.(`ConfigManager: applied ${label}`);
   } catch (err) {
     log?.(`ConfigManager: failed ${label}: ${err}`);

@@ -13,11 +13,31 @@ import {
   findBundledVsix,
 } from '../launchIde';
 
+/**
+ * A brand-new agent's TODO.md.
+ *
+ * Two things here are load-bearing, both learned the hard way:
+ *
+ * 1. The heading MUST be "## Todo" — that is what appendTask() looks for
+ *    (todo.ts). It used to say "## Tasks", so appendTask never found a section
+ *    and created a SECOND one below, leaving every new workspace with two task
+ *    lists.
+ *
+ * 2. There is NO example checkbox. The old template shipped
+ *    "- [ ] Example task — replace with your real task", which is a real,
+ *    executable task: pickNextTask() takes the first `todo` in file order, so a
+ *    brand-new agent spent its FIRST LLM call doing nothing of value, and the
+ *    customer's actual task ran second. The guidance below is prose for exactly
+ *    this reason — the parser (/^\s*(?:-\s*)?\[\s+\]\s*(.+)$/) is whitespace-
+ *    tolerant, so an example checkbox is executed even indented inside a comment.
+ */
 const TODO_TEMPLATE = `# TODO
 
-## Tasks
+## Todo
 
-- [ ] Example task — replace with your real task
+<!-- Add one task per line as a markdown checkbox: a dash, a space, empty
+     brackets, then the task text. Tasks run top to bottom. Assigning work from
+     the office appends it here automatically. -->
 
 `;
 

@@ -1,6 +1,6 @@
 {
   "name": "autodev-cli",
-  "version": "1.4.40",
+  "version": "1.4.41",
   "description": "AutoAIDev CLI — autonomous AI task loop with VS Code / Cursor launcher",
   "license": "MIT",
   "bin": {
@@ -29,7 +29,7 @@
     "dev": "tsc -p ./ --watch",
     "prepublishOnly": "npm run build",
     "start": "node bin/autodev.js",
-    "test": "node test/smoke.mjs && node test/liveNarration.smoke.mjs && node test/liveNarration.edge.smoke.mjs && node test/normalizer.parity.smoke.mjs && node test/providerConfig.smoke.mjs && node test/mcpOnlyOperator.smoke.mjs && node test/opencodeEventFilter.smoke.mjs && node test/copilotMcpIsolation.smoke.mjs && node test/grokSpawnError.smoke.mjs"
+    "test": "node test/smoke.mjs && node test/liveNarration.smoke.mjs && node test/liveNarration.edge.smoke.mjs && node test/normalizer.parity.smoke.mjs && node test/providerConfig.smoke.mjs && node test/mcpOnlyOperator.smoke.mjs && node test/opencodeEventFilter.smoke.mjs && node test/copilotMcpIsolation.smoke.mjs && node test/grokSpawnError.smoke.mjs && node test/initTemplate.smoke.mjs && node test/settingsAliases.smoke.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",

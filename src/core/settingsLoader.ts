@@ -341,6 +341,29 @@ export function settingsReadPath(root: string): string {
   return canonical; // doesn't exist; callers handle missing-file
 }
 
+/**
+ * Field names the docs and the office UI have long told users to write by hand,
+ * mapped to the ones this loader actually reads.
+ *
+ * They never matched. The "Manual (raw creds)" instructions
+ * (AgentConnectCommands.vue, docs/CONNECT-A-LOCAL-AGENT.md) say to write
+ * `officeWsUrl` / `apiKey` / `slug`; the loader only ever read `wsUrl` /
+ * `serverApiKey` / `webhookSlug`. Following the documented steps therefore
+ * produced a settings.json the CLI silently ignored: no binding, no office, and
+ * NO ERROR — the agent just sat there looking fine.
+ *
+ * Accepting them as aliases (rather than only correcting the docs) is deliberate:
+ * it repairs every settings.json already written from those instructions, without
+ * the user having to discover that the guidance was wrong.
+ *
+ * Canonical keys always win; an alias only fills a field left empty.
+ */
+const SETTINGS_ALIASES: Record<string, keyof AutodevSettings> = {
+  officeWsUrl: 'wsUrl',
+  apiKey: 'serverApiKey',
+  slug: 'webhookSlug',
+};
+
 /** Load settings, preferring `.autodev/settings.json` and falling back to the legacy `.vscode/autodev.json`. */
 export function loadSettingsForRoot(root: string): AutodevSettings {
   try {
@@ -348,6 +371,15 @@ export function loadSettingsForRoot(root: string): AutodevSettings {
     if (!fs.existsSync(file)) { return { ...SETTINGS_DEFAULTS }; }
     const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<AutodevSettings>;
     const merged = { ...SETTINGS_DEFAULTS, ...raw };
+
+    // Fold in the documented-but-unread names before anything derives from them.
+    const rawAny = raw as Record<string, unknown>;
+    for (const [alias, canonical] of Object.entries(SETTINGS_ALIASES)) {
+      const v = rawAny[alias];
+      if (typeof v === 'string' && v !== '' && !merged[canonical]) {
+        (merged as Record<string, unknown>)[canonical] = v;
+      }
+    }
     // If wsUrl is set, derive the three legacy fields from it (wsUrl takes priority).
     const parsed = parseWsUrl(merged.wsUrl);
     if (parsed) {

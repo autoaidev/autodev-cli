@@ -150,6 +150,19 @@ export function sendGrokPrompt(
 
   _busyRoots.add(root);
 
+  /**
+   * Fail the turn the way the (previously unreachable) catch below intended.
+   * Shared so the sync and async paths can't drift into disagreeing.
+   */
+  const failSpawn = (msg: string): void => {
+    log(`Grok spawn error: ${msg}`);
+    try { fs.appendFileSync(stdoutFile, `\n[Grok spawn error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
+    // The exit file is what the loop waits on — without it the turn never ends.
+    try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
+    _activeChildren.delete(root);
+    _busyRoots.delete(root);
+  };
+
   let child: child_process.ChildProcess;
   try {
     child = child_process.spawn(
@@ -168,16 +181,34 @@ export function sendGrokPrompt(
         env: { ...process.env },
       },
     );
-    _activeChildren.set(root, child);
-    _emitGrokHook(root, 'SessionStart', { source: 'startup' });
   } catch (spawnErr) {
-    const msg = (spawnErr as Error)?.message ?? String(spawnErr);
-    log(`Grok spawn error: ${msg}`);
-    try { fs.appendFileSync(stdoutFile, `\n[Grok spawn error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
-    try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
-    _busyRoots.delete(root);
+    // Kept for the genuinely synchronous failures (bad options/EACCES on some
+    // platforms). A MISSING BINARY does NOT land here — see the 'error' handler.
+    failSpawn((spawnErr as Error)?.message ?? String(spawnErr));
     return;
   }
+
+  // The one that actually fires when grok isn't installed.
+  //
+  // `spawn()` does NOT throw on ENOENT — it emits 'error' asynchronously — so the
+  // catch above was dead code for the most common failure by far. With no handler
+  // the error escaped to start.ts's uncaughtException backstop, which keeps the
+  // process alive: 'close' never fired, the exit file stayed empty, _busyRoots was
+  // never cleared, and SessionStart had ALREADY been emitted — so the office showed
+  // the agent WORKING, forever, on a grok that was never running. Observed live:
+  // an agent "online" and busy for hours whose only trace was `spawn grok ENOENT`
+  // buried in agent.log. (opencodeCliProvider always did this correctly.)
+  child.on('error', (err: Error) => {
+    const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+    failSpawn(missing
+      ? `${GROK_BIN} is not installed or not on PATH (${err.message})`
+      : err.message);
+  });
+
+  _activeChildren.set(root, child);
+  // Emit SessionStart only AFTER the child is confirmed running. Emitting it
+  // before spawn resolves is what let a failed turn masquerade as an active one.
+  child.once('spawn', () => { _emitGrokHook(root, 'SessionStart', { source: 'startup' }); });
 
   // -------------------------------------------------------------------------
   // Watchdog — grok can wedge internally (e.g. retrying a failing tool call

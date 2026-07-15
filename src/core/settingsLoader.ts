@@ -107,6 +107,22 @@ export interface AutodevSettings {
    * has explicitly disabled. Built-ins default to enabled when not listed.
    */
   disabledBuiltinMcp: string[];
+  /**
+   * MCP-only agent (no autodev loop). When true, the auto-attached office
+   * built-in is wired to the OPERATOR MCP (`autodev mcp-operate` →
+   * `…/api/office-mcp`) instead of the A2A-only remote (`…/api/mcp/a2a`).
+   *
+   * Why it matters: the A2A endpoint carries messaging only — no presence
+   * write, no task/report tools — which is fine for a loop agent (it has its
+   * own WebSocket presence + task loop) but leaves a pure-MCP client offline
+   * with no way to pull work. The operator bridge registers presence (its own
+   * socket + office-mcp polling) and exposes the full agent toolkit (tasks,
+   * report, status, whoami) plus A2A, so an MCP-only client — opencode/Kimi,
+   * Claude Code, any MCP client — becomes a first-class office agent.
+   *
+   * Loop agents leave this false (the default) and keep the A2A remote.
+   */
+  mcpOnly: boolean;
   /** Fallback provider to use when the main provider hits a rate limit. Empty string = disabled. */
   fallbackProvider: ProviderId;
   /** Whether to automatically switch to fallbackProvider on rate limit instead of pausing. */
@@ -256,6 +272,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   opencodeCacheEnabled: false,
   mcpServers: {},
   disabledBuiltinMcp: [],
+  mcpOnly: false,
   fallbackProvider: 'opencode-cli' as ProviderId,
   fallbackProviderEnabled: false,
   enabledProfileSections: [],

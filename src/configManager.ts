@@ -228,11 +228,22 @@ export class ConfigManager {
         origin = `${proto}//${u.host}`;
       } catch { /* invalid/empty url */ }
       if (origin && key && !disabledBuiltins.includes('pixel-office')) {
-        builtinsForJson['pixel-office'] = {
-          type: 'http',
-          url: `${origin}/api/mcp/a2a`,
-          headers: { Authorization: `Bearer ${key}` },
-        };
+        // MCP-only agents (no autodev loop) get the OPERATOR bridge — a local
+        // stdio server (`autodev mcp-operate <root>`) that speaks to
+        // …/api/office-mcp. Unlike the A2A remote it registers presence and
+        // exposes the full agent toolkit (tasks/report/status) plus A2A, so a
+        // pure-MCP client (opencode/Kimi, Claude Code, …) becomes a real,
+        // online office agent instead of a messaging-only, offline one. The
+        // bridge reads url+key from the workspace binding, so no token is
+        // written into the provider config files. Loop agents keep the A2A
+        // remote (they already have their own WS presence + task loop).
+        builtinsForJson['pixel-office'] = s.mcpOnly
+          ? { command: 'autodev', args: ['mcp-operate', root] }
+          : {
+              type: 'http',
+              url: `${origin}/api/mcp/a2a`,
+              headers: { Authorization: `Bearer ${key}` },
+            };
       }
     } catch { /* ignore — office binding is optional */ }
 

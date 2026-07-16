@@ -40,9 +40,10 @@ ok('it is the CLI stdio A2A bridge — NO bearer token in the file', () => {
   assert.strictEqual(po.command, 'autodev', 'pixel-office must run via the autodev CLI binary');
   assert.ok(Array.isArray(po.args), 'has args');
   assert.ok(po.args.includes('mcp-operate'), 'uses the mcp-operate bridge');
+  assert.strictEqual(po.args[1], '.', 'relative workspace path so the config is portable');
   const urlArg = po.args[po.args.indexOf('--url') + 1] ?? '';
   assert.match(urlArg, /\/api\/mcp\/a2a$/, 'loop agent bridges to the A2A endpoint');
-  assert.ok(po.args.includes('--no-socket'), 'loop agent skips the presence socket (loop owns presence)');
+  assert.ok(!po.args.includes('--no-socket'), 'presence socket stays ON (agent shows online + live events)');
   // The whole point: the token lives in .autodev/settings.json, never here.
   assert.strictEqual(po.type, undefined, 'not a remote http entry');
   assert.strictEqual(po.headers, undefined, 'no headers block');

@@ -251,14 +251,17 @@ export class ConfigManager {
         //   …/api/office-mcp: it registers presence and exposes the full toolkit
         //   (tasks/report/status) plus A2A, so a pure-MCP client (opencode/Kimi,
         //   Claude Code, …) becomes a real, online office agent.
-        // - Loop agents get the A2A bridge (…/api/mcp/a2a) with --no-socket: the
-        //   loop already holds its own WS presence + task loop, so this adds only
-        //   the agent-to-agent messaging tools without a second presence
-        //   connection. Same semantics as the old A2A remote, minus the token in
-        //   the file.
+        // - Loop agents get the A2A bridge (…/api/mcp/a2a). It keeps the presence
+        //   socket ON so the agent shows online and receives teammates' messages
+        //   live (wait_for_events); mcp-operate resolves the slug from the binding,
+        //   which the A2A endpoint can't provide via whoami.
+        //
+        // The workspace path is relative ('.') so the config is portable and can
+        // be committed — the MCP client runs the bridge from the workspace dir,
+        // where mcp-operate finds .autodev/settings.json.
         builtinsForJson['pixel-office'] = s.mcpOnly
-          ? { command: 'autodev', args: ['mcp-operate', root] }
-          : { command: 'autodev', args: ['mcp-operate', root, '--url', `${origin}/api/mcp/a2a`, '--no-socket'] };
+          ? { command: 'autodev', args: ['mcp-operate', '.'] }
+          : { command: 'autodev', args: ['mcp-operate', '.', '--url', `${origin}/api/mcp/a2a`] };
       }
     } catch { /* ignore — office binding is optional */ }
 

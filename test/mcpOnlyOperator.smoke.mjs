@@ -67,9 +67,10 @@ ok('loop agent → pixel-office is the A2A bridge via the autodev CLI (no token 
   assert.ok(Array.isArray(po.command), 'has a local command array');
   assert.strictEqual(po.command[0], 'autodev', 'runs the autodev CLI binary');
   assert.ok(po.command.includes('mcp-operate'), 'via the mcp-operate bridge');
+  assert.strictEqual(po.command[2], '.', 'relative workspace path (portable config)');
   const urlArg = po.command[po.command.indexOf('--url') + 1] ?? '';
   assert.strictEqual(urlArg, 'https://office.example/api/mcp/a2a', 'bridges to the A2A endpoint, wss→https normalised');
-  assert.ok(po.command.includes('--no-socket'), 'loop agent skips the presence socket (the loop owns presence)');
+  assert.ok(!po.command.includes('--no-socket'), 'presence socket stays ON');
 });
 
 // ---------------------------------------------------------------------------
@@ -83,7 +84,7 @@ ok('mcp-only agent → pixel-office is the OPERATOR bridge (autodev mcp-operate 
   const po = oc.mcp?.['pixel-office'];
   assert.ok(po, 'opencode.json has a pixel-office server');
   assert.strictEqual(po.type, 'local', 'mcp-only agent uses a local stdio bridge');
-  assert.deepStrictEqual(po.command, ['autodev', 'mcp-operate', root], 'bridges via `autodev mcp-operate <root>`');
+  assert.deepStrictEqual(po.command, ['autodev', 'mcp-operate', '.'], 'bridges via `autodev mcp-operate .` (relative, operator/office-mcp default)');
   assert.strictEqual(po.enabled, true);
 });
 
@@ -116,7 +117,7 @@ ok('grok loop agent → .grok/config.toml pixel-office is the CLI A2A bridge (no
   assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
   assert.ok(/command\s*=\s*"autodev"/.test(toml), 'loop grok now bridges via the autodev CLI');
   assert.ok(toml.includes('/api/mcp/a2a'), 'loop grok points at the A2A endpoint');
-  assert.ok(toml.includes('--no-socket'), 'loop grok skips presence');
+  assert.ok(!toml.includes('--no-socket'), 'loop grok keeps the presence socket on');
   assert.ok(!toml.includes('AGENTKEY'), 'no api_key leaked into the grok config');
 });
 
@@ -148,8 +149,9 @@ ok('loop vs mcp-only produce different pixel-office wirings from the same bindin
   // bridges to the operator (office-mcp) with presence.
   assert.strictEqual(a.type, 'local');
   assert.strictEqual(b.type, 'local');
-  assert.ok(a.command.includes('/api/mcp/a2a') || a.command.includes('--url'), 'loop bridges to A2A');
-  assert.ok(!b.command.includes('--no-socket'), 'mcp-only keeps presence');
+  assert.ok(a.command.includes('--url'), 'loop bridges to the A2A endpoint');
+  assert.ok(!b.command.includes('--url'), 'mcp-only uses the operator (office-mcp) default');
+  assert.ok(!a.command.includes('--no-socket') && !b.command.includes('--no-socket'), 'both keep the presence socket');
   assert.notDeepStrictEqual(a.command, b.command, 'the args differ by mode');
 });
 

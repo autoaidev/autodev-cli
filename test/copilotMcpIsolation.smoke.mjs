@@ -57,14 +57,15 @@ ok('two workspaces get their OWN config, each with its own token', () => {
   const cb = read(copilotMcpConfigPath(b));
 
   assert.notStrictEqual(copilotMcpConfigPath(a), copilotMcpConfigPath(b), 'configs live in separate workspaces');
-  const ta = JSON.stringify(ca.mcpServers['pixel-office']);
-  const tb = JSON.stringify(cb.mcpServers['pixel-office']);
-  // Each config points at its OWN workspace path (mcp-operate then reads that
-  // workspace's settings for the key) — and no token is written into the config.
-  assert.ok(ta.includes(a), 'workspace A config points at A');
-  assert.ok(tb.includes(b), 'workspace B config points at B');
-  assert.ok(!ta.includes(b), 'A must not be clobbered by the later sync of B');
-  assert.ok(!ta.includes('KEY-AAA') && !tb.includes('KEY-BBB'), 'no bearer token is written into the copilot config anymore');
+  const pa = ca.mcpServers['pixel-office'];
+  const pb = cb.mcpServers['pixel-office'];
+  // Isolation is now by FILE (each workspace has its own copilot-mcp.json) plus the
+  // per-workspace cwd at runtime — the entry itself is the relative CLI bridge
+  // (`autodev mcp-operate .`) with NO token and NO absolute path. B's later sync
+  // writes only B's file, so A's file survives with its own bridge intact.
+  assert.ok(pa && pa.command === 'autodev' && pa.args.includes('mcp-operate'), "A's config still has the CLI bridge after B synced");
+  assert.strictEqual(pa.args[1], '.', 'relative workspace path (portable, no absolute path baked in)');
+  assert.ok(!JSON.stringify(ca).includes('KEY-AAA') && !JSON.stringify(cb).includes('KEY-BBB'), 'no bearer token is written into the copilot config');
 });
 
 // ---------------------------------------------------------------------------

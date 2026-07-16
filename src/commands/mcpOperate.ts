@@ -174,13 +174,18 @@ export function mcpOperateCommand(program: Command): void {
         if (opts.socket === false) { return; }
         const wsUrl = officeWsUrl(endpoint);
         if (!wsUrl) { return; }
-        // Learn our slug (needed for the ?endpoint= WS auth) from whoami.
-        let slug = '';
-        try {
-          const who = await proxy(endpoint, key, { jsonrpc: '2.0', id: 'boot-whoami', method: 'tools/call', params: { name: 'whoami', arguments: {} } });
-          const text = (((who['result'] as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text) ?? '');
-          slug = (text.match(/slug:\s*([a-z0-9][a-z0-9-]*)/i)?.[1]) ?? '';
-        } catch { /* whoami failed — skip presence, bridge still works */ }
+        // The slug is needed for the ?endpoint= WS auth. Prefer the workspace
+        // binding — it works for EVERY endpoint, including the A2A one
+        // (…/api/mcp/a2a), which has no whoami tool. Fall back to whoami only for a
+        // raw --url/--key invocation with no bound settings.
+        let slug = (settings.webhookSlug || '').trim();
+        if (!slug) {
+          try {
+            const who = await proxy(endpoint, key, { jsonrpc: '2.0', id: 'boot-whoami', method: 'tools/call', params: { name: 'whoami', arguments: {} } });
+            const text = (((who['result'] as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text) ?? '');
+            slug = (text.match(/slug:\s*([a-z0-9][a-z0-9-]*)/i)?.[1]) ?? '';
+          } catch { /* whoami failed — skip presence, bridge still works */ }
+        }
         if (!slug) { process.stderr.write('autodev mcp-operate: could not resolve slug — presence socket disabled.\n'); return; }
 
         socket = new OfficeSocket(wsUrl, key, slug, {

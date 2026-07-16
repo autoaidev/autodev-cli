@@ -6,6 +6,7 @@ import { URL } from 'url';
 import { log } from './logger';
 import { AutodevSettings, SETTINGS_DEFAULTS, parseWsUrl, loadSettingsForRoot } from './core/settingsLoader';
 import { installHooks, areHooksInstalled } from './hooksManager';
+import { ConfigManager } from './configManager';
 
 // ---------------------------------------------------------------------------
 // CLI ⇄ pixel-office wire protocol
@@ -98,6 +99,12 @@ export function applyWsUrl(cwd: string, wsUrl: string): void {
   settings.autoStartLoop = true;
   saveSettings(cwd, settings);
   ensureHooksInstalled(cwd);
+  // Same as applySetupUrl: write the office MCP server as part of binding.
+  try {
+    ConfigManager.syncProjectMcpServers(cwd, (m) => log.gray(`  ${m}`));
+  } catch (e) {
+    log.warn(`MCP config sync skipped: ${(e as Error).message}`);
+  }
   log.success(`Connected → ${parsed.serverBaseUrl}`);
   log.gray(`  endpoint: ${parsed.webhookSlug}`);
   log.gray(`  saved to: ${configWritePath(cwd)}`);
@@ -141,6 +148,18 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
 
   saveSettings(cwd, settings);
   ensureHooksInstalled(cwd);
+  // Write the office (pixel-office) MCP server into the provider configs NOW, as
+  // part of binding — not lazily on the first loop start. Settings were just
+  // saved, so serverApiKey + serverBaseUrl are present and the pixel-office entry
+  // passes its (origin && key) guard. Without this, `--setup-url` set up the
+  // credential-free built-ins (memory/playwright/…) but left the office MCP
+  // unconfigured until something happened to start the loop. Matches what the
+  // `autodev connect` command already does.
+  try {
+    ConfigManager.syncProjectMcpServers(cwd, (m) => log.gray(`  ${m}`));
+  } catch (e) {
+    log.warn(`MCP config sync skipped: ${(e as Error).message}`);
+  }
   log.success(`Connected → ${settings.serverBaseUrl}`);
   log.gray(`  agent:    ${d.agentName ?? d.agentId ?? d.slug}`);
   log.gray(`  endpoint: ${d.slug ?? settings.webhookSlug}`);

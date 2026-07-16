@@ -251,17 +251,25 @@ export class ConfigManager {
         //   …/api/office-mcp: it registers presence and exposes the full toolkit
         //   (tasks/report/status) plus A2A, so a pure-MCP client (opencode/Kimi,
         //   Claude Code, …) becomes a real, online office agent.
-        // - Loop agents get the A2A bridge (…/api/mcp/a2a). It keeps the presence
-        //   socket ON so the agent shows online and receives teammates' messages
-        //   live (wait_for_events); mcp-operate resolves the slug from the binding,
-        //   which the A2A endpoint can't provide via whoami.
+        // Both variants bridge to the OPERATOR MCP (…/api/office-mcp, the default) —
+        // the FULL toolkit (get_tasks/start_task/complete_task/report/set_status/
+        // check_messages/…) plus A2A messaging, which is a superset of the old
+        // messaging-only A2A endpoint. They differ only in the presence socket:
         //
-        // The workspace path is relative ('.') so the config is portable and can
-        // be committed — the MCP client runs the bridge from the workspace dir,
-        // where mcp-operate finds .autodev/settings.json.
+        // - mcp-only agents keep the socket: the bridge IS their office presence and
+        //   surfaces live steers/messages via wait_for_events.
+        // - loop agents skip the socket (--no-socket): the autodev loop already holds
+        //   this slug's WS presence and injects steers itself. The slug→connection
+        //   index is last-wins (WsConnectionManager), so a second socket for the same
+        //   slug would STEAL presence from the loop and break its steering. The HTTP
+        //   tools (get_tasks/check_messages/…) still work fully without the socket.
+        //
+        // The path is relative ('.') so the config is portable — the MCP client runs
+        // the bridge from the workspace dir, where mcp-operate finds
+        // .autodev/settings.json (so the key is never written into the config).
         builtinsForJson['pixel-office'] = s.mcpOnly
           ? { command: 'autodev', args: ['mcp-operate', '.'] }
-          : { command: 'autodev', args: ['mcp-operate', '.', '--url', `${origin}/api/mcp/a2a`] };
+          : { command: 'autodev', args: ['mcp-operate', '.', '--no-socket'] };
       }
     } catch { /* ignore — office binding is optional */ }
 

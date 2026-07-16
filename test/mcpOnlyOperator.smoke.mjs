@@ -54,7 +54,7 @@ console.log('mcp-only operator wiring smoke');
 // ---------------------------------------------------------------------------
 // 1. Loop agent (default): A2A remote — messaging only.
 // ---------------------------------------------------------------------------
-ok('loop agent → pixel-office is the A2A bridge via the autodev CLI (no token in file)', () => {
+ok('loop agent → pixel-office is the operator bridge (--no-socket) via the autodev CLI, no token', () => {
   const root = boundWorkspace(false);
   ConfigManager.syncProjectMcpServers(root);
 
@@ -68,9 +68,8 @@ ok('loop agent → pixel-office is the A2A bridge via the autodev CLI (no token 
   assert.strictEqual(po.command[0], 'autodev', 'runs the autodev CLI binary');
   assert.ok(po.command.includes('mcp-operate'), 'via the mcp-operate bridge');
   assert.strictEqual(po.command[2], '.', 'relative workspace path (portable config)');
-  const urlArg = po.command[po.command.indexOf('--url') + 1] ?? '';
-  assert.strictEqual(urlArg, 'https://office.example/api/mcp/a2a', 'bridges to the A2A endpoint, wss→https normalised');
-  assert.ok(!po.command.includes('--no-socket'), 'presence socket stays ON');
+  assert.ok(!po.command.includes('--url'), 'loop agent uses the operator (office-mcp) default, not A2A');
+  assert.ok(po.command.includes('--no-socket'), 'loop agent skips the presence socket (the loop owns the slug)');
 });
 
 // ---------------------------------------------------------------------------
@@ -110,14 +109,14 @@ ok('mcp-only operator entry leaks no api_key into the provider config', () => {
 //     opencode-only. Grok's config is TOML (.grok/config.toml), a separate
 //     writer, so it needs its own assertion.
 // ---------------------------------------------------------------------------
-ok('grok loop agent → .grok/config.toml pixel-office is the CLI A2A bridge (no token)', () => {
+ok('grok loop agent → .grok/config.toml pixel-office is the CLI operator bridge (no token)', () => {
   const root = boundWorkspace(false);
   ConfigManager.syncProjectMcpServers(root);
   const toml = fs.readFileSync(path.join(root, '.grok', 'config.toml'), 'utf8');
   assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
-  assert.ok(/command\s*=\s*"autodev"/.test(toml), 'loop grok now bridges via the autodev CLI');
-  assert.ok(toml.includes('/api/mcp/a2a'), 'loop grok points at the A2A endpoint');
-  assert.ok(!toml.includes('--no-socket'), 'loop grok keeps the presence socket on');
+  assert.ok(/command\s*=\s*"autodev"/.test(toml), 'loop grok bridges via the autodev CLI');
+  assert.ok(!toml.includes('/api/mcp/a2a'), 'loop grok uses the operator (office-mcp) default, not A2A');
+  assert.ok(toml.includes('--no-socket'), 'loop grok skips the presence socket (loop owns the slug)');
   assert.ok(!toml.includes('AGENTKEY'), 'no api_key leaked into the grok config');
 });
 
@@ -149,9 +148,10 @@ ok('loop vs mcp-only produce different pixel-office wirings from the same bindin
   // bridges to the operator (office-mcp) with presence.
   assert.strictEqual(a.type, 'local');
   assert.strictEqual(b.type, 'local');
-  assert.ok(a.command.includes('--url'), 'loop bridges to the A2A endpoint');
-  assert.ok(!b.command.includes('--url'), 'mcp-only uses the operator (office-mcp) default');
-  assert.ok(!a.command.includes('--no-socket') && !b.command.includes('--no-socket'), 'both keep the presence socket');
+  // Both use the operator endpoint (no --url); the flag flips the presence socket.
+  assert.ok(!a.command.includes('--url') && !b.command.includes('--url'), 'both use the operator (office-mcp) default');
+  assert.ok(a.command.includes('--no-socket'), 'loop agent skips the socket (loop owns presence)');
+  assert.ok(!b.command.includes('--no-socket'), 'mcp-only keeps the socket (bridge is its presence)');
   assert.notDeepStrictEqual(a.command, b.command, 'the args differ by mode');
 });
 

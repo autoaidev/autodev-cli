@@ -11,7 +11,7 @@ import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProje
 //
 // Covers:
 //   Claude CLI  : ~/.claude/settings.json  (permissions)
-//                 <root>/.claude/settings.json  (project-level allow:*)
+//                 <root>/.claude/settings.json  (project-level defaultMode:bypassPermissions)
 //   Copilot CLI : ~/.copilot/mcp-config.json  (MCP only — no extra perms)
 //   OpenCode CLI: %APPDATA%/opencode/config.json  (permission: {"*":"allow"})
 //                 <root>/opencode.json  (project-level)
@@ -41,27 +41,41 @@ export class ConfigManager {
   // -------------------------------------------------------------------------
 
   /**
-   * Write bypassPermissions to ~/.claude/settings.json and, if a workspace
-   * root is provided, allow:* to <root>/.claude/settings.json.
+   * Bypass all permission prompts for autonomous runs: defaultMode
+   * 'bypassPermissions' at the user level and, if a workspace root is given, the
+   * project level too.
+   *
+   * NB: this used to write `permissions.allow: ["*"]` to the project settings,
+   * but a wildcard tool name is INVALID in Claude Code allow rules — Claude prints
+   * a "Settings Warning … Invalid permission rule '*' was skipped" and drops it
+   * (a glob is only allowed after a literal `mcp__<server>__` prefix). defaultMode
+   * achieves the same "allow everything" without the warning, so we set that and
+   * strip any stale "*" an older version left in `allow`.
    */
   static applyClaudePermissions(root?: string, log?: (m: string) => void): void {
-    // User-level: bypass all permission prompts
-    const userFile = path.join(os.homedir(), '.claude', 'settings.json');
-    _mergeJson(userFile, (cfg) => {
+    const setBypass = (cfg: Record<string, unknown>) => {
       const perms = _obj(cfg['permissions']);
       perms['defaultMode'] = 'bypassPermissions';
-      perms['skipDangerousModePermissionPrompt'] = true;
+      // Remove the invalid wildcard allow rule if present; keep any real entries.
+      if (Array.isArray(perms['allow'])) {
+        const cleaned = (perms['allow'] as unknown[]).filter((a) => a !== '*');
+        if (cleaned.length) { perms['allow'] = cleaned; } else { delete perms['allow']; }
+      }
       cfg['permissions'] = perms;
+      return perms;
+    };
+
+    // User-level: bypass all permission prompts.
+    const userFile = path.join(os.homedir(), '.claude', 'settings.json');
+    _mergeJson(userFile, (cfg) => {
+      const perms = setBypass(cfg);
+      perms['skipDangerousModePermissionPrompt'] = true;
     }, log, 'Claude user settings');
 
-    // Project-level: allow all tools
+    // Project-level: same bypass (no invalid allow:* wildcard).
     if (root) {
       const projectFile = path.join(root, '.claude', 'settings.json');
-      _mergeJson(projectFile, (cfg) => {
-        const perms = _obj(cfg['permissions']);
-        perms['allow'] = ['*'];
-        cfg['permissions'] = perms;
-      }, log, 'Claude project settings');
+      _mergeJson(projectFile, (cfg) => { setBypass(cfg); }, log, 'Claude project settings');
     }
   }
 

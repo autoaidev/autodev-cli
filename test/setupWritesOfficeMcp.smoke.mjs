@@ -34,15 +34,15 @@ ok('the pixel-office (office) MCP server is written on bind', () => {
   assert.ok(servers['pixel-office'], 'pixel-office entry must exist after binding — this is the whole bug');
 });
 
-ok('it is the CLI operator bridge (office-mcp, --no-socket) — NO bearer token in the file', () => {
+ok('it is the CLI operator bridge (office-mcp, socket on) — NO bearer token in the file', () => {
   const po = servers['pixel-office'];
   // Must go through the `autodev` binary (stdio), not a remote http entry.
   assert.strictEqual(po.command, 'autodev', 'pixel-office must run via the autodev CLI binary');
   assert.ok(Array.isArray(po.args), 'has args');
   assert.ok(po.args.includes('mcp-operate'), 'uses the mcp-operate bridge');
   assert.strictEqual(po.args[1], '.', 'relative workspace path so the config is portable');
-  assert.ok(!po.args.includes('--url'), 'loop agent uses the operator (office-mcp) default, not the A2A endpoint');
-  assert.ok(po.args.includes('--no-socket'), 'loop agent skips the presence socket (the loop owns the slug; socket is last-wins)');
+  assert.ok(!po.args.includes('--url'), 'operator (office-mcp) default — the full toolkit, not the A2A endpoint');
+  assert.ok(!po.args.includes('--no-socket'), 'presence socket ON for all agents (shows online + live steers)');
   // The whole point: the token lives in .autodev/settings.json, never here.
   assert.strictEqual(po.type, undefined, 'not a remote http entry');
   assert.strictEqual(po.headers, undefined, 'no headers block');

@@ -251,25 +251,23 @@ export class ConfigManager {
         //   …/api/office-mcp: it registers presence and exposes the full toolkit
         //   (tasks/report/status) plus A2A, so a pure-MCP client (opencode/Kimi,
         //   Claude Code, …) becomes a real, online office agent.
-        // Both variants bridge to the OPERATOR MCP (…/api/office-mcp, the default) —
-        // the FULL toolkit (get_tasks/start_task/complete_task/report/set_status/
-        // check_messages/…) plus A2A messaging, which is a superset of the old
-        // messaging-only A2A endpoint. They differ only in the presence socket:
-        //
-        // - mcp-only agents keep the socket: the bridge IS their office presence and
-        //   surfaces live steers/messages via wait_for_events.
-        // - loop agents skip the socket (--no-socket): the autodev loop already holds
-        //   this slug's WS presence and injects steers itself. The slug→connection
-        //   index is last-wins (WsConnectionManager), so a second socket for the same
-        //   slug would STEAL presence from the loop and break its steering. The HTTP
-        //   tools (get_tasks/check_messages/…) still work fully without the socket.
+        // Every agent gets the OPERATOR MCP (…/api/office-mcp, the mcp-operate
+        // default) WITH the presence socket on: the FULL toolkit (get_tasks/
+        // start_task/complete_task/report/set_status/check_messages/…) plus A2A,
+        // and the bridge holds a live presence connection so the character shows
+        // online and receives steers/messages live via wait_for_events.
         //
         // The path is relative ('.') so the config is portable — the MCP client runs
         // the bridge from the workspace dir, where mcp-operate finds
         // .autodev/settings.json (so the key is never written into the config).
-        builtinsForJson['pixel-office'] = s.mcpOnly
-          ? { command: 'autodev', args: ['mcp-operate', '.'] }
-          : { command: 'autodev', args: ['mcp-operate', '.', '--no-socket'] };
+        //
+        // NB: for an `autodev start` LOOP agent, the loop also opens its own WS
+        // (WebhookPoller) for the same slug. The slug→connection index is last-wins
+        // (WsConnectionManager), so the bridge's socket becomes the live target and
+        // steers arrive via the bridge's wait_for_events rather than the loop's
+        // mid-turn stdin injection. A pure-MCP client (the common case) has only the
+        // one connection and is unaffected.
+        builtinsForJson['pixel-office'] = { command: 'autodev', args: ['mcp-operate', '.'] };
       }
     } catch { /* ignore — office binding is optional */ }
 

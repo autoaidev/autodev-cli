@@ -243,22 +243,22 @@ export class ConfigManager {
         origin = `${proto}//${u.host}`;
       } catch { /* invalid/empty url */ }
       if (origin && key && !disabledBuiltins.includes('pixel-office')) {
-        // MCP-only agents (no autodev loop) get the OPERATOR bridge — a local
-        // stdio server (`autodev mcp-operate <root>`) that speaks to
-        // …/api/office-mcp. Unlike the A2A remote it registers presence and
-        // exposes the full agent toolkit (tasks/report/status) plus A2A, so a
-        // pure-MCP client (opencode/Kimi, Claude Code, …) becomes a real,
-        // online office agent instead of a messaging-only, offline one. The
-        // bridge reads url+key from the workspace binding, so no token is
-        // written into the provider config files. Loop agents keep the A2A
-        // remote (they already have their own WS presence + task loop).
+        // Both variants go through the `autodev` CLI stdio bridge, which reads the
+        // key + url from the workspace binding (.autodev/settings.json) — so the
+        // agent's Bearer token is NEVER written into .mcp.json / provider configs.
+        //
+        // - MCP-only agents (no autodev loop) get the OPERATOR bridge to
+        //   …/api/office-mcp: it registers presence and exposes the full toolkit
+        //   (tasks/report/status) plus A2A, so a pure-MCP client (opencode/Kimi,
+        //   Claude Code, …) becomes a real, online office agent.
+        // - Loop agents get the A2A bridge (…/api/mcp/a2a) with --no-socket: the
+        //   loop already holds its own WS presence + task loop, so this adds only
+        //   the agent-to-agent messaging tools without a second presence
+        //   connection. Same semantics as the old A2A remote, minus the token in
+        //   the file.
         builtinsForJson['pixel-office'] = s.mcpOnly
           ? { command: 'autodev', args: ['mcp-operate', root] }
-          : {
-              type: 'http',
-              url: `${origin}/api/mcp/a2a`,
-              headers: { Authorization: `Bearer ${key}` },
-            };
+          : { command: 'autodev', args: ['mcp-operate', root, '--url', `${origin}/api/mcp/a2a`, '--no-socket'] };
       }
     } catch { /* ignore — office binding is optional */ }
 

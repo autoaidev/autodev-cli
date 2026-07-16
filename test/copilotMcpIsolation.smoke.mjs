@@ -3,15 +3,17 @@
 // Copilot's own MCP config (~/.copilot/mcp-config.json) is GLOBAL. The deployer
 // runs many agents per box, so every config sync clobbered the previous one and
 // each copilot agent ended up pointing at whichever workspace synced most
-// recently — driving the WRONG office character, because the `pixel-office` entry
-// carries that agent's bearer token. Not an edge case: the normal case.
+// recently — driving the WRONG office character.
 //
 // Fix: write the servers into <workspace>/.autodev/copilot-mcp.json and hand it to
 // copilot per session via `--additional-mcp-config @<file>`.
 //
 // This locks the property that actually matters — two workspaces get two configs,
-// each with its OWN token — plus the two halves that make it work end to end: the
-// command passes the file, and the stale global entries get pruned.
+// each pointing at ITS OWN workspace (the pixel-office entry is now the CLI stdio
+// bridge `autodev mcp-operate <root> …`, so it carries the workspace path, not a
+// token — mcp-operate reads that workspace's .autodev/settings.json for the key).
+// Plus the two halves that make it work end to end: the command passes the file,
+// and the stale global entries get pruned.
 // Run: node test/copilotMcpIsolation.smoke.mjs   (after npm run build)
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -57,9 +59,12 @@ ok('two workspaces get their OWN config, each with its own token', () => {
   assert.notStrictEqual(copilotMcpConfigPath(a), copilotMcpConfigPath(b), 'configs live in separate workspaces');
   const ta = JSON.stringify(ca.mcpServers['pixel-office']);
   const tb = JSON.stringify(cb.mcpServers['pixel-office']);
-  assert.ok(ta.includes('KEY-AAA'), 'workspace A keeps ITS token');
-  assert.ok(tb.includes('KEY-BBB'), 'workspace B keeps ITS token');
-  assert.ok(!ta.includes('KEY-BBB'), 'A must not be clobbered by the later sync of B');
+  // Each config points at its OWN workspace path (mcp-operate then reads that
+  // workspace's settings for the key) — and no token is written into the config.
+  assert.ok(ta.includes(a), 'workspace A config points at A');
+  assert.ok(tb.includes(b), 'workspace B config points at B');
+  assert.ok(!ta.includes(b), 'A must not be clobbered by the later sync of B');
+  assert.ok(!ta.includes('KEY-AAA') && !tb.includes('KEY-BBB'), 'no bearer token is written into the copilot config anymore');
 });
 
 // ---------------------------------------------------------------------------

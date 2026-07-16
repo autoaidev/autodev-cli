@@ -54,16 +54,22 @@ console.log('mcp-only operator wiring smoke');
 // ---------------------------------------------------------------------------
 // 1. Loop agent (default): A2A remote — messaging only.
 // ---------------------------------------------------------------------------
-ok('loop agent → pixel-office is the A2A REMOTE (…/api/mcp/a2a), not the operator', () => {
+ok('loop agent → pixel-office is the A2A bridge via the autodev CLI (no token in file)', () => {
   const root = boundWorkspace(false);
   ConfigManager.syncProjectMcpServers(root);
 
   const oc = readJson(path.join(root, 'opencode.json'));
   const po = oc.mcp?.['pixel-office'];
   assert.ok(po, 'opencode.json has a pixel-office server');
-  assert.strictEqual(po.type, 'remote', 'loop agent uses a remote MCP');
-  assert.strictEqual(po.url, 'https://office.example/api/mcp/a2a', 'points at the A2A endpoint, wss→https normalised');
-  assert.ok(!Array.isArray(po.command), 'no local command for a loop agent');
+  // Now a local stdio bridge (the CLI reads the key from settings) instead of a
+  // remote http entry with an embedded Authorization: Bearer header.
+  assert.strictEqual(po.type, 'local', 'loop agent uses the local CLI stdio bridge');
+  assert.ok(Array.isArray(po.command), 'has a local command array');
+  assert.strictEqual(po.command[0], 'autodev', 'runs the autodev CLI binary');
+  assert.ok(po.command.includes('mcp-operate'), 'via the mcp-operate bridge');
+  const urlArg = po.command[po.command.indexOf('--url') + 1] ?? '';
+  assert.strictEqual(urlArg, 'https://office.example/api/mcp/a2a', 'bridges to the A2A endpoint, wss→https normalised');
+  assert.ok(po.command.includes('--no-socket'), 'loop agent skips the presence socket (the loop owns presence)');
 });
 
 // ---------------------------------------------------------------------------
@@ -103,13 +109,15 @@ ok('mcp-only operator entry leaks no api_key into the provider config', () => {
 //     opencode-only. Grok's config is TOML (.grok/config.toml), a separate
 //     writer, so it needs its own assertion.
 // ---------------------------------------------------------------------------
-ok('grok loop agent → .grok/config.toml pixel-office is the A2A remote url', () => {
+ok('grok loop agent → .grok/config.toml pixel-office is the CLI A2A bridge (no token)', () => {
   const root = boundWorkspace(false);
   ConfigManager.syncProjectMcpServers(root);
   const toml = fs.readFileSync(path.join(root, '.grok', 'config.toml'), 'utf8');
   assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
-  assert.ok(toml.includes('https://office.example/api/mcp/a2a'), 'loop grok points at the A2A endpoint');
-  assert.ok(!/command\s*=\s*"autodev"/.test(toml), 'loop grok has no local operator command');
+  assert.ok(/command\s*=\s*"autodev"/.test(toml), 'loop grok now bridges via the autodev CLI');
+  assert.ok(toml.includes('/api/mcp/a2a'), 'loop grok points at the A2A endpoint');
+  assert.ok(toml.includes('--no-socket'), 'loop grok skips presence');
+  assert.ok(!toml.includes('AGENTKEY'), 'no api_key leaked into the grok config');
 });
 
 ok('grok mcp-only agent → .grok/config.toml pixel-office is the operator command', () => {
@@ -135,8 +143,14 @@ ok('loop vs mcp-only produce different pixel-office wirings from the same bindin
   const a = readJson(path.join(loop, 'opencode.json')).mcp['pixel-office'];
   const b = readJson(path.join(only, 'opencode.json')).mcp['pixel-office'];
   assert.notDeepStrictEqual(a, b, 'the flag must change the wiring');
-  assert.strictEqual(a.type, 'remote');
+  // Both go through the CLI stdio bridge now (no token in the file either way);
+  // the flag changes the ARGS: loop bridges to A2A with --no-socket, mcp-only
+  // bridges to the operator (office-mcp) with presence.
+  assert.strictEqual(a.type, 'local');
   assert.strictEqual(b.type, 'local');
+  assert.ok(a.command.includes('/api/mcp/a2a') || a.command.includes('--url'), 'loop bridges to A2A');
+  assert.ok(!b.command.includes('--no-socket'), 'mcp-only keeps presence');
+  assert.notDeepStrictEqual(a.command, b.command, 'the args differ by mode');
 });
 
 console.log(`\n${pass} checks passed`);

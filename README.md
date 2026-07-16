@@ -1,163 +1,237 @@
 # autodev-cli
 
-AutoAIDev's CLI — autonomous AI task loop with an optional one-shot launcher for **VS Code** and **Cursor**, plus a wire-protocol for connecting a workspace to a pixel-office server.
+**The AutoDev agent loop + connect CLI.** Bind a local folder to an AI coding agent, then
+either run an autonomous loop that works through `TODO.md` with the provider of your choice,
+or wire the folder up as an MCP-only operator so a plain chat client becomes a live office agent.
 
 ```bash
-# Install globally
 npm install -g autodev-cli
-
-# Init the current folder + open it in VS Code (or Cursor)
-autodev --ide=vscode .
-autodev --ide=cursor .
-
-# Connect to a pixel-office agent in one shot (signed URL from the UI)
-autodev --setup-url='https://pixel-office.tools.ooyes.net/api/cli/setup/<id>?expires=…&signature=…' .
-
-# Or paste the WS URL directly
-autodev --connect='wss://pixel-office.tools.ooyes.net/ws?token=<api_key>&endpoint=<slug>' .
-
-# Combine the two: init + open IDE + bind credentials
-autodev --setup-url='…' --ide=vscode .
+autodev init .            # scaffold TODO.md + .autodev/settings.json
+autodev start .           # run the autonomous loop
 ```
 
-That single command:
+Part of the **AutoDev** suite for running autonomous AI coding agents that appear as
+characters in a live "office":
 
-1. Creates `TODO.md` and `.autodev/settings.json`
-2. Adds `.autodev/` to `.gitignore`
-3. Installs the **AutoAIDev** extension into the chosen IDE (skipped if already installed)
-4. Opens the folder in the IDE
-5. (with `--setup-url` / `--connect`) writes the pixel-office credentials into `.autodev/settings.json`
+- **[pixel-office](../pixel-office)** — the hub/command center (Laravel + Vue + Pixi.js).
+  Live at <https://autodev.code.aioffice.works>. Hosts the office UI, the presence
+  WebSocket, and the MCP endpoints this CLI talks to.
+- **autodev-cli** — *this repo* (`npm i -g autodev-cli`). The agent loop + `autodev` command.
+- **[autodev-app](../autodev-app)** — the desktop app (`npx autodev-app`) that bundles this
+  CLI and drives agents in a GUI.
+- **[autodev-vscode-extension](../autodev-vscode-extension)** — the AutoDev tasks/chat/sessions
+  panels inside VS Code.
+- **[agent-vm-deployer](../agent-vm-deployer)** — spawns agents headlessly on SSH / Docker / K8s.
+  Live at <https://deployer.code.aioffice.works>.
 
 ---
 
-## Install (from this repo)
+## What it does
+
+`autodev` binds a workspace directory to a **pixel-office character** and runs it as an agent.
+There are two operating modes:
+
+| Mode | Command | What it is |
+|------|---------|-----------|
+| **Loop agent** | `autodev start` | A local process that reads `TODO.md`, drives a provider CLI to complete each task, and reports presence + progress over the office WebSocket. |
+| **MCP-only agent** | `autodev connect --mcp-only` | No local loop. A stdio bridge (`autodev mcp-operate`) wires the office **operator MCP** into your provider's config, so a pure chat client (Claude Code, opencode, Copilot…) becomes a first-class online office agent with tasks + agent-to-agent messaging. |
+
+---
+
+## Install
 
 ```bash
-cd autodev-cli
-npm install
-npm run build
-npm link            # optional — adds `autodev` to your PATH
+npm install -g autodev-cli
 ```
 
-> Requires the sibling `autodev-vscode-extension` to be compiled first:
-> ```bash
-> cd ../autodev-vscode-extension
-> npm install
-> npm run compile
-> ```
+Or from source (this repo):
+
+```bash
+npm install
+npm run build        # tsc → out/
+npm link             # optional: put `autodev` on PATH
+```
+
+The `autodev` binary refuses to run until `out/` exists, so build first when working from source.
+
+---
+
+## Quickstart
+
+```bash
+# 1. Scaffold a workspace (creates TODO.md + .autodev/settings.json, adds .autodev/ to .gitignore)
+autodev init . -p claude-cli
+
+# 2. Add tasks to TODO.md as "[ ] do the thing" checkboxes
+
+# 3. Run the loop until the list drains
+autodev start .
+```
+
+Bind the workspace to a pixel-office character (so it shows up as a live agent):
+
+```bash
+# Signed setup URL from the pixel-office UI (preferred — HMAC-signed, expires ~30 min)
+autodev connect --setup-url='https://autodev.code.aioffice.works/api/cli/setup/<id>?expires=…&signature=…' .
+
+# …or paste a full WebSocket URL
+autodev connect --url='wss://autodev.code.aioffice.works/ws?token=<api_key>&endpoint=<slug>' .
+```
+
+Either form writes `wsUrl`, `serverApiKey`, `webhookSlug`, and `serverBaseUrl` into
+`.autodev/settings.json`.
 
 ---
 
 ## Commands
 
-### `autodev --ide=<ide> [path]` — top-level shortcut
-Same as `autodev up --ide=<ide>`. Inits the workspace and launches the IDE.
-
-### `autodev up --ide=<ide> [path]`
-Init + launch in one step. Auto-installs the extension if missing.
-
-```bash
-autodev up --ide=vscode .
-autodev up --ide=cursor ~/myproject -p copilot-cli
-autodev up --ide=vscode . --no-extension      # skip extension install
-```
-
-### `autodev launch --ide=<ide> [path]`
-Open an existing workspace in an IDE. No init.
-
-### `autodev connect --setup-url=<url> [path]` / `autodev connect --url=<wsurl> [path]`
-Bind the workspace to a pixel-office agent.
-
-```bash
-# Signed URL from the pixel-office UI (preferred)
-autodev connect --setup-url='https://pixel-office.tools.ooyes.net/api/cli/setup/<id>?expires=…&signature=…' .
-
-# Or paste a full WS URL
-autodev connect --url='wss://host/ws?token=<api_key>&endpoint=<slug>' .
-```
-
-Either form writes `wsUrl`, `serverApiKey`, `webhookSlug`, and `serverBaseUrl` into `.autodev/settings.json`. The signed URL is HMAC-protected and expires in 30 minutes.
+Run `autodev <command> --help` for the full option list. The main ones:
 
 ### `autodev init [path]`
-Scaffold a workspace — `TODO.md` and `.vscode/autodev.json`.
-Pass `--ide=vscode|cursor` to also open it after init.
+Scaffold a workspace: `TODO.md` + `.autodev/settings.json`.
 
 ```bash
 autodev init                          # current directory
-autodev init ~/myproject              # specific path
-autodev init . --ide=vscode           # also open in VS Code
-autodev init . --ide=cursor --no-extension  # don't auto-install extension
-autodev init . --provider claude-cli  # pick the default provider
+autodev init ~/myproject -p grok-cli  # pick the default provider
+autodev init . --ide=vscode           # also open in an IDE (installs the extension)
+autodev init . --git --file-browser   # enable git auto-commit + file-browser tab
 ```
 
+Flags: `-p, --provider`, `--ide vscode|cursor`, `--no-launch`, `--no-extension`,
+`--no-hooks`, `--session-name`, `--git`, `--file-browser`, `--profile <path>`, `--force`.
+
 ### `autodev start [path]`
-Start the autonomous loop — reads `TODO.md` and drives the AI until all tasks are done.
+Start the autonomous loop — reads `TODO.md` and drives the provider until every task is done.
 
 ```bash
-autodev start                                 # current directory, claude-cli
-autodev start ~/myproject -p copilot-cli
-autodev start . --provider opencode-cli
+autodev start                       # cwd, default provider
+autodev start ~/proj -p copilot-cli
+autodev start . --once              # drain the TODO once, then exit (default: poll forever)
+autodev start . --todo BACKLOG.md   # use a different task file
 ```
 
 Press **Ctrl+C** to stop gracefully.
 
-### `autodev status [path]`
-Summary of tasks in `TODO.md`.
+### `autodev connect [path]`
+Bind the workspace to a pixel-office endpoint.
 
 ```bash
-autodev status
-autodev status ~/myproject --all   # also list completed tasks
+autodev connect --setup-url='https://…/api/cli/setup/<id>?…' .
+autodev connect --url='wss://host/ws?token=<key>&endpoint=<slug>' .
+autodev connect --url='…' --mcp-only .   # MCP-only agent (no loop) — see below
 ```
+
+Flags: `--url`, `--setup-url`, `--session-name`, `--file-browser`, `--mcp-only`.
+
+### `autodev mcp-operate [path]`
+Run a stdio MCP server that operates a pixel-office agent, bridging to `…/api/office-mcp`
+(presence + tasks + report + A2A). Usually attached automatically by `connect --mcp-only`,
+but you can register it by hand:
+
+```bash
+claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <…/api/office-mcp>
+```
+
+Flags: `--url`, `--key`, `--no-socket`. When omitted, `--url`/`--key` are derived from the
+workspace binding.
+
+### `autodev status [path]`
+`TODO.md` task summary. `--all` also lists completed tasks.
 
 ### `autodev config [path]`
-Read or update `.vscode/autodev.json`.
+Read or write `.autodev/settings.json`.
 
 ```bash
-autodev config                              # print all settings
-autodev config get provider                 # get one value
-autodev config set provider copilot-cli     # set provider
+autodev config                            # print all settings
+autodev config get provider               # read one key
+autodev config set provider copilot-cli   # write one key
 autodev config set taskTimeoutMinutes 60
-autodev config set discordToken TOKEN
 ```
+
+### `autodev sessions [path]` / `autodev resume <sessionId> [path]`
+List inspectable provider sessions (id, name, last updated) and mark one to resume on the
+next `start`. `-p, --provider` filters to a family (`claude` | `opencode` | `grok`); `--json`
+for machine output.
+
+### `autodev export [path]` / `autodev import <zip> [dest]`
+Export an agent backup ZIP (workspace state + portable session traces) and restore it
+elsewhere. `import --ide=vscode` opens the restored workspace afterward.
+
+### `autodev up` / `autodev launch` / `autodev init --ide=…`
+IDE-launcher shortcuts. `up` = init + open in VS Code / Cursor (installs the
+`AutoAIDev.autoaidev` extension unless `--no-extension`); `launch` opens an existing workspace
+without init. The bare `autodev --ide=vscode .` / `autodev --setup-url=… .` top-level form
+combines connect + init + launch in one call.
+
+### `autodev tail-output [path]`
+Print the agent CLI's most recent stdout (final message). `--raw` skips BOM stripping.
 
 ---
 
-## IDE launcher details
+## Providers
 
-| `--ide` value | Resolves to | Extension installed |
-|---------------|-------------|---------------------|
-| `vscode`      | `code` (or `code-insiders`) on PATH | `AutoAIDev.autoaidev` |
-| `cursor`      | `cursor` on PATH                    | `AutoAIDev.autoaidev` |
+Pick with `-p, --provider` on `init` / `start` / `up`, or `config set provider …`.
+Each family ships in CLI and TUI/SDK flavors:
 
-The launcher first looks for a sibling `autoaidev.vsix` next to the CLI install (handy for offline / dev installs). If it can't find one it falls back to the marketplace id `AutoAIDev.autoaidev`.
+| Provider id | Backend |
+|-------------|---------|
+| `claude-cli`, `claude-tui` | Anthropic Claude (`claude`) |
+| `grok-cli`, `grok-tui` | xAI Grok (`grok`) |
+| `opencode-cli`, `opencode-sdk` | OpenCode (`opencode`, `@opencode-ai/sdk`) |
+| `copilot-cli`, `copilot-sdk` | GitHub Copilot (`copilot`) |
 
-Pass `--no-extension` to skip the extension install. Pass `--no-launch` (only on `init`) to install the extension without opening the IDE.
+Default: `claude-tui`. Set a `fallbackProvider` in settings to switch automatically on a
+rate-limit.
+
+---
+
+## How the loop works
+
+1. Reads `TODO.md` from the workspace root.
+2. Picks the first `[ ]` task and sends a prompt to the chosen provider CLI.
+3. Watches `TODO.md` for the agent to mark the task `[x]`.
+4. Loops while any `[ ]` / `[~]` tasks remain (unless `--once`).
+5. Emits presence + progress over the office WebSocket and fires Discord / webhook
+   notifications at each step.
 
 ---
 
 ## Configuration
 
-Settings live in `.autodev/settings.json` inside the workspace. The legacy path `.vscode/autodev.json` is still read for back-compat — the next write migrates it to the new location automatically. Highlights:
+Settings live in **`.autodev/settings.json`** inside the workspace. The legacy path
+`.vscode/autodev.json` is still read for back-compat and migrated on the next write.
+Common keys:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `provider` | `claude-cli` | AI provider to use |
+| `provider` | `claude-tui` | Provider id (see table above) |
 | `loopInterval` | `30` | Seconds between polling cycles |
-| `taskTimeoutMinutes` | `30` | Minutes of TODO.md inactivity before timeout |
-| `taskCheckInMinutes` | `20` | Minutes of JSONL inactivity before reminder |
-| `discordToken` | `""` | Discord bot token for notifications |
-| `discordChannelId` | `""` | Discord channel for notifications |
-| `serverBaseUrl` | `""` | A2A webhook server URL |
-| `serverApiKey` | `""` | A2A webhook API key |
-| `gitEnabled` | `false` | Enable git commit after each task |
+| `taskTimeoutMinutes` | `30` | `TODO.md` inactivity before a task times out |
+| `taskCheckInMinutes` | `20` | Session inactivity before a check-in reminder |
+| `maxTaskAttempts` | `3` | Retries before giving up on a task |
+| `fallbackProvider` / `fallbackProviderEnabled` | `opencode-cli` / `false` | Provider to switch to on rate-limit |
+| `wsUrl` / `serverBaseUrl` / `serverApiKey` / `webhookSlug` | `""` | Office binding (written by `connect`) |
+| `mcpOnly` | `false` | MCP-only agent (attaches the operator bridge instead of the loop) |
+| `gitEnabled` | `false` | Commit after each task |
+| `enableFileBrowser` | `false` | Expose the file-browser tab for this agent |
+| `resumeSession` | `false` | Resume a prior provider session on next `start` |
+| `profilePath` | `""` | Path to an `AUTODEV.md` profile |
+| `discordToken` / `discordChannelId` / `discordOwners` | `""` | Discord notifications |
+| `disabledBuiltinMcp` | `[]` | Built-in MCP servers to turn off |
+
+Per-provider extras include `claudeModel`, `grokModel`, `copilotModel`, `opencodeModel`,
+`opencodeTimeout`, `copilotGithubToken`, and more — see
+[`src/core/settingsLoader.ts`](src/core/settingsLoader.ts) for the full schema.
 
 ---
 
 ## MCP servers
 
-Project MCP servers live in `<workspace>/.mcp.json` and are fanned out to every provider's config (`.mcp.json` for Claude, `opencode.json`, `~/.copilot/mcp-config.json`, `.vscode/mcp.json`) on each sync.
-
-Built-ins (`memory`, `playwright`, `sequential-thinking`, `computer-use-mcp`) are added automatically. Disable any of them with `disabledBuiltinMcp: ["playwright", …]` in settings.
+Project MCP servers live in `<workspace>/.mcp.json` and are fanned out to every provider's
+config (`.mcp.json` for Claude, `opencode.json`, `~/.copilot/mcp-config.json`,
+`.vscode/mcp.json`) on each sync. Built-ins (`memory`, `playwright`, `sequential-thinking`,
+`computer-use-mcp`) are added automatically; disable any with
+`disabledBuiltinMcp: ["playwright", …]`.
 
 Entries can be **stdio** or **remote (HTTP/SSE)**:
 
@@ -170,26 +244,33 @@ Entries can be **stdio** or **remote (HTTP/SSE)**:
 }
 ```
 
-**Pixel-office A2A:** when an agent is bound to a pixel-office (has `serverBaseUrl` + `serverApiKey`), a remote MCP server named `pixel-office` is auto-attached, pointing at `<origin>/api/mcp` with the agent's api key — giving it agent-to-agent tools (`list_agents`, `send_message`, `check_messages`). Opt out with `disabledBuiltinMcp: ["pixel-office"]`.
+**Pixel-office auto-attach:** when a workspace is bound to an office (`serverBaseUrl` +
+`serverApiKey`) a `pixel-office` MCP server is added automatically:
+
+- **Loop agents** get a remote A2A server at `<origin>/api/mcp/a2a` (agent-to-agent tools:
+  `list_agents`, `send_message`, `check_messages`), authenticated by the agent key.
+- **MCP-only agents** (`mcpOnly: true`) get the operator bridge (`autodev mcp-operate`)
+  pointing at `<origin>/api/office-mcp` — the full agent toolkit (presence, tasks, report, A2A).
+
+Opt out with `disabledBuiltinMcp: ["pixel-office"]`.
 
 ---
 
-## How the loop works
+## Development & tests
 
-1. Reads `TODO.md` from the workspace root
-2. Picks the first `[ ]` task, sends a prompt to the chosen AI CLI provider
-3. Watches `TODO.md` for the AI to mark the task `[x]` done
-4. Loops until all tasks are complete
-5. Sends Discord / webhook notifications at each step
+```bash
+npm install
+npm run build     # tsc -p ./  →  out/
+npm run dev       # tsc --watch
+npm test          # runs the smoke-test suite in test/*.mjs
+```
 
-The loop never stops while `[ ]` or `[~]` tasks remain.
+The test suite is a set of Node smoke tests (`node test/smoke.mjs && …`) covering the
+provider config, live-narration normalizer, MCP-only operator, event filters, and init
+template. No build step is required to run them individually.
 
 ---
 
-## Providers
+## License
 
-| Provider | CLI command |
-|----------|-------------|
-| `claude-cli` | `claude` (Anthropic Claude CLI) |
-| `copilot-cli` | `gh copilot` (GitHub Copilot CLI) |
-| `opencode-cli` | `opencode` (OpenCode CLI) |
+MIT.

@@ -518,8 +518,15 @@ export class WebSocketPoller {
       // Deduplicate by task ID so the same delivery isn't re-processed on reconnect,
       // but a new task with identical text is still accepted.
       const taskId = t['id'] as string | undefined;
+      const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
       if (taskId && this._seenTaskIds.has(taskId)) {
         this._log(`WS task already processed (id=${taskId}), skipping`);
+        // Already queued locally, but the office is still re-delivering it (faded) —
+        // that means our earlier arrival ack never landed. Re-ack so the sweep stops.
+        // Idempotent server-side; only for real DB tasks (metadata.taskId present).
+        if (meta['event'] === 'user_message' && typeof meta['taskId'] === 'string') {
+          this._sendTaskAck(meta['taskId'] as string);
+        }
         return;
       }
       // NOTE: the delivery is marked seen only AFTER it has been durably handled
@@ -527,7 +534,6 @@ export class WebSocketPoller {
       // it here at parse time meant a transient append failure permanently
       // dropped the user's message because the server's reconnect replay was
       // then skipped by the dedup check above.
-      const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
 
       // ── Instant / steer message ────────────────────────────────────────────
       // Delivered live to the running turn (mid-turn injection), NOT appended to
@@ -556,6 +562,10 @@ export class WebSocketPoller {
       }
 
       if (meta['event'] !== 'user_message') { return; }
+      // The DB task id (distinct from the random A2A delivery id `taskId`). Used to
+      // ACK arrival back to the office so it stops re-delivering and un-fades the
+      // task. Absent on very old server frames — then we simply can't ack.
+      const dbTaskId = typeof meta['taskId'] === 'string' ? meta['taskId'] as string : undefined;
       const taskObj = meta['task'] as Record<string, unknown> | undefined;
       let taskText = typeof taskObj?.['text'] === 'string' ? taskObj['text'] : '';
 
@@ -603,6 +613,7 @@ export class WebSocketPoller {
       // an ordinary task and must still be queued — never silently discarded.
       if (isKnownSlashCommand(fullText)) {
         if (taskId) { this._markSeenDelivery(taskId); }
+        if (dbTaskId) { this._sendTaskAck(dbTaskId); }
         this._onCommand?.(fullText);
         return;
       }
@@ -614,6 +625,9 @@ export class WebSocketPoller {
           // TODO append succeeds. On failure we leave it unseen so the server's
           // reconnect replay re-delivers it instead of dropping it.
           if (taskId) { this._markSeenDelivery(taskId); }
+          // Confirm arrival to the office so it stops re-delivering this task and
+          // clears its "not yet delivered" fade. Idempotent server-side.
+          if (dbTaskId) { this._sendTaskAck(dbTaskId); }
           this._onTaskAppend?.();
         })
         .catch(err => { this._log(`WS failed to append task to TODO.md: ${err}`); });
@@ -708,6 +722,24 @@ export class WebSocketPoller {
     }
     this._sendTextFrame(JSON.stringify(payload));
     return true;
+  }
+
+  /**
+   * Confirm to the office that a pushed task ARRIVED in this agent's TODO queue.
+   * Sent as an A2A statusUpdate (event=task_ack) so the server stamps delivered_at,
+   * stops the redelivery sweep, and un-fades the task. Best-effort/idempotent.
+   */
+  private _sendTaskAck(dbTaskId: string): void {
+    try {
+      this._sendTextFrame(JSON.stringify({
+        statusUpdate: {
+          taskId:    dbTaskId,
+          contextId: this.slug,
+          status:    { state: 'TASK_STATE_WORKING' },
+          metadata:  { event: 'task_ack', taskId: dbTaskId },
+        },
+      }));
+    } catch { /* best-effort — the sweep will retry until an ack lands */ }
   }
 
   /** Send a masked WebSocket text frame. */

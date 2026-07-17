@@ -278,7 +278,17 @@ export function mcpOperateCommand(program: Command): void {
 
         socket = new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),
-          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled, gitEnabled, vncEnabled, rdpEnabled },
+          meta: {
+            provider: 'mcp-operator', cliVersion: CLI_VERSION,
+            fileBrowserEnabled, gitEnabled, vncEnabled, rdpEnabled,
+            // Announce the desktop host/port too (parity with the loop's meta) so
+            // the office persists the real target instead of defaulting to :5900.
+            // Only when enabled — an off feature must not pin a stale port.
+            vncHost: vncEnabled ? (settings.vncHost || undefined) : undefined,
+            vncPort: vncEnabled ? (settings.vncPort ?? 5900) : undefined,
+            rdpHost: rdpEnabled ? (settings.rdpHost || undefined) : undefined,
+            rdpPort: rdpEnabled ? (settings.rdpPort ?? 3389) : undefined,
+          },
           onMessage: (msg) => {
             const msgType = msg['type'] as string | undefined;
 

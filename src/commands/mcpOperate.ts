@@ -6,6 +6,7 @@ import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
 import { OfficeSocket } from '../officeSocket';
+import { handleFbRequest } from '../fileBrowser';
 import { CLI_VERSION } from '../version';
 
 /**
@@ -122,11 +123,15 @@ export function mcpOperateCommand(program: Command): void {
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
     .option('--no-socket', 'Do not open the presence WebSocket (stay on poll-based presence only).')
-    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean }) => {
+    .option('--file-browser', 'Serve the office file browser for this MCP-only agent (read/write files in the workspace over the office file browser).')
+    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const settings = loadSettingsForRoot(cwd);
       const endpoint = opts.url || officeMcpUrl(settings.serverBaseUrl);
       const key = opts.key || settings.serverApiKey || '';
+      // Serve the office file browser when explicitly requested OR when the bound
+      // workspace has it enabled (same flag a loop agent honours via settings).
+      const fileBrowserEnabled = opts.fileBrowser === true || settings.enableFileBrowser === true;
 
       if (!endpoint || !key) {
         process.stderr.write('autodev mcp-operate: need --url and --key (or run inside a workspace bound to an office).\n');
@@ -190,8 +195,29 @@ export function mcpOperateCommand(program: Command): void {
 
         socket = new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),
-          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled: false },
+          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled },
           onMessage: (msg) => {
+            // File-browser control frame from the office UI. Handle it and stop —
+            // it is not an office event to surface via describePush/notifications.
+            if (msg['type'] === 'fb_request') {
+              const requestId = msg['requestId'] as string | undefined;
+              const action    = msg['action']    as string | undefined;
+              if (requestId && action) {
+                handleFbRequest({
+                  root: cwd,
+                  enabled: fileBrowserEnabled,
+                  requestId,
+                  action,
+                  relPath: (msg['path'] as string | undefined) ?? '',
+                  content: msg['content'] as string | undefined,
+                  newPath: msg['newPath'] as string | undefined,
+                  query:   msg['query']   as string | undefined,
+                  sendFrame: (f) => socket?.sendFrame(f),
+                  log: (m) => process.stderr.write(m + '\n'),
+                });
+              }
+              return;
+            }
             const notice = describePush(msg);
             if (notice) {
               // Buffer for wait_for_events (the reliable real-time path)…

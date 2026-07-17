@@ -62,6 +62,13 @@ export class OfficeSocket {
   /** True while a live connection is up. */
   isConnected(): boolean { return this._connected; }
 
+  /**
+   * Send a JSON payload to the server as a WebSocket text frame. Used by the
+   * bridge to reply to control frames (e.g. fb_response for the office file
+   * browser). No-op if the socket isn't currently connected.
+   */
+  sendFrame(obj: Record<string, unknown>): void { this._sendJson(obj); }
+
   destroy(): void {
     this._destroyed = true;
     this._stopHeartbeat();

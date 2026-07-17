@@ -82,6 +82,28 @@ export function getOpencodeSdkLatestSessionId(root: string): string | undefined 
   return _latestSessionIds.get(root) ?? _state.get(root)?.sessionId;
 }
 
+/**
+ * Steer the live OpenCode SDK session MID-TURN. Unlike opencode-cli / grok /
+ * copilot-cli (one-shot subprocesses), the SDK keeps a persistent in-process
+ * server + session, so a new prompt sent to the live session while it's busy is
+ * picked up by the running turn (opencode interrupts and continues with the added
+ * message, keeping the conversation context). Returns true only when there's a
+ * live/busy session to inject into; false otherwise so the caller falls back to
+ * the durable TODO queue (at-least-once delivery preserved).
+ */
+export async function steerOpencodeSdk(root: string, text: string, log: (msg: string) => void): Promise<boolean> {
+  const st = _state.get(root);
+  if (!st || !_busyRoots.has(root)) { return false; }
+  try {
+    await st.client.session.promptAsync({ path: { id: st.sessionId }, body: { parts: [{ type: 'text', text }] } });
+    log('OpenCode SDK: steered mid-turn — injected into live session ' + st.sessionId);
+    return true;
+  } catch (e) {
+    log('OpenCode SDK: mid-turn steer failed: ' + ((e as Error)?.message ?? String(e)));
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Lazy SDK loader — uses dynamic import() so esbuild resolves the ESM-only
 // package using its "import" export condition at bundle time.

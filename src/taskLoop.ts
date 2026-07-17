@@ -16,7 +16,7 @@ import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedClean
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
-import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk } from './providers/opencodeSdkProvider';
+import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk } from './providers/opencodeSdkProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -866,6 +866,16 @@ export class TaskLoopRunner {
     if (root && provider === 'copilot-sdk' && isCopilotSdkBusy(root)) {
       if (await steerCopilotSdk(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (copilot-sdk): "${clean.slice(0, 80)}"`);
+        onDelivered?.();
+        return;
+      }
+    }
+
+    // opencode-sdk keeps a persistent in-process server + session; a prompt sent to
+    // the live session mid-turn is picked up by the running turn (interrupt + continue).
+    if (root && provider === 'opencode-sdk' && isOpencodeSdkBusy(root)) {
+      if (await steerOpencodeSdk(root, clean, msg => this._cb?.log(msg))) {
+        this._cb?.log(`⚡ Steered mid-turn (opencode-sdk): "${clean.slice(0, 80)}"`);
         onDelivered?.();
         return;
       }

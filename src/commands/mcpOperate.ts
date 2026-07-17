@@ -7,6 +7,11 @@ import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
 import { OfficeSocket } from '../officeSocket';
 import { handleFbRequest } from '../fileBrowser';
+import { handleGitRequest } from '../git/gitRequest';
+import { VncSessionManager } from '../vnc/manager';
+import { RdpSessionManager } from '../rdp/manager';
+import { saveProjectUserMcp, sanitizeRemoteMcpEntries } from '../core/projectMcp';
+import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 
 /**
@@ -124,14 +129,23 @@ export function mcpOperateCommand(program: Command): void {
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
     .option('--no-socket', 'Do not open the presence WebSocket (stay on poll-based presence only).')
     .option('--file-browser', 'Serve the office file browser for this MCP-only agent (read/write files in the workspace over the office file browser).')
-    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean }) => {
+    .option('--git', 'Serve the office git panel for this MCP-only agent (status/diff/stage/commit/branch in the workspace over the office git panel).')
+    .option('--vnc', 'Serve office VNC remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
+    .option('--rdp', 'Serve office RDP remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
+    .option('--mcp-update', 'Honor mcp_update frames: sync remote-supplied MCP config into the workspace (relaunch to pick up spawn changes).')
+    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean; git?: boolean; vnc?: boolean; rdp?: boolean; mcpUpdate?: boolean }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
-      const settings = loadSettingsForRoot(cwd);
+      let settings = loadSettingsForRoot(cwd);
       const endpoint = opts.url || officeMcpUrl(settings.serverBaseUrl);
       const key = opts.key || settings.serverApiKey || '';
-      // Serve the office file browser when explicitly requested OR when the bound
-      // workspace has it enabled (same flag a loop agent honours via settings).
-      const fileBrowserEnabled = opts.fileBrowser === true || settings.enableFileBrowser === true;
+      // Feature gates: serve a capability when explicitly requested via flag OR
+      // when the bound workspace has it enabled (same flags a loop agent honours
+      // via settings). Mutable so a live mcp_update can refresh them from disk.
+      let fileBrowserEnabled = opts.fileBrowser === true || settings.enableFileBrowser === true;
+      let gitEnabled         = opts.git === true         || settings.gitEnabled === true;
+      let vncEnabled         = opts.vnc === true         || settings.vncEnabled === true;
+      let rdpEnabled         = opts.rdp === true         || settings.rdpEnabled === true;
+      let mcpUpdateEnabled   = opts.mcpUpdate === true   || settings.mcpUpdateEnabled === true;
 
       if (!endpoint || !key) {
         process.stderr.write('autodev mcp-operate: need --url and --key (or run inside a workspace bound to an office).\n');
@@ -175,6 +189,75 @@ export function mcpOperateCommand(program: Command): void {
       // connect, the stdio bridge keeps working and presence falls back to the
       // server's poll heuristic.
       let socket: OfficeSocket | null = null;
+
+      // ── VNC / RDP remote-desktop session managers ────────────────────────────
+      // Reuse the exact same session machinery the autodev loop uses. They reply
+      // to the office over the presence socket. Gated by --vnc/--rdp (or the
+      // bound workspace's vncEnabled/rdpEnabled), mirroring --file-browser.
+      const logErr = (m: string): void => { process.stderr.write(m + '\n'); };
+      const vncManager = new VncSessionManager((f) => socket?.sendFrame(f), logErr);
+      const rdpManager = new RdpSessionManager((f) => socket?.sendFrame(f), logErr);
+      const applyRemoteDesktopSettings = (): void => {
+        vncManager.setEnabled(vncEnabled);
+        vncManager.setPassword(settings.vncPassword || undefined);
+        rdpManager.setEnabled(rdpEnabled);
+        rdpManager.setSettings({
+          host:      settings.rdpHost      || undefined,
+          port:      settings.rdpPort      ?? 3389,
+          username:  settings.rdpUsername  || undefined,
+          password:  settings.rdpPassword  || undefined,
+          domain:    settings.rdpDomain    || undefined,
+          guacWsUrl: settings.rdpGuacWsUrl || undefined,
+        });
+      };
+      applyRemoteDesktopSettings();
+
+      // Re-read the workspace settings from disk and recompute the mutable
+      // feature gates (an explicit CLI flag stays sticky — it can enable a
+      // capability the settings file leaves off). Used on live mcp_update, the
+      // bridge analog of the loop re-reading everything on its restart.
+      const reloadBridgeSettings = (): void => {
+        settings = loadSettingsForRoot(cwd);
+        fileBrowserEnabled = opts.fileBrowser === true || settings.enableFileBrowser === true;
+        gitEnabled         = opts.git === true         || settings.gitEnabled === true;
+        vncEnabled         = opts.vnc === true         || settings.vncEnabled === true;
+        rdpEnabled         = opts.rdp === true         || settings.rdpEnabled === true;
+        mcpUpdateEnabled   = opts.mcpUpdate === true   || settings.mcpUpdateEnabled === true;
+        applyRemoteDesktopSettings();
+      };
+
+      // ── Live MCP-config reload (mcp_update frame) ────────────────────────────
+      // The loop restarts to pick up a new .mcp.json; a bridge can't restart, so
+      // it syncs the config to disk (gated by mcpUpdateEnabled) and logs that a
+      // relaunch is needed to spawn any newly-added stdio MCP servers. It also
+      // refreshes the bridge's own feature gates from disk (fileBrowser/git/…).
+      const handleMcpUpdate = (entries: Record<string, unknown>): void => {
+        // Refresh feature gates from disk first — mirrors the loop re-reading
+        // settings on restart (a settings edit often accompanies an mcp_update).
+        reloadBridgeSettings();
+        if (!mcpUpdateEnabled) {
+          logErr('🔒 mcp_update ignored — mcpUpdateEnabled is off (set it in .autodev/settings.json or pass --mcp-update to allow)');
+          return;
+        }
+        logErr('🔧 mcp_update received — validating and writing .mcp.json…');
+        const { safe, rejected } = sanitizeRemoteMcpEntries(entries);
+        if (rejected.length) {
+          logErr(`⚠️ mcp_update dropped ${rejected.length} unsafe entr${rejected.length === 1 ? 'y' : 'ies'}: ${rejected.join(', ')}`);
+        }
+        if (Object.keys(safe).length === 0) {
+          logErr('⚠️ mcp_update had no safe entries — not writing config.');
+          return;
+        }
+        try {
+          saveProjectUserMcp(cwd, safe);
+          ConfigManager.syncProjectMcpServers(cwd, logErr);
+          void ConfigManager.reportProjectMcp(cwd, logErr);
+          logErr('✅ MCP config synced to .mcp.json, opencode.json, .vscode/mcp.json — relaunch `autodev mcp-operate` to spawn any newly-added MCP servers.');
+        } catch (err) {
+          logErr(`⚠️ MCP update failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
       const startSocket = async (): Promise<void> => {
         if (opts.socket === false) { return; }
         const wsUrl = officeWsUrl(endpoint);
@@ -195,11 +278,13 @@ export function mcpOperateCommand(program: Command): void {
 
         socket = new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),
-          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled },
+          meta: { provider: 'mcp-operator', cliVersion: CLI_VERSION, fileBrowserEnabled, gitEnabled, vncEnabled, rdpEnabled },
           onMessage: (msg) => {
+            const msgType = msg['type'] as string | undefined;
+
             // File-browser control frame from the office UI. Handle it and stop —
             // it is not an office event to surface via describePush/notifications.
-            if (msg['type'] === 'fb_request') {
+            if (msgType === 'fb_request') {
               const requestId = msg['requestId'] as string | undefined;
               const action    = msg['action']    as string | undefined;
               if (requestId && action) {
@@ -218,6 +303,43 @@ export function mcpOperateCommand(program: Command): void {
               }
               return;
             }
+
+            // Git-panel control frame from the office UI — same additive,
+            // early-return handling as fb_request. Gated by gitEnabled.
+            if (msgType === 'git_request') {
+              const requestId = msg['requestId'] as string | undefined;
+              const action    = msg['action']    as string | undefined;
+              if (requestId && action) {
+                handleGitRequest({
+                  root: cwd,
+                  enabled: gitEnabled,
+                  requestId,
+                  action,
+                  filePath: msg['path']    as string | undefined,
+                  staged:   msg['staged']  as boolean | undefined,
+                  message:  msg['message'] as string | undefined,
+                  branch:   msg['branch']  as string | undefined,
+                  hash:     msg['hash']    as string | undefined,
+                  sendFrame: (f) => socket?.sendFrame(f),
+                  log: (m) => process.stderr.write(m + '\n'),
+                });
+              }
+              return;
+            }
+
+            // VNC / RDP remote-desktop control frames — delegated to the shared
+            // session managers (same machinery as the loop). Each returns true
+            // when it consumed the frame; consumed frames are not office events.
+            if (msgType && vncManager.handleFrame(msgType, msg)) { return; }
+            if (msgType && rdpManager.handleFrame(msgType, msg)) { return; }
+
+            // Live MCP-config reload frame from the office.
+            if (msgType === 'mcp_update') {
+              const entries = msg['mcpServers'] as Record<string, unknown> | undefined;
+              if (entries && typeof entries === 'object') { handleMcpUpdate(entries); }
+              return;
+            }
+
             const notice = describePush(msg);
             if (notice) {
               // Buffer for wait_for_events (the reliable real-time path)…
@@ -237,6 +359,8 @@ export function mcpOperateCommand(program: Command): void {
       let closed = false;
       const maybeExit = (): void => {
         if (closed && inflight === 0) {
+          vncManager.stopAll();
+          rdpManager.stopAll();
           socket?.destroy();
           // Flush any buffered stdout (e.g. the final reply on a pipe) before
           // exiting, so the last frame is never clipped.

@@ -3,16 +3,14 @@ import * as tls from 'tls';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { VncSession } from './vnc';
-import { RdpSession } from './rdp';
-import type { RdpConnectOptions } from './rdp';
+import { VncSessionManager } from './vnc/manager';
+import { RdpSessionManager } from './rdp/manager';
 import { saveAttachment } from './messageBuilder';
 import { shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
 import { isKnownSlashCommand } from './core/commands';
-import { resolveWithinRoot } from './core/pathSafe';
 import { handleFbRequest } from './fileBrowser';
-import * as gitService from './git/gitService';
+import { handleGitRequest } from './git/gitRequest';
 import { buildWsUpgradeRequest } from './wsHandshake';
 
 // ---------------------------------------------------------------------------
@@ -30,14 +28,18 @@ export class WebSocketPoller {
   private _log: (msg: string) => void = () => {};
   private static readonly RECONNECT_DELAY_MS = 5_000;
 
-  private _vncPassword: string | undefined;
-  private _vncSessions: Map<string, VncSession> = new Map();
-  private _rdpSessions: Map<string, RdpSession> = new Map();
-  private _rdpSettings: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string } = {};
+  // VNC / RDP remote-desktop sessions are managed by shared session managers so
+  // the MCP-only bridge (mcp-operate) can reuse the exact same machinery.
+  private readonly _vncManager = new VncSessionManager(
+    (frame) => { this.sendFrame(frame); },
+    (m) => this._log(m),
+  );
+  private readonly _rdpManager = new RdpSessionManager(
+    (frame) => { this.sendFrame(frame); },
+    (m) => this._log(m),
+  );
   private _gitEnabled = false;
   private _fileBrowserEnabled = false;
-  private _vncEnabled = false;
-  private _rdpEnabled = false;
   // WebSocket message reassembly (fragmented frames: FIN=0 start + 0x0 continuations).
   private _fragOpcode = 0;
   private _fragChunks: Buffer[] = [];
@@ -146,8 +148,8 @@ export class WebSocketPoller {
   destroy(): void {
     this._destroyed = true;
     this._stopHeartbeat();
-    this._stopAllVncSessions();
-    this._stopAllRdpSessions();
+    this._vncManager.stopAll();
+    this._rdpManager.stopAll();
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._closeSocket();
   }
@@ -286,8 +288,8 @@ export class WebSocketPoller {
 
   private _scheduleReconnect(): void {
     this._stopHeartbeat();
-    this._stopAllVncSessions();
-    this._stopAllRdpSessions();
+    this._vncManager.stopAll();
+    this._rdpManager.stopAll();
     if (this._destroyed) { return; }
     // If a reconnect is already scheduled, don't schedule another.
     if (this._reconnectTimer) { return; }
@@ -499,136 +501,11 @@ export class WebSocketPoller {
       return;
     }
 
-    if (msgType === 'vnc_session') {
-      if (!this._vncEnabled) { this._log('vnc_session ignored — VNC not enabled'); return; }
-      const action = msg['action'] as string | undefined;
-      if (action === 'start') {
-        const sessionId = msg['sessionId'] as string;
-        const port      = Number(msg['port'] ?? 5900);
-        // Prefer password from server frame; fall back to locally-configured password
-        const password  = (msg['password'] as string | undefined) || this._vncPassword;
-        this._log(`VNC session start: ${sessionId} → port ${port}`);
-
-        const session = new VncSession(sessionId, (frame) => this.sendFrame(frame));
-        this._vncSessions.set(sessionId, session);
-
-        session.start(port, password).catch((err: Error) => {
-          this._log(`VNC session ${sessionId} failed to start: ${err.message}`);
-          this._vncSessions.delete(sessionId);
-          this.sendFrame({ type: 'vnc_close', sessionId, reason: err.message });
-        });
-      }
-      return;
-    }
-
-    if (msgType === 'vnc_input') {
-      const sessionId = msg['sessionId'] as string | undefined;
-      const event     = msg['event'] as Record<string, unknown> | undefined;
-      if (sessionId && event) {
-        this._vncSessions.get(sessionId)?.handleInput(event);
-      }
-      return;
-    }
-
-    if (msgType === 'vnc_close') {
-      const sessionId = msg['sessionId'] as string | undefined;
-      if (sessionId) {
-        this._log(`VNC session closed: ${sessionId}`);
-        this._vncSessions.get(sessionId)?.stop();
-        this._vncSessions.delete(sessionId);
-      }
-      return;
-    }
-
-    // ── RDP frames from pixel-office ─────────────────────────────────────────
-
-    if (msgType === 'rdp_session') {
-      if (!this._rdpEnabled) { this._log('rdp_session ignored — RDP not enabled'); return; }
-      const action = msg['action'] as string | undefined;
-      if (action === 'start') {
-        const sessionId = msg['sessionId'] as string;
-        const opts: RdpConnectOptions = {
-          // Host/port come ONLY from local settings — never from the WS frame.
-          // A frame-supplied host/port would let a remote party open an outbound
-          // RDP bridge to an arbitrary target (SSRF / internal-network pivot).
-          // Default to loopback (xrdp runs on the same machine as the extension).
-          host:       this._rdpSettings.host || '127.0.0.1',
-          port:       this._rdpSettings.port ?? 3389,
-          // credentials never sent from server — always use local settings
-          username:   this._rdpSettings.username || (msg['username'] as string | undefined),
-          password:   this._rdpSettings.password || (msg['password'] as string | undefined),
-          domain:     this._rdpSettings.domain   || (msg['domain']   as string | undefined),
-          width:      msg['width']    ? Number(msg['width'])    : undefined,
-          height:     msg['height']   ? Number(msg['height'])   : undefined,
-          colorDepth: msg['colorDepth'] ? Number(msg['colorDepth']) : undefined,
-        };
-        this._log(`RDP session start: ${sessionId} → ${opts.host}:${opts.port ?? 3389}`);
-
-        // Send Guacamole token to browser so it can connect via guacamole-lite
-        // (guacd + guacamole-lite must be running on the same host as xrdp, port 4567)
-        if (opts.username || opts.password) {
-          const guacSettings: Record<string, string | number | boolean> = {
-            hostname:      opts.host,
-            port:          String(opts.port ?? 3389),
-            'ignore-cert': true,
-          };
-          if (opts.username) { guacSettings['username'] = opts.username; }
-          if (opts.password) { guacSettings['password'] = opts.password; }
-          if (opts.domain)   { guacSettings['domain']   = opts.domain; }
-          if (opts.width)    { guacSettings['width']    = opts.width; }
-          if (opts.height)   { guacSettings['height']   = opts.height; }
-          guacSettings['color-depth'] = opts.colorDepth ?? 24;
-
-          const tokenPayload = JSON.stringify({ connection: { type: 'rdp', settings: guacSettings } });
-          const token = Buffer.from(tokenPayload).toString('base64');
-          // Use configured WSS URL (for HTTPS frontends), else fall back to plain WS on port 4567
-          const guacWsUrl = this._rdpSettings.guacWsUrl || `ws://${opts.host}:4567`;
-
-          this.sendFrame({
-            type:      'rdp_guac_token',
-            sessionId,
-            wsUrl:     guacWsUrl,
-            token,
-            width:     opts.width  ?? 1280,
-            height:    opts.height ?? 800,
-          });
-          this._log(`RDP guac token sent for session ${sessionId} → ${guacWsUrl}`);
-        }
-
-        const session = new RdpSession(
-          sessionId,
-          (frame) => this.sendFrame(frame),
-          (msg) => this._log(msg),
-        );
-        this._rdpSessions.set(sessionId, session);
-
-        session.start(opts).catch((err: Error) => {
-          this._log(`RDP session ${sessionId} failed to start: ${err.message}`);
-          this._rdpSessions.delete(sessionId);
-          this.sendFrame({ type: 'rdp_close', sessionId, reason: err.message });
-        });
-      }
-      return;
-    }
-
-    if (msgType === 'rdp_input') {
-      const sessionId = msg['sessionId'] as string | undefined;
-      const event     = msg['event'] as Record<string, unknown> | undefined;
-      if (sessionId && event) {
-        this._rdpSessions.get(sessionId)?.handleInput(event);
-      }
-      return;
-    }
-
-    if (msgType === 'rdp_close') {
-      const sessionId = msg['sessionId'] as string | undefined;
-      if (sessionId) {
-        this._log(`RDP session closed: ${sessionId}`);
-        this._rdpSessions.get(sessionId)?.stop();
-        this._rdpSessions.delete(sessionId);
-      }
-      return;
-    }
+    // ── VNC / RDP remote-desktop frames from pixel-office ────────────────────
+    // Delegated to shared session managers (same machinery the mcp-operate
+    // bridge uses). Each returns true if it consumed the frame.
+    if (msgType && this._vncManager.handleFrame(msgType, msg)) { return; }
+    if (msgType && this._rdpManager.handleFrame(msgType, msg)) { return; }
 
     // ── A2A task frame ────────────────────────────────────────────────────────
 
@@ -764,6 +641,7 @@ export class WebSocketPoller {
     });
   }
 
+  /** Handle a git-panel request from the server (originated by the browser UI). */
   private _handleGitRequest(
     requestId: string,
     action: string,
@@ -773,114 +651,24 @@ export class WebSocketPoller {
     branch?: string,
     hash?: string,
   ): void {
-    const respond = (ok: boolean, data?: Record<string, unknown>, error?: string) => {
-      this.sendFrame({ type: 'git_response', requestId, ok, ...(data ?? {}), ...(error ? { error } : {}) });
-    };
-
-    const root = this._workspaceRoot;
-    if (!root) { respond(false, undefined, 'No workspace root'); return; }
-    if (!this._gitEnabled) { respond(false, undefined, 'Git not enabled'); return; }
-
-    // Containment guard — mirror _handleFbRequest. Every path-bearing arg
-    // (filePath) must resolve inside the workspace root both lexically AND after
-    // resolving symlinks; otherwise a git_request could read arbitrary host
-    // files (e.g. path '../../.claude/.credentials.json' via the readFileSync
-    // fallback in getDiff, or leak them through `git diff -- <path>`). An empty
-    // filePath means "whole repo" and is permitted (allowRoot).
-    if (filePath !== undefined && filePath !== '') {
-      if (resolveWithinRoot(root, filePath, true) === null) {
-        respond(false, undefined, 'Path outside workspace');
-        return;
-      }
-    }
-
-    (async () => {
-      try {
-        switch (action) {
-          case 'status': {
-            const status = await gitService.getStatus(root);
-            respond(true, { status });
-            break;
-          }
-          case 'log': {
-            const commits = await gitService.getLog(root);
-            respond(true, { commits });
-            break;
-          }
-          case 'diff': {
-            const diff = await gitService.getDiff(root, filePath ?? '', staged ?? false);
-            respond(true, { diff });
-            break;
-          }
-          case 'commit_diff': {
-            const diff = await gitService.getCommitDiff(root, hash ?? '', filePath);
-            respond(true, { diff });
-            break;
-          }
-          case 'stage': {
-            if (filePath) await gitService.stageFile(root, filePath);
-            else await gitService.stageAll(root);
-            respond(true);
-            break;
-          }
-          case 'unstage': {
-            if (!filePath) { respond(false, undefined, 'path required'); break; }
-            await gitService.unstageFile(root, filePath);
-            respond(true);
-            break;
-          }
-          case 'commit': {
-            if (!message) { respond(false, undefined, 'message required'); break; }
-            const commitHash = await gitService.commit(root, message);
-            respond(true, { hash: commitHash });
-            break;
-          }
-          case 'fetch': {
-            await gitService.fetchOrigin(root);
-            respond(true);
-            break;
-          }
-          case 'branches': {
-            const branches = await gitService.getBranches(root);
-            respond(true, { branches });
-            break;
-          }
-          case 'checkout': {
-            if (!branch) { respond(false, undefined, 'branch required'); break; }
-            await gitService.checkoutBranch(root, branch);
-            respond(true);
-            break;
-          }
-          default:
-            respond(false, undefined, `Unknown git action: ${action}`);
-        }
-      } catch (err) {
-        respond(false, undefined, String(err));
-      }
-    })();
-  }
-
-  /** Stop all active VNC sessions (called on destroy/reconnect). */
-  private _stopAllVncSessions(): void {
-    for (const [id, session] of this._vncSessions) {
-      this._log(`VNC session terminated (disconnect): ${id}`);
-      session.stop();
-    }
-    this._vncSessions.clear();
-  }
-
-  /** Stop all active RDP sessions (called on destroy/reconnect). */
-  private _stopAllRdpSessions(): void {
-    for (const [id, session] of this._rdpSessions) {
-      this._log(`RDP session terminated (disconnect): ${id}`);
-      session.stop();
-    }
-    this._rdpSessions.clear();
+    handleGitRequest({
+      root: this._workspaceRoot ?? null,
+      enabled: this._gitEnabled,
+      requestId,
+      action,
+      filePath,
+      staged,
+      message,
+      branch,
+      hash,
+      sendFrame: (frame) => { this.sendFrame(frame); },
+      log: (m) => this._log(m),
+    });
   }
 
   /** Update the VNC password used for incoming vnc_session requests. */
   setVncPassword(password?: string): void {
-    this._vncPassword = password;
+    this._vncManager.setPassword(password);
   }
 
   setGitEnabled(enabled: boolean): void {
@@ -892,15 +680,15 @@ export class WebSocketPoller {
   }
 
   setVncEnabled(enabled: boolean): void {
-    this._vncEnabled = enabled;
+    this._vncManager.setEnabled(enabled);
   }
 
   setRdpEnabled(enabled: boolean): void {
-    this._rdpEnabled = enabled;
+    this._rdpManager.setEnabled(enabled);
   }
 
   setRdpSettings(s: { host?: string; port?: number; username?: string; password?: string; domain?: string; guacWsUrl?: string }): void {
-    this._rdpSettings = s;
+    this._rdpManager.setSettings(s);
   }
 
   /**

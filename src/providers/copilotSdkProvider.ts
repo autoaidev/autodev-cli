@@ -25,7 +25,9 @@ interface SdkSessionEvent { type: string; data?: Record<string, unknown>; epheme
 type SdkEventHandler = (event: SdkSessionEvent) => void;
 interface SdkLocalSession {
   on(eventType: string, handler: SdkEventHandler): () => void;
-  send(options: { prompt: string }): Promise<void>;
+  // mode 'enqueue' (default) queues the prompt for the next turn; 'immediate'
+  // injects it into the CURRENTLY-RUNNING turn (true mid-turn steering).
+  send(options: { prompt: string; mode?: 'enqueue' | 'immediate' }): Promise<void>;
   dispose(): void;
   respondToPermission(requestId: string, response: { kind: string }): void;
   respondToUserInput(requestId: string, response: { kind: string; text?: string }): void;
@@ -204,6 +206,28 @@ export function isCopilotSdkBusy(root: string): boolean {
 
 export function getLatestCopilotSdkSessionId(root: string): string | undefined {
   return _sessions.has(root) ? 'copilot-sdk:' + path.basename(root) : undefined;
+}
+
+/**
+ * Steer the live Copilot SDK session MID-TURN. Unlike copilot-cli (a one-shot
+ * subprocess), the SDK holds a persistent LocalSession whose send() accepts
+ * mode:'immediate' — the message is injected into the CURRENTLY-RUNNING turn
+ * (the model's next call includes it) instead of the default 'enqueue' which
+ * waits for the next turn. Returns true only if there's a live/busy session to
+ * inject into; false otherwise, so the caller falls back to the durable TODO
+ * queue (at-least-once delivery preserved).
+ */
+export async function steerCopilotSdk(root: string, text: string, log: (msg: string) => void): Promise<boolean> {
+  const state = _sessions.get(root);
+  if (!state || !_busyRoots.has(root)) { return false; }
+  try {
+    await state.session.send({ prompt: text, mode: 'immediate' });
+    log('Copilot SDK: steered mid-turn (' + text.length + ' chars) — injected into current turn');
+    return true;
+  } catch (e) {
+    log('Copilot SDK: mid-turn steer failed: ' + ((e as Error)?.message ?? String(e)));
+    return false;
+  }
 }
 
 export function readCopilotSdkOutputSince(stdoutFile: string, fromByte: number): string {

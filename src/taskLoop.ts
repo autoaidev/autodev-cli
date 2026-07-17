@@ -15,7 +15,7 @@ import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/open
 import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedCleanly } from './openCodeHooksManager';
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
-import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions } from './providers/copilotSdkProvider';
+import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk } from './providers/opencodeSdkProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
@@ -855,6 +855,18 @@ export class TaskLoopRunner {
       if (await steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
         onDelivered?.(); // durably injected into the live turn
+        return;
+      }
+    }
+
+    // copilot-sdk keeps a persistent LocalSession whose send(mode:'immediate')
+    // injects into the running turn — true mid-turn steering, same as claude-tui.
+    // (copilot-CLI is a one-shot subprocess with no live turn to inject into, so
+    // it always falls through to the next-turn TODO queue below.)
+    if (root && provider === 'copilot-sdk' && isCopilotSdkBusy(root)) {
+      if (await steerCopilotSdk(root, clean, msg => this._cb?.log(msg))) {
+        this._cb?.log(`⚡ Steered mid-turn (copilot-sdk): "${clean.slice(0, 80)}"`);
+        onDelivered?.();
         return;
       }
     }

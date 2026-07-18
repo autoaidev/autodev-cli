@@ -1360,7 +1360,7 @@ export class TaskLoopRunner {
         this._idleNotified = false;
         this._notifyWebhook('task_start', {
           iteration: this._iterations,
-          task:      { text: task.text },
+          task:      { text: task.text, id: task.id },
           remaining,
           workDir:   this._workspaceRoot,
           gitRepo:   this._gitRepo,
@@ -1374,7 +1374,7 @@ export class TaskLoopRunner {
         this._idleNotified = false;
         this._notifyWebhook('task_start', {
           iteration: this._iterations,
-          task:      { text: task.text },
+          task:      { text: task.text, id: task.id },
           remaining,
           workDir:   this._workspaceRoot,
           gitRepo:   this._gitRepo,
@@ -1587,7 +1587,7 @@ export class TaskLoopRunner {
         this._cb?.log(`\u2705 Task done: ${task.text}`);
         this._notifyWebhook('task_done', {
           iteration: this._iterations,
-          task:      { text: task.text },
+          task:      { text: task.text, id: task.id },
           output:    taskOutput || undefined,
           duration,
           workDir:   this._workspaceRoot,
@@ -1734,7 +1734,7 @@ export class TaskLoopRunner {
           this._notifyDiscord(`🔑 **Authentication required** (${currentProvider}) — loop paused until you re-authenticate.\n\`\`\`\n${rawMsg}\n\`\`\``);
           this._notifyWebhook('reauth_required', {
             iteration: this._iterations,
-            task:      { text: task.text },
+            task:      { text: task.text, id: task.id },
             message:   rawMsg,
             provider:  currentProvider,
             workDir:   this._workspaceRoot,
@@ -1766,7 +1766,7 @@ export class TaskLoopRunner {
             event: 'reauth_required',
             payload: {
               iteration: this._iterations,
-              task:      { text: task.text },
+              task:      { text: task.text, id: task.id },
               message:   rawMsg,
               provider:  currentProvider,
               workDir:   this._workspaceRoot,
@@ -2011,7 +2011,7 @@ export class TaskLoopRunner {
         this._cb?.log(`❌ Task failed: ${task.text} — ${msg}`);
         this._notifyWebhook('task_fail', {
           iteration: this._iterations,
-          task:      { text: task.text },
+          task:      { text: task.text, id: task.id },
           duration,
           error:     msg,
           workDir:   this._workspaceRoot,
@@ -2278,7 +2278,7 @@ export class TaskLoopRunner {
             this._notifyDiscord(`🖥 **Claude output:**\n\`\`\`\n${newText}\n\`\`\``);
             this._notifyWebhook('claude_output', {
               iteration: this._iterations,
-              task:      { text: task.text },
+              task:      { text: task.text, id: task.id },
               output:    newText,
               workDir:   this._workspaceRoot,
               gitRepo:   this._gitRepo,

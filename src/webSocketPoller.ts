@@ -569,9 +569,16 @@ export class WebSocketPoller {
       const taskObj = meta['task'] as Record<string, unknown> | undefined;
       let taskText = typeof taskObj?.['text'] === 'string' ? taskObj['text'] : '';
 
-      // Handle A2A parts — extract text parts and save file parts as attachments
-      // Pre-generate task ID so all attachments share the same prefix
-      const wsTaskId = shortId();
+      // Handle A2A parts — extract text parts and save file parts as attachments.
+      // ADOPT the server's DB task id when the frame carries one: the office has
+      // ALREADY created a durable Task row (A2A / scheduled / human post) and
+      // pushed us its id. If we mint our own id here, we work the task under a
+      // DIFFERENT id, the server's row is never claimed (stuck 'pending') and our
+      // completion creates a SECOND row — the duplicate "Task assigned" pair the
+      // office shows. Reusing dbTaskId makes our TODO task == the server's task,
+      // so task_start/done update that one row. Only mint an id when the frame has
+      // none (older server). Attachments still share this id as their prefix.
+      const wsTaskId = dbTaskId ?? shortId();
       const rawParts = meta['parts'] as Array<Record<string, unknown>> | undefined;
       const textParts: string[] = [];
       const attRefs: string[] = [];

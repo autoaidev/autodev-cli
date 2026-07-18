@@ -239,6 +239,9 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
   // A stale/dead session for this name must be cleared first.
   if (hasSession(name)) { killSession(name); }
 
+  // Kill the one-time project-directory picker before it can block the turn.
+  ensureGrokPickerDisabled(log);
+
   const dir = path.join(root, '.autodev', 'grok-tui');
   try { if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); } } catch { /* ignore */ }
   const rawLog = path.join(dir, 'pane.raw');
@@ -312,6 +315,97 @@ function readFrom(file: string, offset: number): { text: string; offset: number 
     try { fs.readSync(fd, buf, 0, len, offset); } finally { fs.closeSync(fd); }
     return { text: buf.toString('utf8'), offset: size };
   } catch { return { text: '', offset }; }
+}
+
+/**
+ * grok persists a CLEAN structured transcript per workspace session at
+ *   ~/.grok/sessions/<encodeURIComponent(cwd)>/<sessionId>/chat_history.jsonl
+ * one JSON object per line: {type:'system'|'user'|'reasoning'|'assistant'|
+ * 'tool_result', content, tool_calls?}. The assistant `content` is the real
+ * message text (markdown), with none of the TUI chrome — spinners, "Waiting for
+ * response…", token counters, "Ctrl+x:shortcuts", load-bar glyphs — that scraping
+ * the live tmux pane drags in. We read the agent's OUTPUT from here; the pane is
+ * used only for turn-end/reauth detection.
+ */
+function chatHistoryPath(root: string, sessionId: string): string {
+  return path.join(os.homedir(), '.grok', 'sessions', encodeURIComponent(root), sessionId, 'chat_history.jsonl');
+}
+
+/**
+ * A NEW grok session shows a one-time "Run Grok Build in a project directory?"
+ * picker before the first turn's work, which blocks headless automation. grok
+ * exposes a persistent opt-out — `hints = { project_picker_disabled = true }` in
+ * ~/.grok/config.toml (what its "Don't ask me again" option writes). Ensure it is
+ * present before launching so the session goes straight to the prompt. Idempotent;
+ * the poll-loop picker backstop covers any grok build that ignores this.
+ */
+function ensureGrokPickerDisabled(log: (m: string) => void): void {
+  try {
+    const cfg = path.join(os.homedir(), '.grok', 'config.toml');
+    let text = '';
+    try { text = fs.readFileSync(cfg, 'utf8'); } catch { /* no config yet */ }
+    if (/project_picker_disabled\s*=\s*true/.test(text)) { return; }
+    if (/^hints\s*=\s*\{/m.test(text)) {
+      // Inject the key into the existing inline `hints` table.
+      text = text.replace(/^hints\s*=\s*\{/m, 'hints = { project_picker_disabled = true,');
+    } else {
+      text = 'hints = { project_picker_disabled = true }\n' + text;
+    }
+    fs.mkdirSync(path.dirname(cfg), { recursive: true });
+    fs.writeFileSync(cfg, text, 'utf8');
+    log('Grok TUI: disabled grok project-directory picker in config.toml');
+  } catch { /* best effort — the poll-loop dismissal is the backstop */ }
+}
+
+/** Compact one-line marker for a grok tool call (for the live activity feed). */
+function formatToolCall(tc: { name?: string; arguments?: string }): string {
+  const name = tc?.name || 'tool';
+  let arg = '';
+  try {
+    const a = JSON.parse(tc?.arguments || '{}') as Record<string, unknown>;
+    const cand = a.target_file ?? a.file_path ?? a.path ?? a.command ?? a.query ?? a.message ?? a.to ?? '';
+    if (typeof cand === 'string') { arg = cand; }
+  } catch { /* non-JSON args — just show the name */ }
+  arg = arg.replace(/\s+/g, ' ').trim().slice(0, 80);
+  return `» ${name}${arg ? ` ${arg}` : ''}`;
+}
+
+/**
+ * Read new chat_history.jsonl records past `offset` and render only the
+ * user-facing parts: assistant prose + compact tool-call markers. Skips
+ * reasoning/user/system/tool_result. Advances the offset only past COMPLETE
+ * lines so a half-written trailing record is re-read next poll.
+ */
+function drainChatHistory(file: string, offset: number): { text: string; offset: number } {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return { text: '', offset }; }
+  if (size <= offset) { return { text: '', offset }; }
+  let raw = '';
+  try {
+    const len = size - offset;
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, offset); } finally { fs.closeSync(fd); }
+    raw = buf.toString('utf8');
+  } catch { return { text: '', offset }; }
+
+  const lastNl = raw.lastIndexOf('\n');
+  if (lastNl < 0) { return { text: '', offset }; } // no complete line yet
+  const complete = raw.slice(0, lastNl);
+  const newOffset = offset + Buffer.byteLength(complete, 'utf8') + 1; // +1 for the \n
+
+  let out = '';
+  for (const line of complete.split('\n')) {
+    const s = line.trim();
+    if (!s) { continue; }
+    let o: { type?: string; role?: string; content?: string; tool_calls?: Array<{ name?: string; arguments?: string }> };
+    try { o = JSON.parse(s); } catch { continue; }
+    if ((o.type || o.role) !== 'assistant') { continue; }
+    const c = (o.content || '').trim();
+    if (c) { out += c + '\n'; }
+    for (const tc of o.tool_calls || []) { out += formatToolCall(tc) + '\n'; }
+  }
+  return { text: out, offset: newOffset };
 }
 
 /** Type a prompt into the live pane and submit it. CALIBRATED against real grok:
@@ -444,19 +538,46 @@ function runGrokTmuxTurn(
           return;
         }
       }
-      // CALIBRATED: grok opens on a welcome menu (New worktree / Resume session /
-      // Changelog / Quit) sitting over the input box; a single Enter dismisses it
-      // to the ready "❯" prompt. Without this the first real prompt lands on the
-      // menu instead of the chat input. Fresh launch only (a resumed session is
-      // already at the prompt).
-      tmux(['send-keys', '-t', sess.name, 'Enter']);
-      await sleep(1500);
+      // CALIBRATED: a NEW grok session opens on a picker sitting over the input
+      // box — either the welcome menu (New worktree / Resume session / Changelog /
+      // Quit) or the project chooser ("Run Grok Build in a project directory?"
+      // with radio options, the current dir highlighted). A RESUMED session skips
+      // it. Pressing Enter confirms the highlighted default (current dir / first
+      // item) and proceeds to the ready "❯" prompt. A single fixed Enter races the
+      // picker's render (grok's splash can outlast the grace), so poll and press
+      // Enter each time a picker is still showing, until the prompt is clear.
+      const PICKER_MARKERS = /project directory|New worktree|Resume session|Changelog|\(current\)|Run Grok Build|[◯○◉●]|Select|↑\/↓/i;
+      for (let i = 0; i < 8; i++) {
+        if (!hasSession(sess.name)) {
+          log('Grok TUI: session died during startup');
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup]\n`, 'utf8'); } catch { /* ignore */ }
+          finish(1, 'startup-exit');
+          return;
+        }
+        const snap = capturePane(sess.name);
+        if (REAUTH_MARKERS.test(snap)) {
+          log('Grok TUI: reauth required (OAuth gate at startup)');
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
+          finish(1, 'reauth_required');
+          return;
+        }
+        if (!PICKER_MARKERS.test(snap)) { break; } // at the ready prompt
+        tmux(['send-keys', '-t', sess.name, 'Enter']);
+        await sleep(1500);
+      }
       // re-read the offset after startup so the splash/menu text isn't streamed
       // as "turn output".
       readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
     } else {
       _emitGrokHook(root, 'SessionStart', { source: 'resume' });
     }
+
+    // Clean-output source: grok's structured transcript. Seed the offset at the
+    // current size so we emit only THIS turn's assistant records, not the
+    // resumed history. (File may not exist yet on a fresh session → offset 0.)
+    const chatPath = chatHistoryPath(root, sess.sessionId);
+    let chatOffset = (() => { try { return fs.statSync(chatPath).size; } catch { return 0; } })();
+    let chatEmitted = false;
 
     // Submit the prompt.
     log(`Grok TUI: sending turn (${(() => { try { return fs.statSync(promptFilePath).size; } catch { return 0; } })()} bytes)`);
@@ -484,20 +605,30 @@ function runGrokTmuxTurn(
         return;
       }
 
-      // 1) Drain new pane bytes → stdoutFile (+ console + office feed).
-      const { text, offset } = readFrom(sess.rawLog, readOffset);
-      if (text) {
-        readOffset = offset;
-        sess.readOffset = offset;
-        const clean = stripAnsi(text);
-        if (clean) {
-          try { fs.appendFileSync(stdoutFile, clean, 'utf8'); } catch { /* ignore */ }
-          emitLines(clean);
-          activityBuf += clean; scheduleActivity();
+      // 1a) Read the pane ONLY for activity/quiescence timing — its bytes are
+      //     TUI chrome (spinners, "Waiting for response…", token counters) and
+      //     must NOT be emitted as the agent's output.
+      const { text: paneText, offset: paneOff } = readFrom(sess.rawLog, readOffset);
+      if (paneText) {
+        readOffset = paneOff;
+        sess.readOffset = paneOff;
+        if (stripAnsi(paneText).trim()) {
           _lastActivityMs.set(root, Date.now());
           lastGrowthMs = Date.now();
           sawOutput = true;
         }
+      }
+
+      // 1b) Emit CLEAN output from grok's structured transcript (assistant prose
+      //     + compact tool markers), never the pane scrape.
+      const ch = drainChatHistory(chatPath, chatOffset);
+      if (ch.text) {
+        chatOffset = ch.offset;
+        chatEmitted = true;
+        try { fs.appendFileSync(stdoutFile, ch.text, 'utf8'); } catch { /* ignore */ }
+        emitLines(ch.text);
+        activityBuf += ch.text; scheduleActivity();
+        _lastActivityMs.set(root, Date.now());
       }
 
       // 2) Snapshot for detection (also catches a mid-turn reauth prompt).
@@ -506,6 +637,16 @@ function runGrokTmuxTurn(
         try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
         finish(1, 'reauth_required');
         return;
+      }
+      // Backstop: the project-directory picker appears AFTER the first prompt is
+      // submitted (grok's one-time confirm), so it lands mid-turn. The config
+      // opt-out normally prevents it; if a grok build ignores that, select the
+      // current dir (option "1", always present) to unblock the turn.
+      if (/Run Grok Build in a project directory|Don't ask me again|\(current\)/i.test(snap)) {
+        tmux(['send-keys', '-t', sess.name, '1']);
+        await sleep(800);
+        lastGrowthMs = Date.now();
+        continue;
       }
 
       // 3) Idle test. grok prints "Worked for N.Ns." when a turn genuinely ends —
@@ -520,12 +661,21 @@ function runGrokTmuxTurn(
       const doneFast = sawDoneMarker && quietMs >= DEBOUNCE_MS;
       const doneSlow = readyToJudge && quietMs >= QUIET_FALLBACK_MS && stable >= STABLE_POLLS;
       if (!running && (doneFast || doneSlow)) {
-        // Final drain to catch anything written between the last read and idle.
-        const tail = readFrom(sess.rawLog, readOffset);
+        // Final drain of the transcript to catch records written between the last
+        // poll and turn-end.
+        const tail = drainChatHistory(chatPath, chatOffset);
         if (tail.text) {
-          readOffset = tail.offset; sess.readOffset = tail.offset;
-          const clean = stripAnsi(tail.text);
-          if (clean) { try { fs.appendFileSync(stdoutFile, clean, 'utf8'); } catch { /* ignore */ } emitLines(clean); }
+          chatOffset = tail.offset; chatEmitted = true;
+          try { fs.appendFileSync(stdoutFile, tail.text, 'utf8'); } catch { /* ignore */ }
+          emitLines(tail.text);
+        }
+        // Safety net: if the transcript path never resolved (grok layout change /
+        // encoding drift) yet the pane clearly produced output, fall back to a
+        // cleaned pane tail so the turn is never silently empty.
+        if (!chatEmitted && sawOutput) {
+          const pane = stripAnsi(capturePane(sess.name, 400)).replace(/[ \t]+\n/g, '\n').trim();
+          if (pane) { try { fs.appendFileSync(stdoutFile, pane + '\n', 'utf8'); } catch { /* ignore */ } }
+          log('Grok TUI: transcript yielded no output — fell back to pane capture (check chat_history path)');
         }
         finish(0, 'idle');
         return;

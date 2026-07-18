@@ -201,18 +201,25 @@ export function mcpOperateCommand(program: Command): void {
       // socket isn't up (startup slug-resolve, or --no-socket).
       const wsPending = new Map<string, (resp: Record<string, unknown>) => void>();
       let wsReqSeq = 0;
+      // Only route over the socket once it is genuinely CONNECTED (open + agent_online
+      // sent), never merely constructed — else the initialize handshake fires an
+      // operator_request over a still-connecting socket, gets no reply, and the MCP
+      // client (VS Code) hangs on "Connecting…". A 20s timeout means any dropped
+      // request fails over to HTTP quickly instead of stalling.
+      const wsReady = (): boolean => !!socket && socket.isConnected();
       const proxyOverWs = (body: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown>> =>
         new Promise((resolve, reject) => {
-          if (!socket) { reject(new Error('socket not connected')); return; }
+          if (!wsReady()) { reject(new Error('socket not ready')); return; }
           const id = body.id !== undefined && body.id !== null ? body.id : `wsreq-${++wsReqSeq}`;
           const k = String(id);
-          const timer = setTimeout(() => { wsPending.delete(k); reject(new Error('operator_request timed out after 120s')); }, 120_000);
+          const timer = setTimeout(() => { wsPending.delete(k); reject(new Error('operator_request timed out')); }, 20_000);
           wsPending.set(k, (resp) => { clearTimeout(timer); resolve(resp); });
-          socket.sendFrame({ type: 'operator_request', id, method: body.method, params: body.params ?? {} });
+          socket!.sendFrame({ type: 'operator_request', id, method: body.method, params: body.params ?? {} });
         });
-      // Prefer the socket; fall back to HTTP if the WS path errors (timeout/down).
+      // Prefer the socket when ready; fall back to HTTP otherwise (startup handshake,
+      // brief post-connect window, or --no-socket).
       const callOffice = (body: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown>> =>
-        socket ? proxyOverWs(body).catch(() => proxy(endpoint, key, body)) : proxy(endpoint, key, body);
+        wsReady() ? proxyOverWs(body).catch(() => proxy(endpoint, key, body)) : proxy(endpoint, key, body);
 
       // Wakes the autonomy loop (set by startAutonomy). The EXISTING socket's
       // task/message pushes call this — the same connection that keeps us online
@@ -673,8 +680,8 @@ export function mcpOperateCommand(program: Command): void {
         // handshake ones opportunistically but never write a response for them.
         if (req.id === undefined || req.id === null) {
           if (typeof req.method === 'string' && req.method.startsWith('notifications/')) {
-            // Fire-and-forget over the socket when up, else HTTP.
-            if (socket) { socket.sendFrame({ type: 'operator_request', method: req.method, params: (req as { params?: unknown }).params ?? {} }); }
+            // Fire-and-forget over the socket when ready, else HTTP.
+            if (wsReady()) { socket!.sendFrame({ type: 'operator_request', method: req.method, params: (req as { params?: unknown }).params ?? {} }); }
             else { proxy(endpoint, key, req).catch(() => { /* best effort */ }); }
           }
           return;

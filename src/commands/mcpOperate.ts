@@ -1,5 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import * as readline from 'readline';
 import { URL } from 'url';
@@ -362,6 +364,88 @@ export function mcpOperateCommand(program: Command): void {
         socket.start();
       };
       void startSocket();
+
+      // ── Forward the client session's OWN tool activity to the office ─────────
+      // A loop agent (`autodev start`) tails .autodev/hooks-events.jsonl and ships
+      // each Claude/Copilot/opencode hook to the office. An mcp-operate bridge did
+      // NOT — so a VS Code / Claude Code session's native Edit/Bash/Read calls
+      // (which never pass through the office MCP) never reached the office: the
+      // Events tab stayed empty and the badge stayed idle even while the session
+      // was actively coding. Mirror the loop here: tail the jsonl, forward new
+      // lines as `hook_event` frames over the presence socket, and derive a
+      // debounced working/idle status from the same stream.
+      //
+      // Safe when there are no hooks (the file simply never appears → no-op) and
+      // when --no-socket is set (no presence channel to forward over).
+      const startHookForwarding = (): void => {
+        if (opts.socket === false) { return; }
+        const hooksJsonl = path.join(cwd, '.autodev', 'hooks-events.jsonl');
+        // Start at the current size so we forward only NEW activity, never replay
+        // the (potentially huge) backlog on connect.
+        let offset = 0;
+        try { offset = fs.existsSync(hooksJsonl) ? fs.statSync(hooksJsonl).size : 0; } catch { offset = 0; }
+        const seen = new Map<string, number>();
+        const DEDUPE_MS = 30_000;
+        const sessionNameForHooks = (settings.sessionName && settings.sessionName.trim()) || path.basename(cwd);
+
+        // Debounced status: flip to 'working' on the first tool activity and back
+        // to 'idle' after this long with none. Only real transitions are sent (the
+        // office no-ops an unchanged status), so an active session posts one
+        // "working" per burst rather than a heartbeat spam.
+        const IDLE_AFTER_MS = 120_000;
+        let reportedStatus: 'working' | 'idle' | null = null;
+        let idleTimer: NodeJS.Timeout | null = null;
+        const reportStatus = (status: 'working' | 'idle'): void => {
+          if (reportedStatus === status) { return; }
+          reportedStatus = status;
+          proxy(endpoint, key, { jsonrpc: '2.0', id: `mcpop-status-${status}-${Date.now()}`, method: 'tools/call', params: { name: 'set_status', arguments: { status } } })
+            .catch(() => { /* best-effort — presence still works without it */ });
+        };
+        const markWorking = (): void => {
+          reportStatus('working');
+          if (idleTimer) { clearTimeout(idleTimer); }
+          idleTimer = setTimeout(() => reportStatus('idle'), IDLE_AFTER_MS);
+          idleTimer.unref?.();
+        };
+        // Hook names that mean the session is actively doing work.
+        const WORKING_HOOKS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Notification']);
+
+        const tick = (): void => {
+          if (!socket) { return; }               // wait until the presence socket is up
+          try {
+            if (!fs.existsSync(hooksJsonl)) { return; }
+            const size = fs.statSync(hooksJsonl).size;
+            if (size <= offset) { return; }
+            const fd = fs.openSync(hooksJsonl, 'r');
+            const buf = Buffer.alloc(size - offset);
+            fs.readSync(fd, buf, 0, buf.length, offset);
+            fs.closeSync(fd);
+            offset = size;
+            const now = Date.now();
+            for (const [h, ts] of seen) { if (now - ts > DEDUPE_MS) { seen.delete(h); } }
+            let sawWork = false;
+            for (const line of buf.toString('utf8').split('\n')) {
+              const t = line.trim();
+              if (!t) { continue; }
+              const h = crypto.createHash('sha1').update(t).digest('hex');
+              const at = seen.get(h);
+              if (at !== undefined && now - at <= DEDUPE_MS) { continue; }
+              seen.set(h, now);
+              try {
+                const ev = JSON.parse(t) as Record<string, unknown>;
+                ev._session_name = sessionNameForHooks;   // so the office can label it
+                socket.sendFrame({ type: 'hook_event', data: ev });
+                const name = (ev['hook_event_name'] as string) || (ev['hook'] as string) || (ev['event'] as string) || '';
+                if (WORKING_HOOKS.has(name)) { sawWork = true; }
+              } catch { /* skip malformed lines */ }
+            }
+            if (sawWork) { markWorking(); }
+          } catch { /* ignore transient read errors */ }
+        };
+        const interval = setInterval(tick, 5_000);
+        interval.unref?.();
+      };
+      startHookForwarding();
 
       // Drain in-flight requests before exiting when stdin closes, so a reply
       // in progress is never clipped.

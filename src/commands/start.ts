@@ -22,6 +22,27 @@ export function startCommand(program: Command): void {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const todoFile = path.resolve(cwd, opts.todo);
 
+      // Parent-death watchdog: when a manager spawns this loop and sets
+      // AUTODEV_EXIT_WITH_PARENT=1 (the desktop app does), exit if that parent
+      // process disappears — so closing, crashing, or force-quitting the app never
+      // leaves an orphaned loop (and its provider subprocess) running as a stale
+      // session. SIGINT first for a graceful provider-cleanup shutdown, hard-exit
+      // as a fallback. Not armed for a plain terminal `autodev start`.
+      if (process.env.AUTODEV_EXIT_WITH_PARENT) {
+        const parentPid = process.ppid;
+        const wd = setInterval(() => {
+          let gone = process.ppid !== parentPid; // reparented ⇒ parent died
+          if (!gone && parentPid > 1) { try { process.kill(parentPid, 0); } catch { gone = true; } }
+          if (gone) {
+            clearInterval(wd);
+            process.stderr.write('\n[autodev] parent (app) exited — shutting the loop down to avoid a stale session.\n');
+            try { process.kill(process.pid, 'SIGINT'); } catch { /* ignore */ }
+            setTimeout(() => process.exit(0), 8000).unref?.();
+          }
+        }, 4000);
+        wd.unref?.();
+      }
+
       // Persist the session display name to .autodev/settings.json so the
       // dispatcher + providers pick it up (opencode --title / copilot --name)
       // and the loop injects it as _session_name for pixel-office.

@@ -503,12 +503,20 @@ export function mcpOperateCommand(program: Command): void {
           } catch { /* ignore transient read errors */ }
         };
         // Point the transcript tailer at a session's transcript (from a hook's
-        // transcript_path). Starting at the current size makes narration go live
-        // from connect rather than replaying the whole session history.
+        // transcript_path). A SMALL/fresh transcript — e.g. a short autonomy worker
+        // that finished writing its prose before the 5s hook-tick even discovered
+        // the file — is read from the START so none of its narration is missed. A
+        // LARGE ongoing session (a long-lived interactive VS Code session) is read
+        // live from the current end, so we don't replay its whole history as a
+        // flood of chat bubbles. uuid dedup (seenAsst) covers any overlap.
+        const FRESH_TRANSCRIPT_MAX = 512 * 1024;
         const setTranscript = (p: string): void => {
           if (!p || p === transcriptPath) { return; }
           transcriptPath = p;
-          try { transcriptOffset = fs.existsSync(p) ? fs.statSync(p).size : 0; } catch { transcriptOffset = 0; }
+          try {
+            const size = fs.existsSync(p) ? fs.statSync(p).size : 0;
+            transcriptOffset = size <= FRESH_TRANSCRIPT_MAX ? 0 : size;
+          } catch { transcriptOffset = 0; }
           seenAsst.clear();
         };
 

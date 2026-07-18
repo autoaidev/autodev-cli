@@ -569,6 +569,32 @@ export function mcpOperateCommand(program: Command): void {
       // `closed` (their async bodies would otherwise hit its temporal dead zone).
       let inflight = 0;
       let closed = false;
+      let superseded = false;
+
+      // ── Single-instance-per-workspace guard (one shared socket, no flap) ─────
+      // Two bridges for the same slug fight over the office's last-wins slug index:
+      // each reconnect re-registers and re-sends agent_online, which the office
+      // closes the other for → an infinite connect/disconnect ping-pong that makes
+      // the file-browser/git/VNC icons flash. NEWEST wins: every bridge writes its
+      // pid to a workspace lock; an older instance that sees a newer LIVE pid own
+      // the lock goes DORMANT — drops its presence socket and stops reconnecting —
+      // but does NOT exit (it keeps serving its stdio client over the HTTP
+      // fallback). Result: exactly one live presence socket, and no fight.
+      const lockFile = path.join(cwd, '.autodev', 'mcp-operate.lock');
+      try { fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, String(process.pid), 'utf8'); } catch { /* best effort */ }
+      const supersedeTimer = setInterval(() => {
+        if (superseded || closed) { return; }
+        let owner = 0;
+        try { owner = parseInt(fs.readFileSync(lockFile, 'utf8').trim(), 10) || 0; } catch { return; }
+        if (!owner || owner === process.pid) { return; }
+        let ownerAlive = false;
+        try { process.kill(owner, 0); ownerAlive = true; } catch { /* dead pid */ }
+        if (!ownerAlive) { try { fs.writeFileSync(lockFile, String(process.pid), 'utf8'); } catch { /* ignore */ } return; }
+        superseded = true;
+        logErr(`mcp-operate: a newer bridge (pid ${owner}) owns this workspace — going dormant (dropping presence, no reconnect) to keep ONE shared socket. Process stays alive.`);
+        try { socket?.destroy(); } catch { /* ignore */ }
+      }, 1500);
+      supersedeTimer.unref?.();
 
       startHookForwarding();
 
@@ -665,7 +691,8 @@ export function mcpOperateCommand(program: Command): void {
           while (!closed) {
             await new Promise<void>((res) => { wake = res; const timer = setTimeout(() => { if (wake === res) { wake = null; res(); } }, 30_000); timer.unref?.(); });
             if (closed) { break; }
-            if (working || !socket) { continue; }
+            // A dormant (superseded) bridge must not do office work — the winner does.
+            if (working || superseded || !wsReady()) { continue; }
             if (!dirty) {
               // Periodic safety net (covers a missed push): only act on real work.
               const has = parsePendingTasks(await officeTool('get_tasks', { status: 'pending' })).length > 0;

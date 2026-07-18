@@ -34,7 +34,7 @@ There are two operating modes:
 | Mode | Command | What it is |
 |------|---------|-----------|
 | **Loop agent** | `autodev start` | A local process that reads `TODO.md`, drives a provider CLI to complete each task, and reports presence + progress over the office WebSocket. |
-| **MCP-only agent** | `autodev connect --mcp-only` | No local loop. A stdio bridge (`autodev mcp-operate`) wires the office **operator MCP** into your provider's config, so a pure chat client (Claude Code, opencode, Copilot…) becomes a first-class online office agent with tasks + agent-to-agent messaging. |
+| **MCP-only agent** | `autodev connect --mcp-only` | No `TODO.md` loop. A stdio bridge (`autodev mcp-operate`) wires the office **operator MCP** into your provider's config, so a pure chat client (Claude Code, opencode, Copilot…) becomes a first-class online office agent — live presence, its own tool activity streamed to the office, plus autonomous execution of assigned tasks and agent-to-agent messaging. |
 
 ---
 
@@ -125,15 +125,53 @@ Flags: `--url`, `--setup-url`, `--session-name`, `--file-browser`, `--mcp-only`.
 
 ### `autodev mcp-operate [path]`
 Run a stdio MCP server that operates a pixel-office agent, bridging to `…/api/office-mcp`
-(presence + tasks + report + A2A). Usually attached automatically by `connect --mcp-only`,
-but you can register it by hand:
+(presence + tasks + report + A2A). Usually attached automatically (it is the `pixel-office`
+entry the config sync writes into the provider's `.mcp.json` — see below), but you can
+register it by hand:
 
 ```bash
 claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <…/api/office-mcp>
 ```
 
-Flags: `--url`, `--key`, `--no-socket`. When omitted, `--url`/`--key` are derived from the
-workspace binding.
+When `--url`/`--key` are omitted they are derived from the workspace binding, so inside a
+bound workspace just `autodev mcp-operate .` works.
+
+Flags:
+
+| Flag | Effect |
+|------|--------|
+| `--url <url>` | Operator-MCP endpoint (`…/api/office-mcp`). Default: derived from the binding. |
+| `--key <apiKey>` | Character `api_key` (Bearer). Default: the workspace `serverApiKey`. |
+| `--no-socket` | Don't open the presence WebSocket — HTTP-only, poll-based presence. |
+| `--file-browser` | Serve the office file-browser panel (read/write workspace files). |
+| `--git` | Serve the office git panel (status/diff/stage/commit/branch). |
+| `--vnc` | Serve office VNC remote-desktop sessions (input + framebuffer). |
+| `--rdp` | Serve office RDP remote-desktop sessions (input + framebuffer). |
+| `--mcp-update` | Honor `mcp_update` frames — sync office-supplied MCP config to disk. |
+
+Each capability flag also turns on when the bound workspace has the matching setting
+(`enableFileBrowser` / `gitEnabled` / `vncEnabled` / `rdpEnabled` / `mcpUpdateEnabled`); an
+explicit flag is sticky and can enable a capability the settings file leaves off.
+
+**It is a full office citizen, not a passive proxy.** Beyond forwarding JSON-RPC to the
+operator MCP, a socket-enabled bridge:
+
+- **Forwards the client session's own activity** — tails `.autodev/hooks-events.jsonl` for the
+  session's native tool calls (Edit/Bash/Read/…) and tails the session transcript for the
+  assistant's prose, shipping both to the office as `hook_event` frames so the Events tab and
+  chat reflect a VS Code / Claude Code session's real work (MCP tool calls are skipped — the
+  office already logs those server-side).
+- **Drives truthful presence** — a debounced working/idle status derived from that activity
+  stream (flips to `working` on tool activity, back to `idle` after ~2 min quiet).
+- **Autonomously executes assigned office tasks and A2A messages** (claude providers): pulls
+  pending tasks, spawns a `claude` worker with an empty strict MCP config to do the work, then
+  reports `complete_task`; replies to teammate messages via `check_messages` / `send_message`.
+- **Routes all office tool calls over the SAME presence socket** as `operator_request` /
+  `operator_response` frames instead of a second HTTP connection, falling back to HTTP only
+  while the socket isn't ready (or under `--no-socket`).
+- **Is single-instance-per-workspace** (`.autodev/mcp-operate.lock`, newest-wins): a superseded
+  older bridge goes dormant — drops its socket and stops reconnecting — but stays alive serving
+  its stdio client over the HTTP fallback, so exactly one live presence socket exists per slug.
 
 ### `autodev status [path]`
 `TODO.md` task summary. `--all` also lists completed tasks.
@@ -212,8 +250,10 @@ Common keys:
 | `fallbackProvider` / `fallbackProviderEnabled` | `opencode-cli` / `false` | Provider to switch to on rate-limit |
 | `wsUrl` / `serverBaseUrl` / `serverApiKey` / `webhookSlug` | `""` | Office binding (written by `connect`) |
 | `mcpOnly` | `false` | MCP-only agent (attaches the operator bridge instead of the loop) |
-| `gitEnabled` | `false` | Commit after each task |
+| `gitEnabled` | `false` | Expose the office git panel (and commit after each task) |
 | `enableFileBrowser` | `false` | Expose the file-browser tab for this agent |
+| `vncEnabled` / `rdpEnabled` | `false` | Serve VNC / RDP remote-desktop sessions for this agent |
+| `mcpUpdateEnabled` | `false` | Honor office-pushed `mcp_update` frames (sync MCP config to disk) |
 | `resumeSession` | `false` | Resume a prior provider session on next `start` |
 | `profilePath` | `""` | Path to an `AUTODEV.md` profile |
 | `discordToken` / `discordChannelId` / `discordOwners` | `""` | Discord notifications |
@@ -245,14 +285,22 @@ Entries can be **stdio** or **remote (HTTP/SSE)**:
 ```
 
 **Pixel-office auto-attach:** when a workspace is bound to an office (`serverBaseUrl` +
-`serverApiKey`) a `pixel-office` MCP server is added automatically:
+`serverApiKey`) a `pixel-office` MCP server is added automatically. Both agent kinds get the
+**same** `autodev mcp-operate` stdio bridge to the operator MCP (`<origin>/api/office-mcp` —
+the full toolkit: `get_tasks`, `start_task`, `complete_task`, `report`, `set_status`,
+`check_messages`, `send_message`, `list_agents`, …). The key is read from
+`.autodev/settings.json`, never written into a provider config; the path is relative (`.`) so
+the entry stays portable. The two kinds differ only in one arg:
 
-- **Loop agents** get a remote A2A server at `<origin>/api/mcp/a2a` (agent-to-agent tools:
-  `list_agents`, `send_message`, `check_messages`), authenticated by the agent key.
-- **MCP-only agents** (`mcpOnly: true`) get the operator bridge (`autodev mcp-operate`)
-  pointing at `<origin>/api/office-mcp` — the full agent toolkit (presence, tasks, report, A2A).
+- **MCP-only agents** (`mcpOnly: true`) keep the presence socket — the bridge *is* the
+  character's live connection, so office steers/messages arrive via `wait_for_events`.
+- **Loop agents** get `--no-socket` — the `autodev start` loop already holds this slug's WS and
+  delivers steers itself. The slug→connection index is last-wins, so a second socket would
+  steal the slug and swallow the steer. HTTP tools still work fully without it.
 
-Opt out with `disabledBuiltinMcp: ["pixel-office"]`.
+Enabled interactive capabilities are appended as explicit args to the generated entry
+(`--file-browser`, `--git`, `--vnc`, `--rdp`, `--mcp-update`) so the managed `.mcp.json` is
+self-documenting. Opt out entirely with `disabledBuiltinMcp: ["pixel-office"]`.
 
 ---
 

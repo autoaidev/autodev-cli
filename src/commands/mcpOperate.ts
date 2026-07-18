@@ -616,6 +616,15 @@ export function mcpOperateCommand(program: Command): void {
           }
           return out;
         };
+        // "- from <slug> (when): <body>" → {from, body}
+        const parseMessages = (text: string): Array<{ from: string; body: string }> => {
+          const out: Array<{ from: string; body: string }> = [];
+          for (const line of text.split('\n')) {
+            const m = line.match(/^-\s*from\s+(\S+?)(?:\s*\([^)]*\))?:\s*(.+)$/);
+            if (m) { out.push({ from: m[1], body: m[2].trim() }); }
+          }
+          return out;
+        };
         const runWorker = (prompt: string): Promise<string> => new Promise((resolve) => {
           logErr(`🤖 autonomy: working — ${prompt.slice(0, 70).replace(/\n/g, ' ')}…`);
           const child = spawn('claude', ['--dangerously-skip-permissions', '--strict-mcp-config', '--mcp-config', workerMcp, '-p', prompt], { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -633,6 +642,21 @@ export function mcpOperateCommand(program: Command): void {
             const result = await runWorker(`You are working as the office agent in this workspace. Complete this task using your own tools (edit/create files as needed), then briefly summarize what you did.\n\nTASK: ${t.title}`);
             await officeTool('complete_task', { task_id: t.id, result: (result || 'Done.').slice(0, 1500) });
             logErr(`🤖 autonomy: completed task ${t.id} (${t.title.slice(0, 40)})`);
+          }
+
+          // A2A: reply to direct messages (check_messages). The worker composes a
+          // reply or decides none is needed (NO_REPLY); capped per cycle and told
+          // not to ask questions back, so agent↔agent chatter can't loop forever.
+          const messages = parseMessages(await officeTool('check_messages', { unread_only: true }));
+          let replied = 0;
+          for (const m of messages) {
+            if (closed || replied >= 3) { break; }
+            const reply = (await runWorker(`A teammate "${m.from}" sent you this message in the office:\n\n"${m.body}"\n\nIf a reply is warranted, output ONLY the reply text — concise, and do NOT ask a question back unless truly essential. If the message needs work in this workspace, do it, then reply with what you did. If no reply is needed, output exactly: NO_REPLY`)).trim();
+            if (reply && !/^NO_REPLY/i.test(reply)) {
+              await officeTool('send_message', { to: m.from, message: reply.slice(0, 1000) });
+              logErr(`🤖 autonomy: replied to ${m.from}`);
+              replied++;
+            }
           }
         };
 

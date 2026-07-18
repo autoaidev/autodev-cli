@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import * as readline from 'readline';
+import { spawn } from 'child_process';
 import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
@@ -213,6 +214,11 @@ export function mcpOperateCommand(program: Command): void {
       const callOffice = (body: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown>> =>
         socket ? proxyOverWs(body).catch(() => proxy(endpoint, key, body)) : proxy(endpoint, key, body);
 
+      // Wakes the autonomy loop (set by startAutonomy). The EXISTING socket's
+      // task/message pushes call this — the same connection that keeps us online
+      // also drives the work; no second connection, no polling loop of our own.
+      let triggerWork: () => void = () => { /* set by startAutonomy */ };
+
       // ── VNC / RDP remote-desktop session managers ────────────────────────────
       // Reuse the exact same session machinery the autodev loop uses. They reply
       // to the office over the presence socket. Gated by --vnc/--rdp (or the
@@ -388,6 +394,10 @@ export function mcpOperateCommand(program: Command): void {
               // …and also emit a logging notification for clients that show them.
               send({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', logger: 'pixel-office', data: notice } });
             }
+            // A new task or an inbound message → wake the autonomy loop to work it.
+            if (msgType === 'new_task' || (msg['task'] as { metadata?: unknown } | undefined)?.metadata) {
+              triggerWork();
+            }
           },
         });
         socket.start();
@@ -547,12 +557,101 @@ export function mcpOperateCommand(program: Command): void {
         const interval = setInterval(tick, 5_000);
         interval.unref?.();
       };
-      startHookForwarding();
 
-      // Drain in-flight requests before exiting when stdin closes, so a reply
-      // in progress is never clipped.
+      // Lifecycle flags — declared before the forwarding/autonomy loops that read
+      // `closed` (their async bodies would otherwise hit its temporal dead zone).
       let inflight = 0;
       let closed = false;
+
+      startHookForwarding();
+
+      // ── Autonomous task execution + A2A over the SAME socket ─────────────────
+      // Parity with `autodev start`: the bridge runs the office work loop over the
+      // presence socket it already holds. A task/message push (or a periodic
+      // safety check) wakes it; it pulls tasks with get_tasks, and for each:
+      // start_task → spawn the workspace provider to DO the work with its native
+      // tools → complete_task with the result. All office calls go over the WS
+      // (callOffice); the provider is a pure worker (no nested office connection),
+      // and its file activity forwards via the hook/transcript tailers above.
+      // Always on — an mcp-operate agent is a full office citizen, not read-only.
+      const startAutonomy = (): void => {
+        if (opts.socket === false) { return; }
+        const provider = settings.provider || 'claude-cli';
+        if (!provider.startsWith('claude')) {
+          logErr(`🤖 autonomy: provider '${provider}' is driven by its own supervisor (opencode serve/attach); the bridge auto-runs claude only.`);
+          return;
+        }
+        // The worker runs with an EMPTY strict MCP config so it never loads the
+        // workspace's pixel-office MCP (which would open a second, nested bridge).
+        // It just edits files; the office bookkeeping is done here over the WS.
+        const workerMcp = path.join(cwd, '.autodev', 'auto-worker-mcp.json');
+        try {
+          fs.mkdirSync(path.dirname(workerMcp), { recursive: true });
+          fs.writeFileSync(workerMcp, JSON.stringify({ mcpServers: {} }), 'utf8');
+        } catch (e) { logErr('🤖 autonomy: could not write worker MCP config: ' + ((e as Error)?.message ?? String(e))); }
+
+        let working = false;
+        let dirty = false;
+        let wake: (() => void) | null = null;
+        triggerWork = () => { dirty = true; if (wake) { const w = wake; wake = null; w(); } };
+
+        const officeTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
+          try {
+            const r = await callOffice({ id: `auto-${name}-${++wsReqSeq}`, method: 'tools/call', params: { name, arguments: args } });
+            return ((r['result'] as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text) ?? '';
+          } catch { return ''; }
+        };
+        const parsePendingTasks = (text: string): Array<{ id: string; title: string }> => {
+          const out: Array<{ id: string; title: string }> = [];
+          for (const line of text.split('\n')) {
+            const m = line.match(/^[•\-*]\s*\[(pending|in-progress)\]\s*(\S+):\s*(.+)$/);
+            if (m) { out.push({ id: m[2], title: m[3].replace(/\s+—\s.*$/, '').trim() }); }
+          }
+          return out;
+        };
+        const runWorker = (prompt: string): Promise<string> => new Promise((resolve) => {
+          logErr(`🤖 autonomy: working — ${prompt.slice(0, 70).replace(/\n/g, ' ')}…`);
+          const child = spawn('claude', ['--dangerously-skip-permissions', '--strict-mcp-config', '--mcp-config', workerMcp, '-p', prompt], { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+          let out = '';
+          child.stdout?.on('data', (b) => { out += b.toString(); });
+          child.on('exit', () => resolve(out.trim()));
+          child.on('error', (e) => resolve('worker failed: ' + e.message));
+        });
+
+        const runCycle = async (): Promise<void> => {
+          const pending = parsePendingTasks(await officeTool('get_tasks', { status: 'pending' }));
+          for (const t of pending) {
+            if (closed) { break; }
+            await officeTool('start_task', { task_id: t.id });
+            const result = await runWorker(`You are working as the office agent in this workspace. Complete this task using your own tools (edit/create files as needed), then briefly summarize what you did.\n\nTASK: ${t.title}`);
+            await officeTool('complete_task', { task_id: t.id, result: (result || 'Done.').slice(0, 1500) });
+            logErr(`🤖 autonomy: completed task ${t.id} (${t.title.slice(0, 40)})`);
+          }
+        };
+
+        void (async () => {
+          logErr('🤖 autonomy: enabled — will execute assigned tasks over the office socket.');
+          while (!closed) {
+            await new Promise<void>((res) => { wake = res; const timer = setTimeout(() => { if (wake === res) { wake = null; res(); } }, 30_000); timer.unref?.(); });
+            if (closed) { break; }
+            if (working || !socket) { continue; }
+            if (!dirty) {
+              // Periodic safety net (covers a missed push): only act on real work.
+              const has = parsePendingTasks(await officeTool('get_tasks', { status: 'pending' })).length > 0;
+              if (!has) { continue; }
+            }
+            dirty = false;
+            working = true;
+            try { await runCycle(); }
+            catch (e) { logErr('🤖 autonomy: cycle error — ' + ((e as Error)?.message ?? String(e))); }
+            finally { working = false; }
+          }
+        })();
+      };
+      startAutonomy();
+
+      // Drain in-flight requests before exiting when stdin closes, so a reply
+      // in progress is never clipped. (inflight/closed declared above.)
       const maybeExit = (): void => {
         if (closed && inflight === 0) {
           vncManager.stopAll();

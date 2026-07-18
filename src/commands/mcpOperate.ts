@@ -433,6 +433,17 @@ export function mcpOperateCommand(program: Command): void {
               seen.set(h, now);
               try {
                 const ev = JSON.parse(t) as Record<string, unknown>;
+                // Skip MCP tool calls. Office-MCP tools (get_tasks, write_file, …)
+                // that this bridge proxies are ALREADY logged server-side by the
+                // office (emitToolHook), so forwarding the client's own hook for
+                // them double-logs; and forwarding office-poll calls (get_tasks/
+                // wait_for_events every cycle) would spam the Events tab and, via
+                // the status heuristic below, keep an idle task-loop agent looking
+                // busy — the exact noise operate.sh avoids. The high-value signal
+                // is the session's NATIVE tools (Edit/Bash/Read/Write/…), which a
+                // free-form VS Code session uses and the office otherwise never sees.
+                const toolName = (ev['tool_name'] as string) || '';
+                if (toolName.startsWith('mcp__')) { continue; }
                 ev._session_name = sessionNameForHooks;   // so the office can label it
                 socket.sendFrame({ type: 'hook_event', data: ev });
                 const name = (ev['hook_event_name'] as string) || (ev['hook'] as string) || (ev['event'] as string) || '';

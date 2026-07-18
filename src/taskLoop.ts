@@ -888,26 +888,41 @@ export class TaskLoopRunner {
       }
     }
 
-    // Fallback: deliver at the next turn boundary. Append to TODO and wake the
-    // idle sleep so an idle loop starts immediately instead of waiting a poll.
+    // Fallback: the provider can't be steered mid-turn (grok-*/copilot-cli are
+    // one-shot subprocesses). Do NOT append to TODO here — a provider that edits
+    // TODO.md itself as it runs (grok manages its own checklist) would clobber a
+    // task appended during its turn, silently losing the steer. Instead BUFFER it
+    // and flush at the next turn boundary (see _drainPendingSteers), where no run
+    // is active. onDelivered is fired only after the durable append there, so the
+    // server keeps the steer for reconnect-replay until it's really in TODO.
     const todoPath = this._settings?.todoPath || (root ? path.join(root, 'TODO.md') : '');
     if (!todoPath) {
-      // No TODO path is a terminal config error, not a transient failure —
-      // redelivery cannot help, so mark it handled to avoid an infinite replay.
       this._cb?.log(`⚡ Steer dropped — no TODO path (text: "${clean.slice(0, 80)}")`);
       onDelivered?.();
       return;
     }
+    // Dedup against a server reconnect-replay while it's still buffered.
+    if (this._pendingSteers.some(s => s.text === clean)) { onDelivered?.(); return; }
+    this._pendingSteers.push({ text: clean, onDelivered });
     this._cb?.log(`⚡ Steer queued for next turn boundary: "${clean.slice(0, 80)}"`);
-    todoWriter.append(todoPath, clean, shortId())
-      .then(() => {
-        // At-least-once: only mark the delivery seen AFTER the durable append
-        // succeeds, mirroring the user_message path. Left unmarked on failure so
-        // the server's reconnect replay re-delivers instead of losing the steer.
-        onDelivered?.();
-        this._wakeIdleSleep();
-      })
-      .catch(err => this._cb?.log(`⚡ Steer append failed: ${err instanceof Error ? err.message : String(err)}`));
+    this._wakeIdleSleep();
+  }
+
+  /** Flush steers buffered during a run into TODO at a turn boundary (no active
+   *  provider run), so a provider's own TODO rewrite can't clobber them. */
+  private _pendingSteers: Array<{ text: string; onDelivered?: () => void }> = [];
+  private async _drainPendingSteers(todoPath: string): Promise<void> {
+    if (!this._pendingSteers.length) { return; }
+    const batch = this._pendingSteers.splice(0, this._pendingSteers.length);
+    for (const s of batch) {
+      try {
+        await todoWriter.append(todoPath, s.text, shortId());
+        s.onDelivered?.(); // durably in TODO now — at-least-once satisfied
+      } catch (err) {
+        this._pendingSteers.push(s); // retry next boundary; do NOT ack
+        this._cb?.log(`⚡ Steer append failed (will retry): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1138,6 +1153,12 @@ export class TaskLoopRunner {
         this._notifyDiscord(`↩ Rate limit period ended — switching back to **${main}**`);
         this._cb?.setActiveProvider?.(main);
       }
+
+      // Turn boundary: flush any steers buffered mid-run into TODO now, while no
+      // provider run is active. Appending here (not during the run) is what makes
+      // it survive — a provider like grok rewrites TODO.md itself as it works, and
+      // a task appended during its turn gets clobbered by that rewrite.
+      await this._drainPendingSteers(todoPath);
 
       const tasks = parseTodo(todoPath);
       let task = pickNextTask(tasks); // first [ ] task

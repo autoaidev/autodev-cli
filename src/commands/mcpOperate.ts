@@ -15,6 +15,7 @@ import { RdpSessionManager } from '../rdp/manager';
 import { saveProjectUserMcp, sanitizeRemoteMcpEntries } from '../core/projectMcp';
 import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
+import { buildNotificationEvent } from '../core/liveNarration';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -410,6 +411,62 @@ export function mcpOperateCommand(program: Command): void {
         // Hook names that mean the session is actively doing work.
         const WORKING_HOOKS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Notification']);
 
+        // ── Assistant NARRATION from the session transcript ──────────────────
+        // The office chat renders the agent's prose ("Let me update the backlog…")
+        // as bubbles, but Claude Code fires NO hook carrying assistant text — it
+        // lives only in the session transcript (~/.claude/projects/…/<id>.jsonl,
+        // whose path every hook payload carries as transcript_path). Tail that
+        // transcript and forward each new assistant text block as a Notification
+        // hook event (the same frame the office already renders as a chat bubble),
+        // so a VS Code / Claude Code session's live progress shows up in the office
+        // — not just its tool calls.
+        let transcriptPath: string | null = null;
+        let transcriptOffset = 0;
+        const seenAsst = new Set<string>();   // assistant-entry uuids already forwarded
+        const forwardAssistant = (text: string): void => {
+          const msg = text.trim();
+          if (!msg || !socket) { return; }
+          const ev = buildNotificationEvent(settings.provider || 'claude', cwd, msg.length > 1800 ? msg.slice(0, 1800) + '…' : msg) as Record<string, unknown>;
+          ev._session_name = sessionNameForHooks;
+          socket.sendFrame({ type: 'hook_event', data: ev });
+          markWorking();   // producing assistant text is activity → keep 'working'
+        };
+        const tailTranscript = (): void => {
+          if (!socket || !transcriptPath) { return; }
+          try {
+            if (!fs.existsSync(transcriptPath)) { return; }
+            const size = fs.statSync(transcriptPath).size;
+            if (size <= transcriptOffset) { return; }
+            const fd = fs.openSync(transcriptPath, 'r');
+            const buf = Buffer.alloc(size - transcriptOffset);
+            fs.readSync(fd, buf, 0, buf.length, transcriptOffset);
+            fs.closeSync(fd);
+            transcriptOffset = size;
+            for (const line of buf.toString('utf8').split('\n')) {
+              const t = line.trim();
+              if (!t) { continue; }
+              try {
+                const d = JSON.parse(t) as { type?: string; uuid?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+                if (d.type !== 'assistant' || !Array.isArray(d.message?.content)) { continue; }
+                const uuid = d.uuid || '';
+                if (uuid && seenAsst.has(uuid)) { continue; }
+                if (uuid) { seenAsst.add(uuid); if (seenAsst.size > 500) { seenAsst.delete(seenAsst.values().next().value as string); } }
+                const text = d.message!.content!.filter((p) => p.type === 'text' && p.text).map((p) => p.text as string).join('\n');
+                if (text.trim()) { forwardAssistant(text); }
+              } catch { /* skip non-JSON / partial lines */ }
+            }
+          } catch { /* ignore transient read errors */ }
+        };
+        // Point the transcript tailer at a session's transcript (from a hook's
+        // transcript_path). Starting at the current size makes narration go live
+        // from connect rather than replaying the whole session history.
+        const setTranscript = (p: string): void => {
+          if (!p || p === transcriptPath) { return; }
+          transcriptPath = p;
+          try { transcriptOffset = fs.existsSync(p) ? fs.statSync(p).size : 0; } catch { transcriptOffset = 0; }
+          seenAsst.clear();
+        };
+
         const tick = (): void => {
           if (!socket) { return; }               // wait until the presence socket is up
           try {
@@ -433,6 +490,10 @@ export function mcpOperateCommand(program: Command): void {
               seen.set(h, now);
               try {
                 const ev = JSON.parse(t) as Record<string, unknown>;
+                // Every hook payload carries the live transcript path — use it to
+                // point the narration tailer at the current session.
+                const tp = ev['transcript_path'];
+                if (typeof tp === 'string' && tp) { setTranscript(tp); }
                 // Skip MCP tool calls. Office-MCP tools (get_tasks, write_file, …)
                 // that this bridge proxies are ALREADY logged server-side by the
                 // office (emitToolHook), so forwarding the client's own hook for
@@ -452,6 +513,8 @@ export function mcpOperateCommand(program: Command): void {
             }
             if (sawWork) { markWorking(); }
           } catch { /* ignore transient read errors */ }
+          // Forward any new assistant prose from the session transcript.
+          tailTranscript();
         };
         const interval = setInterval(tick, 5_000);
         interval.unref?.();

@@ -277,9 +277,20 @@ export class ConfigManager {
         //   loop's provider never calls — so the instant message is silently lost.
         //   --no-socket keeps the loop as the slug's live connection. The HTTP tools
         //   still work fully without it.
-        builtinsForJson['pixel-office'] = s.mcpOnly
-          ? { command: 'autodev', args: ['mcp-operate', '.'] }
-          : { command: 'autodev', args: ['mcp-operate', '.', '--no-socket'] };
+        const opArgs = ['mcp-operate', '.'];
+        // Loop agents keep the loop as the slug's live connection (see above).
+        if (!s.mcpOnly) { opArgs.push('--no-socket'); }
+        // Surface each ENABLED interactive capability as an explicit arg, so the
+        // managed .mcp.json is self-documenting and mcp-operate serves the feature
+        // even if it couldn't read settings. Driven by the workspace settings —
+        // enable file browser / git / VNC (in the office or via `autodev config
+        // set enableFileBrowser true`) and it lands here on the next config sync.
+        if (s.enableFileBrowser) { opArgs.push('--file-browser'); }
+        if (s.gitEnabled)        { opArgs.push('--git'); }
+        if (s.vncEnabled)        { opArgs.push('--vnc'); }
+        if (s.rdpEnabled)        { opArgs.push('--rdp'); }
+        if (s.mcpUpdateEnabled)  { opArgs.push('--mcp-update'); }
+        builtinsForJson['pixel-office'] = { command: 'autodev', args: opArgs };
       }
     } catch { /* ignore — office binding is optional */ }
 

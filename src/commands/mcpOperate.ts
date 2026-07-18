@@ -193,6 +193,26 @@ export function mcpOperateCommand(program: Command): void {
       // server's poll heuristic.
       let socket: OfficeSocket | null = null;
 
+      // ── Route office tool calls over the SAME presence socket ────────────────
+      // Instead of a second HTTP connection, forward each JSON-RPC request as an
+      // `operator_request` frame over the socket we already hold and await the
+      // matching `operator_response`. Falls back to the HTTP proxy only when the
+      // socket isn't up (startup slug-resolve, or --no-socket).
+      const wsPending = new Map<string, (resp: Record<string, unknown>) => void>();
+      let wsReqSeq = 0;
+      const proxyOverWs = (body: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown>> =>
+        new Promise((resolve, reject) => {
+          if (!socket) { reject(new Error('socket not connected')); return; }
+          const id = body.id !== undefined && body.id !== null ? body.id : `wsreq-${++wsReqSeq}`;
+          const k = String(id);
+          const timer = setTimeout(() => { wsPending.delete(k); reject(new Error('operator_request timed out after 120s')); }, 120_000);
+          wsPending.set(k, (resp) => { clearTimeout(timer); resolve(resp); });
+          socket.sendFrame({ type: 'operator_request', id, method: body.method, params: body.params ?? {} });
+        });
+      // Prefer the socket; fall back to HTTP if the WS path errors (timeout/down).
+      const callOffice = (body: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown>> =>
+        socket ? proxyOverWs(body).catch(() => proxy(endpoint, key, body)) : proxy(endpoint, key, body);
+
       // ── VNC / RDP remote-desktop session managers ────────────────────────────
       // Reuse the exact same session machinery the autodev loop uses. They reply
       // to the office over the presence socket. Gated by --vnc/--rdp (or the
@@ -294,6 +314,14 @@ export function mcpOperateCommand(program: Command): void {
           },
           onMessage: (msg) => {
             const msgType = msg['type'] as string | undefined;
+
+            // Reply to a tool call we sent over the socket (operator_request).
+            if (msgType === 'operator_response') {
+              const rid = String(msg['id'] ?? '');
+              const w = wsPending.get(rid);
+              if (w) { wsPending.delete(rid); w({ jsonrpc: '2.0', id: msg['id'], result: msg['result'], error: msg['error'] }); }
+              return;
+            }
 
             // File-browser control frame from the office UI. Handle it and stop —
             // it is not an office event to surface via describePush/notifications.
@@ -546,7 +574,9 @@ export function mcpOperateCommand(program: Command): void {
         // handshake ones opportunistically but never write a response for them.
         if (req.id === undefined || req.id === null) {
           if (typeof req.method === 'string' && req.method.startsWith('notifications/')) {
-            proxy(endpoint, key, req).catch(() => { /* best effort */ });
+            // Fire-and-forget over the socket when up, else HTTP.
+            if (socket) { socket.sendFrame({ type: 'operator_request', method: req.method, params: (req as { params?: unknown }).params ?? {} }); }
+            else { proxy(endpoint, key, req).catch(() => { /* best effort */ }); }
           }
           return;
         }
@@ -570,7 +600,7 @@ export function mcpOperateCommand(program: Command): void {
 
         inflight++;
         try {
-          const res = await proxy(endpoint, key, req);
+          const res = await callOffice(req);
           // Advertise the local streaming tool alongside the server's own tools.
           if (req.method === 'tools/list') {
             const result = res['result'] as { tools?: unknown[] } | undefined;

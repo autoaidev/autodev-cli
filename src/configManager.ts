@@ -165,7 +165,8 @@ export class ConfigManager {
   /**
    * Write MCP server definitions to project-local config files only.
    * Covers: .claude/settings.local.json, .vscode/mcp.json, opencode.json, .mcp.json
-   * The memory server uses <root>/.autodev/memories/.mcp-graph.json as its storage file.
+   * The memory server uses its own default store (memory.jsonl beside the
+   * installed @modelcontextprotocol/server-memory package).
    *
    * The full server set is `DEFAULT_MCP_SERVERS` ∪ user-defined entries from
    * `.autodev/settings.json:mcpServers`. User entries with the same name as
@@ -175,15 +176,6 @@ export class ConfigManager {
   static syncProjectMcpServers(root: string, log?: (m: string) => void): void {
     const baseServers: McpServerEntry[] = [
       ...DEFAULT_MCP_SERVERS,
-      {
-        name: 'memory',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-memory'],
-        env: {
-          MEMORY_FILE_PATH: '.autodev/memories/.mcp-graph.json',
-        },
-        tools: ['*'] as string[],
-      },
     ];
 
     // One-time migration: if .autodev/settings.json still carries an

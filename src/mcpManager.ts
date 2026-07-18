@@ -25,9 +25,10 @@ export const DEFAULT_MCP_SERVERS: McpServerEntry[] = [
     name: 'memory',
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-memory'],
-    env: {
-      MEMORY_FILE_PATH: '.autodev/memories/.mcp-graph.json',
-    },
+    // No MEMORY_FILE_PATH: the server resolves a *relative* path against its OWN
+    // package dir (not the workspace CWD), so a relative override silently wrote
+    // the graph under the npx cache. Use its default store (memory.jsonl beside
+    // the installed server) — the agent backup captures it from there.
     tools: ['*'],
   },
   {

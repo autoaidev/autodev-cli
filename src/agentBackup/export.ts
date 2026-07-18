@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { AdmZipArchive, Archive } from './archive';
 import { ARCHIVE_PATHS, IDENTITY_KEYS, ROOT_DOCS, WORKSPACE_DIRS } from './layout';
@@ -47,6 +48,36 @@ function sanitizeSettings(absPath: string): Buffer {
   return Buffer.from(JSON.stringify(obj, null, 2) + '\n', 'utf8');
 }
 
+/**
+ * Capture the `memory` MCP server's knowledge graph. @modelcontextprotocol/server-memory
+ * stores it as `memory.jsonl` (legacy `memory.json`) BESIDE its own installed
+ * package — under the npx cache (~/.npm/_npx/<hash>/…/dist), NOT the workspace —
+ * so the sanitized `.autodev` walk never sees it. Collect it into the archive
+ * under `.autodev/memories/` so a backup preserves the agent's long-term memory.
+ * Best-effort: any missing store is silently skipped.
+ */
+function addMemoryStore(archive: Archive): void {
+  const npxRoots = [
+    process.env.npm_config_cache ? path.join(process.env.npm_config_cache, '_npx') : '',
+    path.join(os.homedir(), '.npm', '_npx'),
+  ].filter(Boolean);
+  const seen = new Set<string>();
+  for (const npxRoot of npxRoots) {
+    let hashes: string[];
+    try { hashes = fs.readdirSync(npxRoot); } catch { continue; }
+    for (const h of hashes) {
+      const dir = path.join(npxRoot, h, 'node_modules', '@modelcontextprotocol', 'server-memory', 'dist');
+      for (const name of ['memory.jsonl', 'memory.json']) {
+        const abs = path.join(dir, name);
+        if (seen.has(abs)) { continue; }
+        try { if (!fs.statSync(abs).isFile()) { continue; } } catch { continue; }
+        seen.add(abs);
+        archive.addFile(abs, `${ARCHIVE_PATHS.workspace}/.autodev/memories/${name}`);
+      }
+    }
+  }
+}
+
 export interface ExportResult {
   destPath: string;
   /** Provider ids for which real traces were captured. */
@@ -73,6 +104,10 @@ export async function createAgentBackup(root: string, destPath: string): Promise
       archive.addDir(path.join(root, rel), `${ARCHIVE_PATHS.workspace}/${rel}`);
     }
   }
+
+  // The memory MCP graph lives outside the workspace (npx cache) — capture it
+  // explicitly so long-term agent memory survives a backup/restore.
+  addMemoryStore(archive);
 
   // Root-level agent docs.
   for (const f of ROOT_DOCS) {

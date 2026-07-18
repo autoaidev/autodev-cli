@@ -400,6 +400,11 @@ export class TaskLoopRunner {
           return;
         }
         this._notifyWebhook('agent_online', {
+          // provider + cliVersion so the office labels the agent correctly. Without
+          // provider here, a grok/opencode loop (whose hooks are Claude-style) is
+          // mis-detected as 'claude' by the office's hook-based fallback.
+          provider:           this._settings?.provider,
+          cliVersion:         CLI_VERSION,
           hostname:           this._hostname,
           workDir:            this._workspaceRoot ?? '',
           gitRepo:            this._gitRepo,
@@ -519,6 +524,8 @@ export class TaskLoopRunner {
       gitBranch: this._gitBranch,
     });
     this._notifyWebhook('agent_online', {
+      provider:           settings.provider,
+      cliVersion:         CLI_VERSION,
       hostname:           this._hostname,
       workDir:            root,
       gitRepo:            this._gitRepo,

@@ -208,6 +208,13 @@ function stripAnsi(s: string): string {
 const REAUTH_MARKERS = /waiting for approval|approve in your browser|sign(?:ing)? in to grok|finish signing in|device code|please (?:log ?in|sign ?in)/i;
 
 /**
+ * "grok finished this turn" affordance — CALIBRATED against grok 4.5 build 0.2.93:
+ * a completed turn prints "Worked for 4.1s." (a summary line) and the footer drops
+ * the cancel affordance. Used as a fast, positive turn-end confirmation.
+ */
+const DONE_MARKER = /worked for\s+[\d.]+\s*s\b/i;
+
+/**
  * "grok is actively working" affordance. grok renders a live spinner + an
  * "esc to interrupt"-style footer while a turn runs. If present we never
  * declare idle. This is a SOFT guard: the primary idle signal is output
@@ -215,7 +222,12 @@ const REAUTH_MARKERS = /waiting for approval|approve in your browser|sign(?:ing)
  * animates, so the snapshot is never stable while grok works), which fires
  * cleanly even if this pattern never matches on a given grok build.
  */
-const RUNNING_INDICATOR = /esc to interrupt|esc to cancel|interrupt\b|ctrl\+c to|▐|▌|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/i;
+// CALIBRATED against real grok 4.5 (build 0.2.93): while a turn runs the footer
+// shows "Ctrl+c:cancel" and a "⠧ Waiting for response… 1.5s … [stop]" status line;
+// when idle the footer is only "Shift+Tab:mode │ Ctrl+x:shortcuts" (no Ctrl+c).
+// So the presence of Ctrl+c / "waiting for response" / "[stop]" / a braille spinner
+// = working. This is the primary running signal (backed by output-quiescence).
+const RUNNING_INDICATOR = /ctrl\+c\s*[: ]|waiting for response|\[stop\]|esc to (?:interrupt|cancel)|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/i;
 
 // ---------------------------------------------------------------------------
 // grok-tui: persistent interactive session driven through tmux.
@@ -302,13 +314,19 @@ function readFrom(file: string, offset: number): { text: string; offset: number 
   } catch { return { text: '', offset }; }
 }
 
-/** Paste a (possibly multi-line) prompt into the live pane and submit it. */
+/** Type a prompt into the live pane and submit it. CALIBRATED against real grok:
+ *  a tmux bracketed paste (paste-buffer) is misread by grok's TUI as a
+ *  worktree/directory PICKER, not chat input — only literal keystrokes land in
+ *  the input box. grok also has no reliable "newline without submit" key over
+ *  send-keys (Enter submits), so flatten the prompt to one logical line. */
 function pastePrompt(sess: TmuxSession, promptFilePath: string): void {
-  const buf = `grok-${Date.now()}`;
-  // load-buffer straight from the prompt file → paste-buffer uses bracketed
-  // paste so the whole block lands as ONE message; a separate Enter submits it.
-  tmux(['load-buffer', '-b', buf, promptFilePath]);
-  tmux(['paste-buffer', '-b', buf, '-t', sess.name, '-d']);
+  // A full agent prompt is 10KB+ (system prompt + task + context). Typing that
+  // via send-keys -l is UNRELIABLE (tmux drops/garbles keys at that size —
+  // observed live), and a bracketed paste is misread by grok's TUI as a directory
+  // picker. So DON'T type the prompt: hand grok a SHORT literal instruction to
+  // READ the prompt file, and its file tool ingests the whole thing losslessly.
+  const instr = `Read the file ${promptFilePath} in full right now — it is your current task with all its context and instructions. Do exactly what it says: do the real work, then mark the task done in TODO.md. Do not ask questions; do not skip the file.`;
+  tmux(['send-keys', '-t', sess.name, '-l', instr]);
   tmux(['send-keys', '-t', sess.name, 'Enter']);
 }
 
@@ -333,11 +351,16 @@ function runGrokTmuxTurn(
   _busyRoots.add(root);
 
   const POLL_MS       = envNum('AUTODEV_GROK_TUI_POLL_MS', 700);
-  const DEBOUNCE_MS   = envNum('AUTODEV_GROK_TUI_DEBOUNCE_MS', 3_000);
+  const DEBOUNCE_MS   = envNum('AUTODEV_GROK_TUI_DEBOUNCE_MS', 5_000);
+  // Quiescence-only fallback (no "Worked for" marker seen) needs a much longer
+  // quiet window so grok's early "Starting session…"/"Reading file…" pauses aren't
+  // misread as turn-end (observed a false ~4s finish). The "Worked for" marker is
+  // the fast, positive done-signal for the normal case.
+  const QUIET_FALLBACK_MS = envNum('AUTODEV_GROK_TUI_QUIET_FALLBACK_MS', 45_000);
   const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 8_000);
   const NOOUTPUT_MS   = envNum('AUTODEV_GROK_TUI_NOOUTPUT_MS', 25_000);
   const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
-  const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 3));
+  const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 4));
 
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -421,8 +444,15 @@ function runGrokTmuxTurn(
           return;
         }
       }
-      // grok emitted no rawLog before we paste? re-read the offset after startup
-      // so the splash text isn't streamed as "turn output".
+      // CALIBRATED: grok opens on a welcome menu (New worktree / Resume session /
+      // Changelog / Quit) sitting over the input box; a single Enter dismisses it
+      // to the ready "❯" prompt. Without this the first real prompt lands on the
+      // menu instead of the chat input. Fresh launch only (a resumed session is
+      // already at the prompt).
+      tmux(['send-keys', '-t', sess.name, 'Enter']);
+      await sleep(1500);
+      // re-read the offset after startup so the splash/menu text isn't streamed
+      // as "turn output".
       readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
     } else {
       _emitGrokHook(root, 'SessionStart', { source: 'resume' });
@@ -441,6 +471,7 @@ function runGrokTmuxTurn(
     let sawOutput = false;
     let lastSnap = '';
     let stable = 0;
+    let sawDoneMarker = false;
 
     for (;;) {
       await sleep(POLL_MS);
@@ -477,14 +508,18 @@ function runGrokTmuxTurn(
         return;
       }
 
-      // 3) Idle test: quiet long enough, snapshot stable across polls, no
-      //    running indicator, and we actually saw output (or waited out the
-      //    no-output grace for a turn that produces nothing).
+      // 3) Idle test. grok prints "Worked for N.Ns." when a turn genuinely ends —
+      //    that's the fast, positive done-signal. Absent it (an error turn, or an
+      //    unusual grok build), fall back to a MUCH longer quiescence so early
+      //    "Starting session…"/"Reading file…" pauses aren't misread as turn-end.
+      if (DONE_MARKER.test(snap)) { sawDoneMarker = true; }
       if (snap === lastSnap) { stable++; } else { stable = 0; lastSnap = snap; }
-      const quiet   = Date.now() - lastGrowthMs >= DEBOUNCE_MS;
       const running = RUNNING_INDICATOR.test(snap);
+      const quietMs = Date.now() - lastGrowthMs;
       const readyToJudge = sawOutput || (Date.now() - turnStart >= NOOUTPUT_MS);
-      if (readyToJudge && quiet && !running && stable >= STABLE_POLLS) {
+      const doneFast = sawDoneMarker && quietMs >= DEBOUNCE_MS;
+      const doneSlow = readyToJudge && quietMs >= QUIET_FALLBACK_MS && stable >= STABLE_POLLS;
+      if (!running && (doneFast || doneSlow)) {
         // Final drain to catch anything written between the last read and idle.
         const tail = readFrom(sess.rawLog, readOffset);
         if (tail.text) {
@@ -775,16 +810,14 @@ export async function steerGrokTui(root: string, text: string, log: (msg: string
   if (!_busyRoots.has(root)) { return false; } // only steer a turn in flight
   if (!hasSession(sess.name)) { _tmuxSessions.delete(root); return false; }
   try {
-    // Load into a buffer + bracketed paste so a multi-line steer lands as one
-    // message; a separate Enter submits it into the running turn.
-    const tmp = path.join(root, '.autodev', 'grok-tui', `steer-${Date.now()}.txt`);
-    try { fs.writeFileSync(tmp, text, 'utf8'); } catch { /* ignore */ }
-    const buf = `groksteer-${Date.now()}`;
-    const okLoad  = tmux(['load-buffer', '-b', buf, tmp]);
-    const okPaste = tmux(['paste-buffer', '-b', buf, '-t', sess.name, '-d']);
-    const okEnter = tmux(['send-keys', '-t', sess.name, 'Enter']);
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    if (okLoad === null || okPaste === null || okEnter === null) { return false; }
+    // Literal keystrokes (send-keys -l), NOT a bracketed paste — grok's TUI
+    // misreads a paste as a directory picker. Flatten to one line (no reliable
+    // newline-without-submit key), then Enter to inject into the running turn.
+    const flat = text.replace(/\r?\n+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+    for (let i = 0; i < flat.length; i += 3000) {
+      if (tmux(['send-keys', '-t', sess.name, '-l', flat.slice(i, i + 3000)]) === null) { return false; }
+    }
+    if (tmux(['send-keys', '-t', sess.name, 'Enter']) === null) { return false; }
     log(`Grok TUI: steered live pane (${text.length} chars) — injected into current turn`);
     return true;
   } catch (err) {

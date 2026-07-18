@@ -17,6 +17,7 @@ import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider'
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk } from './providers/opencodeSdkProvider';
+import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession } from './providers/grokTuiProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -888,6 +889,18 @@ export class TaskLoopRunner {
       }
     }
 
+    // grok-tui runs inside a persistent tmux PTY; keys sent to the live pane
+    // mid-turn are folded into the running grok turn (true steering). Only when
+    // a turn is actually in flight — steerGrokTui returns false otherwise so we
+    // fall through to the durable TODO queue below (at-least-once).
+    if (root && provider === 'grok-tui' && isGrokTuiBusy(root)) {
+      if (await steerGrokTui(root, clean, msg => this._cb?.log(msg))) {
+        this._cb?.log(`⚡ Steered mid-turn (grok-tui): "${clean.slice(0, 80)}"`);
+        onDelivered?.();
+        return;
+      }
+    }
+
     // Fallback: the provider can't be steered mid-turn (grok-*/copilot-cli are
     // one-shot subprocesses). Do NOT append to TODO here — a provider that edits
     // TODO.md itself as it runs (grok manages its own checklist) would clobber a
@@ -1742,6 +1755,7 @@ export class TaskLoopRunner {
               if (currentProvider === 'claude-tui') { closeClaudeTuiClient(evictRoot, evictLog); }
               else if (currentProvider === 'opencode-sdk') { closeOpencodeSdkClient(evictRoot, evictLog); }
               else if (currentProvider === 'copilot-sdk') { closeCopilotSdkSession(evictRoot, evictLog); }
+              else if (currentProvider === 'grok-tui') { closeGrokTuiSession(evictRoot, evictLog); }
             } catch (evictErr) {
               this._cb?.log(`⚠️ Failed to evict ${currentProvider} client before reauth pause: ${evictErr instanceof Error ? evictErr.message : String(evictErr)}`);
             }

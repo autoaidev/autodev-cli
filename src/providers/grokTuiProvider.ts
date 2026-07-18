@@ -1,34 +1,51 @@
 // ---------------------------------------------------------------------------
-// grokProvider -- Grok tasks via the `grok` headless CLI. Backs BOTH provider
-// variants from one shared runner:
+// grokProvider -- Grok tasks via the `grok` CLI. Backs BOTH provider variants:
 //
-//   grok-cli  (stateless):  fresh process each task, no session flags — no
-//                           context accumulation across tasks.
-//   grok-tui  (persistent): resumes ONE session per workspace so context
-//                           carries across tasks, like an interactive session.
-//                           First task: `--session-id <uuid>` (created + saved
-//                           to session-state.json); later tasks: `--resume <id>`.
+//   grok-cli  (stateless):  fresh HEADLESS process each task (--prompt-file),
+//                           no context accumulation across tasks.
+//   grok-tui  (persistent): ONE long-lived interactive `grok` process kept alive
+//                           inside a per-workspace tmux session (a real PTY), so
+//                           grok's in-process context accumulates across tasks —
+//                           exactly like a human-driven interactive session.
 //
-// Command:
-//   grok -m <model> --always-approve --cwd <root>
-//        [--session-id <uuid> | --resume <uuid>]      (grok-tui only)
-//        --prompt-file <file> --output-format streaming-json
+// -------------------------------------------------------------------------
+// Why tmux for grok-tui?
+// -------------------------------------------------------------------------
+// grok is an interactive terminal UI. The OLD grok-tui ran it HEADLESS with
+// piped, non-TTY stdio (`--prompt-file --output-format streaming-json`, stdin
+// ignored). Under load it would finish producing output but never terminate the
+// process (no controlling TTY to close on, an internal render/input wait, or a
+// tool it retried forever). `close` never fired → the per-message exit file was
+// never written → the task loop blocked until its 30 s sentinel / the 10 min
+// watchdog, and the turn surfaced as a StopFailure. The wedge root-cause was the
+// no-TTY non-exit.
 //
-// streaming-json lines are parsed; assistant text chunks are appended to
-// stdoutFile. exitFile is written when the process exits.
+// The tmux reimplementation gives grok a real PTY. One detached tmux session per
+// workspace runs `grok --no-alt-screen --always-approve` interactively; each
+// task PASTES its prompt into the live pane and detects turn-end by output
+// quiescence (recipe below). Context lives in the one long-running grok process
+// — the live session IS the resumed context, so we no longer `--resume` per task.
 //
-// Model: none is forced — grok uses the account's own default. Set an explicit,
-// VALID model via settings.grokModel to override (`grok models` lists them).
+// Contract preserved for taskLoop (unchanged): stream assistant/pane text to the
+// SAME per-message stdoutFile; write the exit code to the SAME per-message
+// exitFile exactly ONCE, only when the turn genuinely ends. Session id is still
+// minted-once and persisted under getSessionId/saveSessionId('grok-tui') so the
+// office/loop see continuity and a dead session can be relaunched with --resume.
+//
+// If tmux is not installed, grok-tui transparently FALLS BACK to the old
+// headless spawn so nothing regresses on boxes without tmux.
 // ---------------------------------------------------------------------------
 
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as crypto from 'crypto';
 import * as readline from 'readline';
 import * as child_process from 'child_process';
 import { randomUUID } from 'crypto';
 import { eventTypeFor } from '../hookEventNormalizer';
 import { RateLimitDetector } from '../rateLimit';
-import { saveSessionId } from '../sessionState';
+import { saveSessionId, getSessionId } from '../sessionState';
 import type { ProviderId } from '../providers';
 
 // ---------------------------------------------------------------------------
@@ -40,73 +57,488 @@ const GROK_BIN = process.env['GROK_BIN'] ?? (() => {
   // Prefer a grok on PATH; otherwise fall back to the default install location
   // (~/.grok/bin/grok) so the provider works without PATH changes.
   try {
-    const home = require('os').homedir();
-    const local = require('path').join(home, '.grok', 'bin', 'grok');
-    if (require('fs').existsSync(local)) { return local; }
+    const home = os.homedir();
+    const local = path.join(home, '.grok', 'bin', 'grok');
+    if (fs.existsSync(local)) { return local; }
   } catch { /* ignore */ }
   return 'grok';
 })();
+
+/** tmux binary — overridable for non-standard installs. */
+const TMUX_BIN = process.env['TMUX_BIN'] ?? 'tmux';
+
+// Env-tunable knobs. `envNum` accepts any finite >= 0; 0 disables that guard.
+const envNum = (key: string, def: number): number => {
+  const n = Number(process.env[key]);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
 
 // ---------------------------------------------------------------------------
 // Per-workspace state
 // ---------------------------------------------------------------------------
 
-/** Roots with an actively-running grok turn. */
+/** Roots with an actively-running grok turn (headless OR tmux). */
 const _busyRoots = new Set<string>();
 
-/** Active child processes by root — used to kill them on extension deactivate. */
+/** Active HEADLESS child processes by root — grok-cli + tmux-unavailable fallback. */
 const _activeChildren = new Map<string, child_process.ChildProcess>();
+
+/** Live tmux-backed grok sessions by root (persistent grok-tui). */
+interface TmuxSession {
+  name: string;       // tmux session name (deterministic from root)
+  rawLog: string;     // pipe-pane capture file (append-only, ANSI-laden)
+  sessionId: string;  // grok session UUID (persisted to session-state.json)
+  readOffset: number; // bytes of rawLog already streamed to a stdoutFile
+}
+const _tmuxSessions = new Map<string, TmuxSession>();
+
+/** Epoch-ms of the last streamed pane growth per root (activity heartbeat). */
+const _lastActivityMs = new Map<string, number>();
 
 /** True while a grok turn is running for the given workspace root. */
 export function isGrokTuiBusy(root: string): boolean {
   return _busyRoots.has(root);
 }
 
+/** Epoch-ms of the most recent streamed pane activity, or 0 if none. */
+export function getGrokTuiLastActivity(root: string): number {
+  return _lastActivityMs.get(root) ?? 0;
+}
+
+/** Force-clear the busy flag for a root whose turn appears hung. */
+export function forceIdleGrokTui(root: string): void {
+  _busyRoots.delete(root);
+}
+
 /**
  * Append a REAL grok activity event to `.autodev/hooks-events.jsonl` in the
- * native Claude-Code hook schema (pixel-office reads `hook_event_name`). Grok
- * has no hooks mechanism, but its `--output-format streaming-json` stream
- * carries tool_use / tool_result events — we translate those into PreToolUse /
- * PostToolUse so pixel-office shows real per-tool activity (no synthetic
- * SessionStart/End padding beyond the genuine turn boundaries).
+ * native Claude-Code hook schema (pixel-office reads `hook_event_name`).
  */
 function _emitGrokHook(root: string, hookEventName: string, extra: Record<string, unknown> = {}): void {
   try {
     const dir = path.join(root, '.autodev');
     if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-    // Emit the canonical event_type too (grok writes hooks directly, bypassing
-    // normalizeEvent) so pixel-office can trust it without a provider map.
     const ev = { hook_event_name: hookEventName, event_type: eventTypeFor(hookEventName), provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
     fs.appendFileSync(path.join(dir, 'hooks-events.jsonl'), JSON.stringify(ev) + '\n', 'utf8');
   } catch { /* non-critical */ }
 }
 
 // ---------------------------------------------------------------------------
-// sendGrokTuiPrompt
-//
-// Fire-and-forget: spawns grok with --prompt-file, streams output to
+// tmux helpers — all synchronous, best-effort (swallow + report).
+// ---------------------------------------------------------------------------
+
+let _tmuxAvailable: boolean | null = null;
+/** True if tmux is installed and runnable. Cached after first probe. */
+export function tmuxAvailable(): boolean {
+  if (_tmuxAvailable !== null) { return _tmuxAvailable; }
+  try {
+    child_process.execFileSync(TMUX_BIN, ['-V'], { stdio: 'ignore', timeout: 5_000 });
+    _tmuxAvailable = true;
+  } catch { _tmuxAvailable = false; }
+  return _tmuxAvailable;
+}
+
+/** Run a tmux subcommand; returns stdout string, or null on any failure. */
+function tmux(args: string[], input?: string): string | null {
+  try {
+    const out = child_process.execFileSync(TMUX_BIN, args, {
+      encoding: 'utf8', timeout: 15_000, input, stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    return out ?? '';
+  } catch { return null; }
+}
+
+/** Deterministic, tmux-safe session name from the absolute workspace path. */
+function sessionName(root: string): string {
+  const h = crypto.createHash('sha1').update(root).digest('hex').slice(0, 10);
+  return `grok-${h}`;
+}
+
+/** True if the tmux session exists (a dead grok collapses the session). */
+function hasSession(name: string): boolean {
+  try {
+    child_process.execFileSync(TMUX_BIN, ['has-session', '-t', name], { stdio: 'ignore', timeout: 5_000 });
+    return true;
+  } catch { return false; }
+}
+
+/** Kill a tmux session (best-effort). */
+function killSession(name: string): void {
+  tmux(['kill-session', '-t', name]);
+}
+
+/** Escape-stripped visible grid + scrollback of a pane (for detection). */
+function capturePane(name: string, scrollback = 200): string {
+  const out = tmux(['capture-pane', '-p', '-t', name, '-S', `-${scrollback}`]);
+  return out === null ? '' : stripAnsi(out);
+}
+
+/** Shell-quote a single argument for a `send-keys "exec …"` command string. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Strip ANSI/OSC/DCS escapes and carriage returns from raw pane bytes.
+ * `pipe-pane` captures the full TUI byte stream (SGR colour, mouse tracking,
+ * bracketed-paste markers, OSC titles, `\r`), which must be removed before the
+ * text is written to stdoutFile or scanned for banners.
+ */
+function stripAnsi(s: string): string {
+  return s
+    // CSI sequences: ESC [ ... final-byte
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // OSC sequences: ESC ] ... (BEL | ST)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // DCS/PM/APC: ESC (P|X|^|_) ... ST
+    .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')
+    // Any other single-char escape
+    .replace(/\x1b[@-Z\\-_]/g, '')
+    .replace(/\r/g, '');
+}
+
+// ---------------------------------------------------------------------------
+// Turn-end / auth detectors (calibrate against a live authed grok — see risks).
+// ---------------------------------------------------------------------------
+
+/**
+ * Markers that mean grok hit the OAuth/expired-token gate instead of a prompt.
+ * The loop must treat this as reauth, NOT a hung turn.
+ */
+const REAUTH_MARKERS = /waiting for approval|approve in your browser|sign(?:ing)? in to grok|finish signing in|device code|please (?:log ?in|sign ?in)/i;
+
+/**
+ * "grok is actively working" affordance. grok renders a live spinner + an
+ * "esc to interrupt"-style footer while a turn runs. If present we never
+ * declare idle. This is a SOFT guard: the primary idle signal is output
+ * quiescence + a byte-identical pane snapshot across polls (a running spinner
+ * animates, so the snapshot is never stable while grok works), which fires
+ * cleanly even if this pattern never matches on a given grok build.
+ */
+const RUNNING_INDICATOR = /esc to interrupt|esc to cancel|interrupt\b|ctrl\+c to|▐|▌|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/i;
+
+// ---------------------------------------------------------------------------
+// grok-tui: persistent interactive session driven through tmux.
+// ---------------------------------------------------------------------------
+
+/** Launch a fresh grok process in a new detached tmux session for this root. */
+function launchSession(root: string, sessionId: string, resume: boolean, model: string | undefined, log: (m: string) => void): TmuxSession {
+  const name = sessionName(root);
+  // A stale/dead session for this name must be cleared first.
+  if (hasSession(name)) { killSession(name); }
+
+  const dir = path.join(root, '.autodev', 'grok-tui');
+  try { if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); } } catch { /* ignore */ }
+  const rawLog = path.join(dir, 'pane.raw');
+  // Start each launch with a fresh raw log so readOffset math is simple.
+  try { fs.writeFileSync(rawLog, '', 'utf8'); } catch { /* ignore */ }
+
+  // Fixed geometry so wrapping/relayout never shifts detection rows; manual
+  // window-size so a human attaching can't reflow the pane mid-turn.
+  tmux(['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', root]);
+  tmux(['set-option', '-t', name, 'window-size', 'manual']);
+
+  // pipe-pane BEFORE launching grok — it only captures bytes emitted after it
+  // attaches (confirmed). Append mode.
+  tmux(['pipe-pane', '-o', '-t', name, `cat >> ${shq(rawLog)}`]);
+
+  // Build the interactive grok command. `exec` replaces the shell so a dead grok
+  // collapses the pane/session → cheap liveness signal via has-session.
+  const parts = [
+    'exec', shq(GROK_BIN),
+    '--no-alt-screen', '--always-approve',
+    '--cwd', shq(root),
+  ];
+  if (model) { parts.push('-m', shq(model)); }
+  if (resume) {
+    // Restore the accumulated conversation on relaunch.
+    parts.push('--resume', shq(sessionId));
+  } else {
+    // Name a brand-new conversation with our UUID so it is addressable later.
+    parts.push('-s', shq(sessionId));
+  }
+  tmux(['send-keys', '-t', name, parts.join(' '), 'Enter']);
+
+  const sess: TmuxSession = { name, rawLog, sessionId, readOffset: 0 };
+  _tmuxSessions.set(root, sess);
+  log(`Grok TUI: launched tmux session ${name} (${resume ? 'resume' : 'new'} ${sessionId.slice(0, 8)}…, model=${model || 'account default'})`);
+  return sess;
+}
+
+/**
+ * Ensure a live tmux grok session exists for this root. Returns the session and
+ * whether it was just launched (caller applies a startup grace before pasting).
+ */
+function ensureSession(root: string, resolvedSessionId: string | undefined, model: string | undefined, log: (m: string) => void): { sess: TmuxSession; justLaunched: boolean } {
+  const name = sessionName(root);
+  const cached = _tmuxSessions.get(root);
+  if (cached && cached.name === name && hasSession(name)) {
+    return { sess: cached, justLaunched: false }; // reuse — context is live in-process
+  }
+  // No live session. If we have a stored session id, relaunch with --resume so
+  // grok restores the accumulated history; otherwise mint + persist a new UUID.
+  let sid = resolvedSessionId || getSessionId(root, 'grok-tui');
+  let resume = false;
+  if (sid) {
+    resume = true; // a stored id means grok already has a persisted session
+  } else {
+    sid = randomUUID();
+    try { saveSessionId(root, 'grok-tui', sid); } catch { /* best effort */ }
+  }
+  const sess = launchSession(root, sid, resume, model, log);
+  return { sess, justLaunched: true };
+}
+
+/** Read new bytes of rawLog past `offset`; returns decoded text + new offset. */
+function readFrom(file: string, offset: number): { text: string; offset: number } {
+  try {
+    const size = fs.statSync(file).size;
+    if (size <= offset) { return { text: '', offset }; }
+    const len = size - offset;
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, offset); } finally { fs.closeSync(fd); }
+    return { text: buf.toString('utf8'), offset: size };
+  } catch { return { text: '', offset }; }
+}
+
+/** Paste a (possibly multi-line) prompt into the live pane and submit it. */
+function pastePrompt(sess: TmuxSession, promptFilePath: string): void {
+  const buf = `grok-${Date.now()}`;
+  // load-buffer straight from the prompt file → paste-buffer uses bracketed
+  // paste so the whole block lands as ONE message; a separate Enter submits it.
+  tmux(['load-buffer', '-b', buf, promptFilePath]);
+  tmux(['paste-buffer', '-b', buf, '-t', sess.name, '-d']);
+  tmux(['send-keys', '-t', sess.name, 'Enter']);
+}
+
+// ---------------------------------------------------------------------------
+// runGrokTmuxTurn — one turn against the persistent tmux session.
+// Fire-and-forget: streams pane text to stdoutFile, writes exitFile at turn end.
+// ---------------------------------------------------------------------------
+function runGrokTmuxTurn(
+  root: string,
+  promptFilePath: string,
+  resolvedSessionId: string | undefined,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  model: string | undefined,
+  showOutput?: () => void,
+): void {
+  showOutput?.();
+  try { fs.writeFileSync(stdoutFile, '', 'utf8'); } catch { /* ignore */ }
+  try { fs.writeFileSync(exitFile, '', 'utf8'); } catch { /* ignore */ }
+
+  _busyRoots.add(root);
+
+  const POLL_MS       = envNum('AUTODEV_GROK_TUI_POLL_MS', 700);
+  const DEBOUNCE_MS   = envNum('AUTODEV_GROK_TUI_DEBOUNCE_MS', 3_000);
+  const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 8_000);
+  const NOOUTPUT_MS   = envNum('AUTODEV_GROK_TUI_NOOUTPUT_MS', 25_000);
+  const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
+  const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 3));
+
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  // Line-buffer for clean console logging (grok streams mid-word).
+  let lineBuf = '';
+  const emitLines = (text: string): void => {
+    lineBuf += text;
+    let nl: number;
+    while ((nl = lineBuf.indexOf('\n')) >= 0) {
+      const line = lineBuf.slice(0, nl).replace(/\s+$/, '');
+      lineBuf = lineBuf.slice(nl + 1);
+      if (line.trim()) { log(`  ${line}`); }
+    }
+  };
+  const flushLine = (): void => {
+    const line = lineBuf.replace(/\s+$/, '');
+    lineBuf = '';
+    if (line.trim()) { log(`  ${line}`); }
+  };
+
+  // Coalesced office activity feed (grok exposes no per-tool events here).
+  let activityBuf = '';
+  let activityTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushActivity = (): void => {
+    if (activityTimer) { clearTimeout(activityTimer); activityTimer = null; }
+    const t = activityBuf.trim(); activityBuf = '';
+    if (!t) { return; }
+    const preview = t.length > 280 ? t.slice(0, 277) + '…' : t;
+    _emitGrokHook(root, 'Notification', { message: preview, title: 'grok', tool_name: 'grok' });
+  };
+  const scheduleActivity = (): void => {
+    if (activityBuf.length >= 400) { flushActivity(); return; }
+    if (!activityTimer) { activityTimer = setTimeout(flushActivity, 1200); }
+  };
+
+  const finish = (code: number, reason: string): void => {
+    flushLine();
+    flushActivity();
+    _busyRoots.delete(root);
+    log(`Grok TUI: turn ${code === 0 ? 'complete' : `ended (code=${code}, ${reason})`}`);
+    _emitGrokHook(root, code === 0 ? 'Stop' : 'StopFailure', { exit_code: code });
+    _emitGrokHook(root, 'SessionEnd', { reason: code === 0 ? 'completed' : reason });
+    try { fs.writeFileSync(exitFile, `${code}\n`, 'utf8'); } catch { /* ignore */ }
+  };
+
+  void (async () => {
+    let sess: TmuxSession;
+    let justLaunched: boolean;
+    try {
+      const r = ensureSession(root, resolvedSessionId, model, log);
+      sess = r.sess; justLaunched = r.justLaunched;
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err);
+      log(`Grok TUI: session launch failed: ${msg}`);
+      try { fs.appendFileSync(stdoutFile, `\n[Grok TUI launch error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
+      finish(1, 'launch-failed');
+      return;
+    }
+
+    // Stream only THIS turn's output: start reading at the current rawLog size.
+    let readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return 0; } })();
+
+    if (justLaunched) {
+      _emitGrokHook(root, 'SessionStart', { source: 'startup' });
+      // Startup grace — grok's splash takes a few seconds before it accepts input.
+      // Scan for the reauth gate while we wait; bail early if the token is dead.
+      const deadline = Date.now() + STARTUP_MS;
+      while (Date.now() < deadline) {
+        await sleep(500);
+        if (!hasSession(sess.name)) {
+          log('Grok TUI: session died during startup');
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup]\n`, 'utf8'); } catch { /* ignore */ }
+          finish(1, 'startup-exit');
+          return;
+        }
+        const snap = capturePane(sess.name);
+        if (REAUTH_MARKERS.test(snap)) {
+          log('Grok TUI: reauth required (OAuth gate at startup)');
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
+          finish(1, 'reauth_required');
+          return;
+        }
+      }
+      // grok emitted no rawLog before we paste? re-read the offset after startup
+      // so the splash text isn't streamed as "turn output".
+      readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
+    } else {
+      _emitGrokHook(root, 'SessionStart', { source: 'resume' });
+    }
+
+    // Submit the prompt.
+    log(`Grok TUI: sending turn (${(() => { try { return fs.statSync(promptFilePath).size; } catch { return 0; } })()} bytes)`);
+    pastePrompt(sess, promptFilePath);
+
+    // -----------------------------------------------------------------------
+    // Poll: stream new pane bytes, detect turn-end by output quiescence + a
+    // byte-stable pane snapshot with the running-indicator absent.
+    // -----------------------------------------------------------------------
+    const turnStart = Date.now();
+    let lastGrowthMs = Date.now();
+    let sawOutput = false;
+    let lastSnap = '';
+    let stable = 0;
+
+    for (;;) {
+      await sleep(POLL_MS);
+
+      // Session died mid-turn (grok crashed / was killed).
+      if (!hasSession(sess.name)) {
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited]\n`, 'utf8'); } catch { /* ignore */ }
+        _tmuxSessions.delete(root);
+        finish(1, 'session-exit');
+        return;
+      }
+
+      // 1) Drain new pane bytes → stdoutFile (+ console + office feed).
+      const { text, offset } = readFrom(sess.rawLog, readOffset);
+      if (text) {
+        readOffset = offset;
+        sess.readOffset = offset;
+        const clean = stripAnsi(text);
+        if (clean) {
+          try { fs.appendFileSync(stdoutFile, clean, 'utf8'); } catch { /* ignore */ }
+          emitLines(clean);
+          activityBuf += clean; scheduleActivity();
+          _lastActivityMs.set(root, Date.now());
+          lastGrowthMs = Date.now();
+          sawOutput = true;
+        }
+      }
+
+      // 2) Snapshot for detection (also catches a mid-turn reauth prompt).
+      const snap = capturePane(sess.name);
+      if (REAUTH_MARKERS.test(snap)) {
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
+        finish(1, 'reauth_required');
+        return;
+      }
+
+      // 3) Idle test: quiet long enough, snapshot stable across polls, no
+      //    running indicator, and we actually saw output (or waited out the
+      //    no-output grace for a turn that produces nothing).
+      if (snap === lastSnap) { stable++; } else { stable = 0; lastSnap = snap; }
+      const quiet   = Date.now() - lastGrowthMs >= DEBOUNCE_MS;
+      const running = RUNNING_INDICATOR.test(snap);
+      const readyToJudge = sawOutput || (Date.now() - turnStart >= NOOUTPUT_MS);
+      if (readyToJudge && quiet && !running && stable >= STABLE_POLLS) {
+        // Final drain to catch anything written between the last read and idle.
+        const tail = readFrom(sess.rawLog, readOffset);
+        if (tail.text) {
+          readOffset = tail.offset; sess.readOffset = tail.offset;
+          const clean = stripAnsi(tail.text);
+          if (clean) { try { fs.appendFileSync(stdoutFile, clean, 'utf8'); } catch { /* ignore */ } emitLines(clean); }
+        }
+        finish(0, 'idle');
+        return;
+      }
+
+      // 4) Watchdog — a turn that overruns the hard budget. Interrupt with Esc
+      //    (grok's cancel) to preserve the session/context; if it won't settle,
+      //    kill the session so the NEXT turn relaunches with --resume.
+      if (MAX_RUN_MS > 0 && Date.now() - turnStart >= MAX_RUN_MS) {
+        log(`Grok TUI watchdog: exceeded ${Math.round(MAX_RUN_MS / 60_000)}min budget — interrupting`);
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI watchdog: turn exceeded time budget — interrupted]\n`, 'utf8'); } catch { /* ignore */ }
+        tmux(['send-keys', '-t', sess.name, 'Escape']);
+        // Give grok a moment to settle after the interrupt.
+        let settled = false;
+        for (let i = 0; i < 8; i++) {
+          await sleep(500);
+          if (!hasSession(sess.name)) { break; }
+          const s2 = capturePane(sess.name);
+          if (!RUNNING_INDICATOR.test(s2)) { settled = true; break; }
+        }
+        if (!settled && hasSession(sess.name)) {
+          // Still wedged after Esc → kill so ensureSession relaunches next turn.
+          killSession(sess.name);
+          _tmuxSessions.delete(root);
+        }
+        finish(124, 'watchdog');
+        return;
+      }
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
+// Headless runner (grok-cli always; grok-tui fallback when tmux is missing).
+// Fire-and-forget: spawns grok with --prompt-file, streams streaming-json to
 // stdoutFile, writes exit code to exitFile when the process exits.
 // ---------------------------------------------------------------------------
 interface GrokRunOptions {
   model?: string;
-  /** Reveal the output panel (VS Code shell only). */
   showOutput?: () => void;
   /** grok-tui: resume/continue a session so context accumulates across tasks. */
   persist?: boolean;
-  /** Session id to resume (from resolveSession). Ignored unless `persist`. */
   sessionId?: string;
-  /** Provider id used to persist a freshly-created session id. */
   providerId?: ProviderId;
 }
 
-/**
- * Shared runner behind both grok providers. `persist:false` (grok-cli) spawns
- * a stateless process; `persist:true` (grok-tui) resumes the workspace session
- * (or creates + saves a new one on the first task).
- */
 export function sendGrokPrompt(
   root: string,
-  /** Absolute path to the combined agent-profile + message file. */
   promptFilePath: string,
   stdoutFile: string,
   exitFile: string,
@@ -115,14 +547,9 @@ export function sendGrokPrompt(
 ): void {
   opts.showOutput?.();
 
-  // Only force a model when one is explicitly configured. With no model, grok
-  // uses the account's own default — more robust than hardcoding a model id
-  // that may not exist for every account/plan.
   const modelArgs = opts.model ? ['-m', opts.model] : [];
   const modelLabel = opts.model || 'account default';
 
-  // Session flags — grok-tui only. Resume the stored session, or mint a new id
-  // and persist it immediately so the next task resumes the same conversation.
   const sessionArgs: string[] = [];
   if (opts.persist) {
     const providerId = opts.providerId ?? 'grok-tui';
@@ -142,22 +569,14 @@ export function sendGrokPrompt(
   try { fs.writeFileSync(stdoutFile, '', 'utf8'); } catch { /* ignore */ }
   try { fs.writeFileSync(exitFile,   '', 'utf8'); } catch { /* ignore */ }
 
-  // Defensive: if a previous run for this root is somehow still tracked, kill it
-  // first so `_activeChildren.set` below can't orphan it (callers gate on
-  // isGrokTuiBusy, but don't rely on that alone).
   const prior = _activeChildren.get(root);
   if (prior) { try { prior.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
 
   _busyRoots.add(root);
 
-  /**
-   * Fail the turn the way the (previously unreachable) catch below intended.
-   * Shared so the sync and async paths can't drift into disagreeing.
-   */
   const failSpawn = (msg: string): void => {
     log(`Grok spawn error: ${msg}`);
     try { fs.appendFileSync(stdoutFile, `\n[Grok spawn error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
-    // The exit file is what the loop waits on — without it the turn never ends.
     try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
     _activeChildren.delete(root);
     _busyRoots.delete(root);
@@ -175,29 +594,13 @@ export function sendGrokPrompt(
         '--prompt-file', promptFilePath,
         '--output-format', 'streaming-json',
       ],
-      {
-        cwd: root,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
-      },
+      { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
     );
   } catch (spawnErr) {
-    // Kept for the genuinely synchronous failures (bad options/EACCES on some
-    // platforms). A MISSING BINARY does NOT land here — see the 'error' handler.
     failSpawn((spawnErr as Error)?.message ?? String(spawnErr));
     return;
   }
 
-  // The one that actually fires when grok isn't installed.
-  //
-  // `spawn()` does NOT throw on ENOENT — it emits 'error' asynchronously — so the
-  // catch above was dead code for the most common failure by far. With no handler
-  // the error escaped to start.ts's uncaughtException backstop, which keeps the
-  // process alive: 'close' never fired, the exit file stayed empty, _busyRoots was
-  // never cleared, and SessionStart had ALREADY been emitted — so the office showed
-  // the agent WORKING, forever, on a grok that was never running. Observed live:
-  // an agent "online" and busy for hours whose only trace was `spawn grok ENOENT`
-  // buried in agent.log. (opencodeCliProvider always did this correctly.)
   child.on('error', (err: Error) => {
     const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
     failSpawn(missing
@@ -206,30 +609,14 @@ export function sendGrokPrompt(
   });
 
   _activeChildren.set(root, child);
-  // Emit SessionStart only AFTER the child is confirmed running. Emitting it
-  // before spawn resolves is what let a failed turn masquerade as an active one.
   child.once('spawn', () => { _emitGrokHook(root, 'SessionStart', { source: 'startup' }); });
 
-  // -------------------------------------------------------------------------
-  // Watchdog — grok can wedge internally (e.g. retrying a failing tool call
-  // forever) WITHOUT ever exiting, which leaves the process alive, the exit
-  // file unwritten, and the task loop blocked indefinitely on this one task
-  // while new work piles up. Kill a run that overruns a hard time budget or
-  // floods tool-output errors, so `close` fires, the exit file is written, and
-  // the loop fails this task cleanly and moves on.
-  // -------------------------------------------------------------------------
-  // Env overrides: accept any finite >= 0; 0 explicitly DISABLES that guard
-  // (the old `Number(x) || DEFAULT` silently reverted 0 back to the default).
-  const envNum = (key: string, def: number): number => {
-    const n = Number(process.env[key]);
-    return Number.isFinite(n) && n >= 0 ? n : def;
-  };
   const GROK_MAX_RUN_MS      = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
   const GROK_MAX_TOOL_ERRORS = envNum('AUTODEV_GROK_MAX_TOOL_ERRORS', 25);
   let toolErrorCount = 0;
   let killed = false;
   const killGrok = (why: string): void => {
-    if (killed) { return; } // never double-kill / double-log
+    if (killed) { return; }
     killed = true;
     log(`Grok watchdog: ${why} — killing run`);
     try { fs.appendFileSync(stdoutFile, `\n[Grok watchdog: ${why}]\n`, 'utf8'); } catch { /* ignore */ }
@@ -239,22 +626,9 @@ export function sendGrokPrompt(
     ? setTimeout(() => killGrok(`exceeded ${Math.round(GROK_MAX_RUN_MS / 60_000)}min time budget`), GROK_MAX_RUN_MS)
     : null;
 
-  // -------------------------------------------------------------------------
-  // Stream stdout — each line is a streaming-json object.
-  // -------------------------------------------------------------------------
   const rl = readline.createInterface({ input: child.stdout! });
-  // Grok's streaming-json exposes `thought`, `text`, `end` — but NOT tool
-  // events (tool use is hidden under --always-approve). So per-tool activity
-  // isn't available; we surface the real turn boundaries instead: SessionStart
-  // at spawn and Stop/SessionEnd on the `end` event (a genuine grok signal, not
-  // synthetic padding). `_endSeen` avoids a duplicate SessionEnd on close.
   let _endSeen = false;
 
-  // Grok exposes NO tool events in streaming-json (tool use is hidden under
-  // --always-approve), so pixel-office's activity feed would otherwise be empty
-  // apart from the SessionStart/End boundaries. Surface the assistant's streamed
-  // TEXT as periodic, coalesced `Notification` hook events so the office shows
-  // what grok is actually producing (not raw per-chunk spam).
   let _activityBuf = '';
   let _activityTimer: ReturnType<typeof setTimeout> | null = null;
   const flushActivity = (): void => {
@@ -270,10 +644,6 @@ export function sendGrokPrompt(
     if (!_activityTimer) { _activityTimer = setTimeout(flushActivity, 1200); }
   };
 
-  // Console output: grok streams assistant text token-by-token (often mid-word,
-  // e.g. "aut"/"ode"/"v"). Logging each delta puts one timestamped line per token
-  // and shreds the output. Buffer deltas and only log COMPLETE lines (on \n),
-  // flushing whatever remains when the turn ends.
   let _lineBuf = '';
   const emitOutputLines = (text: string): void => {
     _lineBuf += text;
@@ -294,21 +664,15 @@ export function sendGrokPrompt(
     if (!line.trim()) { return; }
     let msg: any;
     try { msg = JSON.parse(line); } catch {
-      // Plain text fallback (e.g. progress lines before JSON kicks in).
       try { fs.appendFileSync(stdoutFile, line + '\n', 'utf8'); } catch { /* ignore */ }
       return;
     }
-
     const type: string = msg.type ?? '';
-
     if (type === 'assistant' || type === 'text') {
-      // Assistant response text.
       const text: string = msg.content ?? msg.data ?? msg.text ?? msg.message ?? '';
       if (text) {
         try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ }
-        // Log full lines only (buffer partial tokens until a newline arrives).
         emitOutputLines(text);
-        // Feed the office activity stream (coalesced).
         _activityBuf += text;
         scheduleActivity();
       }
@@ -317,25 +681,19 @@ export function sendGrokPrompt(
       log(`Grok error: ${errMsg}`);
       try { fs.appendFileSync(stdoutFile, `\n[Grok error: ${errMsg}]\n`, 'utf8'); } catch { /* ignore */ }
     } else if (type === 'end') {
-      // Genuine turn-end from grok's stream → real session boundary.
       _endSeen = true;
-      flushOutputLine();             // print any half-line still buffered
-      flushActivity();               // emit any buffered assistant text first
+      flushOutputLine();
+      flushActivity();
       _emitGrokHook(root, 'Stop', {});
       _emitGrokHook(root, 'SessionEnd', { reason: 'completed' });
     }
-    // `thought` and other event types stay out of the output file.
   });
 
-  // Read stderr LINE by line (not raw chunks) so a `tool_output_error` marker
-  // split across two data chunks is still counted exactly once.
   const errRl = child.stderr ? readline.createInterface({ input: child.stderr }) : null;
   errRl?.on('line', (line: string) => {
     const text = line.trim();
     if (!text) { return; }
     log(`Grok stderr: ${text}`);
-    // A flood of tool-output errors means grok is stuck retrying a tool it
-    // can't complete — kill it now rather than waiting out the time budget.
     if (GROK_MAX_TOOL_ERRORS > 0 && text.includes('tool_output_error')) {
       toolErrorCount++;
       if (toolErrorCount >= GROK_MAX_TOOL_ERRORS) {
@@ -346,16 +704,14 @@ export function sendGrokPrompt(
 
   child.on('close', (code: number | null) => {
     if (watchdog) { clearTimeout(watchdog); }
-    flushOutputLine();               // print any half-line still buffered
-    flushActivity();                 // flush any trailing assistant text
+    flushOutputLine();
+    flushActivity();
     errRl?.close();
     rl.close();
     _activeChildren.delete(root);
     _busyRoots.delete(root);
     const exitCode = code ?? 1;
     log(`Grok: exited (code=${exitCode})`);
-    // Fallback SessionEnd only if grok didn't already emit an `end` event
-    // (abnormal exit / killed) — avoids a duplicate from the normal path.
     if (!_endSeen) {
       _emitGrokHook(root, exitCode === 0 ? 'Stop' : 'StopFailure', { exit_code: exitCode });
       _emitGrokHook(root, 'SessionEnd', { reason: exitCode === 0 ? 'completed' : 'error' });
@@ -364,7 +720,7 @@ export function sendGrokPrompt(
   });
 }
 
-/** grok-cli: stateless — a fresh grok process every task (no session flags). */
+/** grok-cli: stateless — a fresh HEADLESS grok process every task. */
 export function sendGrokCliPrompt(
   root: string,
   promptFilePath: string,
@@ -379,11 +735,14 @@ export function sendGrokCliPrompt(
   });
 }
 
-/** grok-tui: persistent — resume the workspace session so context accumulates. */
+/**
+ * grok-tui: persistent — run the turn in the per-workspace tmux session so
+ * grok's in-process context accumulates across tasks. Falls back to the old
+ * headless spawn (with --resume) when tmux is unavailable so nothing regresses.
+ */
 export function sendGrokTuiPrompt(
   root: string,
   promptFilePath: string,
-  /** Session id from resolveSession (undefined on the first task). */
   resolvedSessionId: string | undefined,
   stdoutFile: string,
   exitFile: string,
@@ -391,30 +750,81 @@ export function sendGrokTuiPrompt(
   model?: string,
   showOutput?: () => void,
 ): void {
+  if (tmuxAvailable()) {
+    runGrokTmuxTurn(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, model, showOutput);
+    return;
+  }
+  log('Grok TUI: tmux not available — falling back to headless spawn');
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
     model, showOutput, persist: true, sessionId: resolvedSessionId, providerId: 'grok-tui',
   });
 }
 
 // ---------------------------------------------------------------------------
-// closeGrokTuiSession
-// Called by taskLoop reset interval. grok-tui persists its session id in
-// session-state.json BY DESIGN (so context survives), so we only ensure no
-// child is left running — the session id is intentionally preserved.
+// steerGrokTui — inject a message into the RUNNING grok turn via the live pane.
+//
+// Because the tmux session is a real TTY, keys sent to a mid-turn pane are
+// delivered to grok's input and folded into the current turn (confirmed with a
+// live REPL stand-in). Mirrors steerClaudeTui: only injects when a turn is
+// actually running; returns false when there is no live pane so the caller
+// keeps the durable TODO fallback (at-least-once delivery).
 // ---------------------------------------------------------------------------
+export async function steerGrokTui(root: string, text: string, log: (msg: string) => void): Promise<boolean> {
+  const sess = _tmuxSessions.get(root);
+  if (!sess) { return false; }            // no live tmux session (headless / not started)
+  if (!_busyRoots.has(root)) { return false; } // only steer a turn in flight
+  if (!hasSession(sess.name)) { _tmuxSessions.delete(root); return false; }
+  try {
+    // Load into a buffer + bracketed paste so a multi-line steer lands as one
+    // message; a separate Enter submits it into the running turn.
+    const tmp = path.join(root, '.autodev', 'grok-tui', `steer-${Date.now()}.txt`);
+    try { fs.writeFileSync(tmp, text, 'utf8'); } catch { /* ignore */ }
+    const buf = `groksteer-${Date.now()}`;
+    const okLoad  = tmux(['load-buffer', '-b', buf, tmp]);
+    const okPaste = tmux(['paste-buffer', '-b', buf, '-t', sess.name, '-d']);
+    const okEnter = tmux(['send-keys', '-t', sess.name, 'Enter']);
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    if (okLoad === null || okPaste === null || okEnter === null) { return false; }
+    log(`Grok TUI: steered live pane (${text.length} chars) — injected into current turn`);
+    return true;
+  } catch (err) {
+    log(`Grok TUI: steer failed: ${(err as Error)?.message ?? String(err)}`);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Teardown
+// ---------------------------------------------------------------------------
+
+/**
+ * Called by taskLoop reset interval / provider close. Kills any live grok for
+ * this root — the tmux session AND any headless child — while PRESERVING the
+ * persisted session id so a later task relaunches with --resume (context intact).
+ */
 export function closeGrokTuiSession(root: string, _log: (msg: string) => void): void {
-  // Kill any active child for this root; keep the persisted session id.
   const child = _activeChildren.get(root);
   if (child) { try { child.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
+  const sess = _tmuxSessions.get(root);
+  if (sess) { killSession(sess.name); _tmuxSessions.delete(root); }
+  else {
+    // No cached handle but a session may still exist under the deterministic name.
+    const name = sessionName(root);
+    if (hasSession(name)) { killSession(name); }
+  }
   _busyRoots.delete(root);
 }
 
-/** Kill all active grok processes — called on extension deactivate. */
+/** Kill all live grok sessions — called on SDK/extension shutdown. */
 export function closeAllGrokTuiSessions(): void {
   for (const child of _activeChildren.values()) {
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
   }
   _activeChildren.clear();
+  for (const sess of _tmuxSessions.values()) {
+    killSession(sess.name);
+  }
+  _tmuxSessions.clear();
   _busyRoots.clear();
 }
 

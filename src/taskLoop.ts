@@ -17,7 +17,7 @@ import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider'
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk } from './providers/opencodeSdkProvider';
-import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession } from './providers/grokTuiProvider';
+import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui } from './providers/grokTuiProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -859,7 +859,18 @@ export class TaskLoopRunner {
     // delivery seen ONLY after the stdin write resolves, so a write that rejects
     // (dead child / closed pipe) falls through to the durable TODO append below
     // instead of dropping the steer — preserving at-least-once delivery.
-    if (root && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
+    // `_currentTask` is the authoritative "a turn is genuinely in flight" signal
+    // — it is set for the whole duration of a dispatched turn and cleared while
+    // idle-polling. A provider's own busy flag can go STALE (e.g. grok's turn-end
+    // detector never fires and the loop force-unblocks via the exit-file sentinel,
+    // leaving `_busyRoots` set). Without this guard a steer arriving while the loop
+    // is IDLE would be injected into a pane with no running turn and marked
+    // delivered, yet nothing would run until some *unrelated* later task happened
+    // to start a turn (observed ~1.5 min stall, potentially indefinite). Gating on
+    // `_currentTask` routes an idle steer to the buffer path below, which wakes the
+    // idle sleep and drains it into a real turn immediately.
+    const turnInFlight = !!this._currentTask;
+    if (root && turnInFlight && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
       if (await steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
         onDelivered?.(); // durably injected into the live turn
@@ -871,7 +882,7 @@ export class TaskLoopRunner {
     // injects into the running turn — true mid-turn steering, same as claude-tui.
     // (copilot-CLI is a one-shot subprocess with no live turn to inject into, so
     // it always falls through to the next-turn TODO queue below.)
-    if (root && provider === 'copilot-sdk' && isCopilotSdkBusy(root)) {
+    if (root && turnInFlight && provider === 'copilot-sdk' && isCopilotSdkBusy(root)) {
       if (await steerCopilotSdk(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (copilot-sdk): "${clean.slice(0, 80)}"`);
         onDelivered?.();
@@ -881,7 +892,7 @@ export class TaskLoopRunner {
 
     // opencode-sdk keeps a persistent in-process server + session; a prompt sent to
     // the live session mid-turn is picked up by the running turn (interrupt + continue).
-    if (root && provider === 'opencode-sdk' && isOpencodeSdkBusy(root)) {
+    if (root && turnInFlight && provider === 'opencode-sdk' && isOpencodeSdkBusy(root)) {
       if (await steerOpencodeSdk(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (opencode-sdk): "${clean.slice(0, 80)}"`);
         onDelivered?.();
@@ -893,7 +904,7 @@ export class TaskLoopRunner {
     // mid-turn are folded into the running grok turn (true steering). Only when
     // a turn is actually in flight — steerGrokTui returns false otherwise so we
     // fall through to the durable TODO queue below (at-least-once).
-    if (root && provider === 'grok-tui' && isGrokTuiBusy(root)) {
+    if (root && turnInFlight && provider === 'grok-tui' && isGrokTuiBusy(root)) {
       if (await steerGrokTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (grok-tui): "${clean.slice(0, 80)}"`);
         onDelivered?.();
@@ -1499,6 +1510,12 @@ export class TaskLoopRunner {
             if (!isReady()) {
               try { fs.writeFileSync(exitFile, 'unknown\n', 'utf8'); } catch { /* ignore */ }
               this._cb?.log('⚠️ CLI exit file never written — wrote sentinel to unblock next cycle');
+              // grok-tui tracks turn-in-flight via an in-memory busy flag that is
+              // cleared in the turn's finish(). If finish() never ran (the exit
+              // file was never written), that flag stays STALE-TRUE and would make
+              // a later idle steer be pane-injected instead of buffered. Force it
+              // idle here so isGrokTuiBusy() stays honest.
+              if (activeProvider === 'grok-tui') { forceIdleGrokTui(this._workspaceRoot); }
             }
           }
         } else {

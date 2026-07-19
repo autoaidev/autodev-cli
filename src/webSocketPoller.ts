@@ -564,18 +564,46 @@ export class WebSocketPoller {
       if (meta['event'] === 'steer' || meta['event'] === 'instant') {
         const steerObj = meta['task'] as Record<string, unknown> | undefined;
         let steerText = typeof steerObj?.['text'] === 'string' ? steerObj['text'] as string : '';
-        if (!steerText) {
-          const parts = meta['parts'] as Array<Record<string, unknown>> | undefined;
-          if (parts) {
-            const texts = parts
-              .filter(p => p['kind'] === 'text' && typeof p['text'] === 'string')
-              .map(p => p['text'] as string);
-            steerText = texts.join(' ');
+        // A steer can carry the same A2A file parts a user_message does (pasted /
+        // attached files sent as ⚡ Instant). Save any file parts into the agent's
+        // workspace and fold their [attachment: <path>] refs into the steer text —
+        // mirroring the user_message branch below — so the agent (grok TODO append
+        // or a mid-turn injection) actually sees the file instead of it being
+        // silently dropped. Group attachments under the A2A delivery id.
+        const steerParts = meta['parts'] as Array<Record<string, unknown>> | undefined;
+        const steerAttRefs: string[] = [];
+        const steerTextParts: string[] = [];
+        if (steerParts) {
+          for (const part of steerParts) {
+            if (part['kind'] === 'text') {
+              const pt = (part['text'] as string | undefined) ?? '';
+              if (pt) { steerTextParts.push(pt); }
+            } else if (part['kind'] === 'file' && this._workspaceRoot) {
+              const file = part['file'] as Record<string, unknown> | undefined;
+              if (file) {
+                const name = (file['name'] as string | undefined) ?? 'attachment';
+                const bytesB64 = file['bytes'] as string | undefined;
+                if (bytesB64) {
+                  try {
+                    const buf = Buffer.from(bytesB64, 'base64');
+                    steerAttRefs.push(saveAttachment(this._workspaceRoot, name, buf, taskId));
+                  } catch (err) {
+                    this._log(`WS steer failed to save attachment "${name}": ${err}`);
+                  }
+                } else if (typeof file['uri'] === 'string') {
+                  steerAttRefs.push(file['uri'] as string);
+                }
+              }
+            }
           }
         }
+        if (!steerText && steerTextParts.length > 0) { steerText = steerTextParts.join(' '); }
         steerText = steerText.replace(/\r\n|\r|\n/g, ' ').trim();
+        if (steerAttRefs.length > 0) {
+          steerText = (steerText + ' ' + steerAttRefs.map(p => `[attachment: ${p}]`).join(' ')).trim();
+        }
         if (!steerText) { return; }
-        this._log(`WS steer received: "${steerText}"`);
+        this._log(`WS steer received: "${steerText}"${steerAttRefs.length > 0 ? ` (+${steerAttRefs.length} attachment(s))` : ''}`);
         // At-least-once (mirror the user_message path below): mark the delivery
         // seen only AFTER the steer is durably handled — mid-turn injection or a
         // successful TODO append. On failure we leave it unseen so the server's

@@ -255,23 +255,17 @@ export class ConfigManager {
         // plus A2A. The key is read from .autodev/settings.json, never written into
         // any provider config; the path is relative ('.') so the config is portable.
         //
-        // They differ ONLY in the presence socket, and this is load-bearing for
-        // instant messages (steers):
-        //
-        // - mcp-only agents keep the socket: the bridge IS the character's presence,
-        //   so office steers/messages arrive live via wait_for_events.
-        // - loop agents add --no-socket: the `autodev start` loop already opens its
-        //   OWN WS (WebhookPoller) for this slug and delivers steers itself (mid-turn
-        //   for claude-tui, or appended to TODO for other providers). The
-        //   slug→connection index is LAST-WINS (WsConnectionManager), so if the
-        //   bridge also opened a socket it would STEAL the slug from the loop and the
-        //   office steer would land in the bridge's wait_for_events — which the
-        //   loop's provider never calls — so the instant message is silently lost.
-        //   --no-socket keeps the loop as the slug's live connection. The HTTP tools
-        //   still work fully without it.
+        // Presence socket: a loop agent's `autodev start` loop already opens its
+        // OWN WS for this slug and delivers steers itself. The slug→connection index
+        // is LAST-WINS, so if the bridge ALSO opened a socket it would steal the slug
+        // and instant messages would land in the bridge's wait_for_events (which the
+        // loop's provider never reads) and vanish. We used to hard-code --no-socket
+        // for loop agents to prevent that; now the bridge AUTO-DETECTS a live loop
+        // via .autodev/ws-presence.lock (written by the loop's WS) and skips its own
+        // socket on its own (1.4.72). So we no longer write --no-socket — the config
+        // stays clean and it works even if someone adds a manual mcp-operate without
+        // the flag. An MCP-only agent (no loop, no lock) keeps its socket = presence.
         const opArgs = ['mcp-operate', '.'];
-        // Loop agents keep the loop as the slug's live connection (see above).
-        if (!s.mcpOnly) { opArgs.push('--no-socket'); }
         // Surface each ENABLED interactive capability as an explicit arg, so the
         // managed .mcp.json is self-documenting and mcp-operate serves the feature
         // even if it couldn't read settings. Driven by the workspace settings —

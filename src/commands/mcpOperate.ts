@@ -296,6 +296,25 @@ export function mcpOperateCommand(program: Command): void {
 
       const startSocket = async (): Promise<void> => {
         if (opts.socket === false) { return; }
+        // Auto-skip the presence socket when a co-located `autodev start` loop
+        // already owns this slug's live connection (it drops ws-presence.lock).
+        // A second socket is last-wins on the server: it would STEAL the slug
+        // from the loop and instant messages would land in this bridge's
+        // wait_for_events — which nothing reads — and vanish. This makes the loop
+        // vs bridge split safe even if someone forgets --no-socket. HTTP tools
+        // still work fully; only presence/steer delivery is deferred to the loop.
+        try {
+          const raw = fs.readFileSync(path.join(cwd, '.autodev', 'ws-presence.lock'), 'utf8');
+          const lock = JSON.parse(raw) as { pid?: number; ts?: number };
+          const pidAlive = typeof lock.pid === 'number' && ((): boolean => {
+            try { process.kill(lock.pid, 0); return true; } catch { return false; }
+          })();
+          const fresh = typeof lock.ts === 'number' && (Date.now() - lock.ts) < 3 * 60_000;
+          if (pidAlive && fresh) {
+            process.stderr.write('autodev mcp-operate: a loop already holds this slug’s presence socket — staying poll-only (HTTP tools still work).\n');
+            return;
+          }
+        } catch { /* no lock / unreadable → this bridge owns presence */ }
         const wsUrl = officeWsUrl(endpoint);
         if (!wsUrl) { return; }
         // The slug is needed for the ?endpoint= WS auth. Prefer the workspace

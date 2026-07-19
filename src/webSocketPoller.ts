@@ -23,6 +23,7 @@ export class WebSocketPoller {
   private _buffer = Buffer.alloc(0);
   private _todoPath = '';
   private _workspaceRoot: string | undefined;
+  private _presenceLockPath: string | undefined;
   private _destroyed = false;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _log: (msg: string) => void = () => {};
@@ -104,10 +105,31 @@ export class WebSocketPoller {
   start(todoPath: string, log?: (msg: string) => void, workspaceRoot?: string): void {
     this._todoPath = todoPath;
     this._workspaceRoot = workspaceRoot;
+    if (workspaceRoot) { this._presenceLockPath = path.join(workspaceRoot, '.autodev', 'ws-presence.lock'); }
     if (log) { this._log = log; }
     this._loadSeenDeliveries();
     this._log(`WS connecting → ${this.wsUrl} (slug: ${this.slug})`);
     this._connect();
+  }
+
+  /**
+   * The `autodev start` loop owns this slug's live presence connection. Drop a
+   * lock the co-located `autodev mcp-operate` bridge can see, so it auto-skips
+   * its OWN presence socket even if launched without --no-socket — a second
+   * socket would (last-wins) steal the slug and silently swallow instant
+   * messages the loop is meant to deliver. pid+ts so a crashed loop's stale lock
+   * is ignored.
+   */
+  private _writePresenceLock(): void {
+    if (!this._presenceLockPath) { return; }
+    try {
+      fs.mkdirSync(path.dirname(this._presenceLockPath), { recursive: true });
+      fs.writeFileSync(this._presenceLockPath, JSON.stringify({ pid: process.pid, slug: this.slug, ts: Date.now() }), 'utf8');
+    } catch { /* best-effort */ }
+  }
+  private _clearPresenceLock(): void {
+    if (!this._presenceLockPath) { return; }
+    try { fs.rmSync(this._presenceLockPath, { force: true }); } catch { /* ignore */ }
   }
 
   /** Reload persisted delivery IDs so a restart doesn't re-ingest replayed tasks. */
@@ -228,6 +250,7 @@ export class WebSocketPoller {
         this._connected = true;
 
         this._log(`WS connected → ${host}:${port} (slug: ${this.slug})`);
+        this._writePresenceLock();
 
         // Flush any frames queued before the connection was established
         const pending = this._pendingFrames.splice(0);
@@ -817,6 +840,7 @@ export class WebSocketPoller {
         this._scheduleReconnect();
         return;
       }
+      this._writePresenceLock(); // refresh ts so the bridge sees a live owner
       this._sendPing();
     }, WebSocketPoller.PING_INTERVAL_MS);
   }

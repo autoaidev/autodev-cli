@@ -48,9 +48,18 @@ export function parseTodoContent(content: string): Task[] {
   return tasks;
 }
 
+// A leading task-id token in a TODO line. Matches BOTH our locally-minted
+// shortId (`task-YYYY-MM-DD-hash`) AND a server-minted id adopted into the line:
+// bin2hex (16 hex) for A2A / scheduled / human-posted tasks, or a UUID. The last
+// two are essential — the CLI now writes the office's own task id into TODO.md so
+// the two sides share one id; if this regex doesn't recognise it, the `[id]`
+// leaks into the task text, task.id comes back empty, the server can't match, and
+// it mints a DUPLICATE row (title `[id] text`) on every report.
+const TASK_ID_RE = /^\[(task-(?:\d{4}-\d{2}-\d{2}|\d{8})-[a-f0-9]{6}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-f0-9]{16})\]\s+(.+)$/i;
+
 /** Extract optional leading task ID, e.g. "[task-2026-04-21-a3f9k2] actual text" */
 function extractId(raw: string): { id?: string; text: string } {
-  const m = raw.match(/^\[(task-(?:\d{4}-\d{2}-\d{2}|\d{8})-[a-f0-9]{6})\]\s+(.+)$/i);
+  const m = raw.match(TASK_ID_RE);
   if (m) { return { id: m[1], text: m[2] }; }
   return { text: raw };
 }
@@ -161,7 +170,7 @@ function rewriteCheckbox(filePath: string, task: Task, fromMarker: RegExp, newMa
     const m = lines[i].match(new RegExp(`^(\\s*(?:-\\s*)?)(?:${src})\\s+(.+)$`, 'iu'));
     if (!m) { continue; }
     const rawText = m[2].trim();
-    const idMatch = rawText.match(/^\[(task-(?:\d{4}-\d{2}-\d{2}|\d{8})-[a-f0-9]{6})\]\s+(.+)$/i);
+    const idMatch = rawText.match(TASK_ID_RE);
     const lineId   = idMatch ? idMatch[1] : undefined;
     const lineText = idMatch ? idMatch[2] : rawText;
     if ((task.id && lineId === task.id) || lineText === task.text) {
@@ -218,7 +227,7 @@ export function markDone(filePath: string, task: Task): void {
     const m = ln.match(/^(\s*(?:-\s*)?)(?:\[~\]|\[\s+\])\s+(.+)$/iu);
     if (!m) { continue; }
     const rawText = m[2].trim();
-    const idMatch = rawText.match(/^\[(task-(?:\d{4}-\d{2}-\d{2}|\d{8})-[a-f0-9]{6})\]\s+(.+)$/i);
+    const idMatch = rawText.match(TASK_ID_RE);
     const lineId   = idMatch ? idMatch[1] : undefined;
     const lineText = idMatch ? idMatch[2] : rawText;
     const matches = (task.id && lineId === task.id) || lineText === task.text;

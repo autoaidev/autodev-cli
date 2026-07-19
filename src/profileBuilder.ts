@@ -124,6 +124,8 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     keyRules: [
       'Email is the primary agent-to-agent medium. Jira comments do NOT notify agents — email is mandatory.',
       'Never invent or guess an address. Read CONTRACTS.md before any contact. Full skeleton: skill `contracts`.',
+      'An ACK / NO_NEXT / "CLOSED" / "COMPLETE"/"DONE"/"ACCEPTED" / re-verify message is TERMINAL — do NOT reply to it, do NOT re-verify or re-close an already-closed thread, do NOT send an ACK of an ACK. Silence IS the acknowledgement.',
+      'Only send a message that carries NEW substantive work, a decision a peer is blocked on, or a genuine first-time close. If you have nothing new, send NOTHING and go idle. When the project/deliverable is complete, stand down and stop initiating messages — do not keep the thread alive with courtesy replies.',
     ],
   },
   {

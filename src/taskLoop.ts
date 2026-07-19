@@ -1741,6 +1741,18 @@ export class TaskLoopRunner {
             gitRepo:   this._gitRepo,
             gitBranch: this._gitBranch,
           });
+          // Also record it in the LOCAL hooks-events.jsonl. The webhook reaches the
+          // office, but an EXTERNAL monitor (the desktop app watching a loop it did
+          // not spawn, so it has no stdout) can only learn the loop paused for auth
+          // from this file — without it the app shows a stale 'working'. Cleared by
+          // the next task_start hook on resume.
+          if (this._workspaceRoot) {
+            appendHookEventLine(this._workspaceRoot, {
+              hook_event_name: 'reauth_required', event_type: 'reauth_required',
+              provider: currentProvider, cwd: this._workspaceRoot, message: rawMsg,
+              title: 'Authentication required', tool_name: '', timestamp: new Date().toISOString(),
+            });
+          }
           // Never markDone — restore the task so it is retried after re-auth.
           await todoWriter.resetToTodo(todoPath, task).catch(() => {});
           // Evict the cached persistent provider process. claude-tui / opencode-sdk
@@ -1840,6 +1852,14 @@ export class TaskLoopRunner {
           });
           // Reset task so it gets picked up again after resume
           await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+          // Local hooks record for external monitors (see reauth note above).
+          if (this._workspaceRoot) {
+            appendHookEventLine(this._workspaceRoot, {
+              hook_event_name: 'rate_limit', event_type: 'rate_limit',
+              provider: currentProvider, cwd: this._workspaceRoot, message: rawMsg,
+              title: `Rate-limited — resumes ${resumeStr}`, tool_name: '', timestamp: new Date().toISOString(),
+            });
+          }
           // Remember the pause reason so a WS reconnect during the pause re-emits
           // rate_limit instead of clobbering it with agent_online/task_start.
           this._pauseReason = {

@@ -259,13 +259,17 @@ export class ConfigManager {
         // OWN WS for this slug and delivers steers itself. The slug→connection index
         // is LAST-WINS, so if the bridge ALSO opened a socket it would steal the slug
         // and instant messages would land in the bridge's wait_for_events (which the
-        // loop's provider never reads) and vanish. We used to hard-code --no-socket
-        // for loop agents to prevent that; now the bridge AUTO-DETECTS a live loop
-        // via .autodev/ws-presence.lock (written by the loop's WS) and skips its own
-        // socket on its own (1.4.72). So we no longer write --no-socket — the config
-        // stays clean and it works even if someone adds a manual mcp-operate without
-        // the flag. An MCP-only agent (no loop, no lock) keeps its socket = presence.
+        // loop's provider never reads) and vanish — AND the two sockets then ping-pong
+        // the slug, flapping the connection every few seconds.
+        //
+        // The bridge DOES auto-detect a live loop (ws-presence.lock, 1.4.72) and skip
+        // its socket — but grok RESPAWNS the bridge, and a respawned instance can lose
+        // the race and open a socket anyway, causing exactly that flap. So --no-socket
+        // stays the RELIABLE guard for loop agents; the auto-detect is only a safety
+        // net for a manual mcp-operate that forgets the flag. An MCP-only agent (no
+        // loop, no lock) keeps its socket = presence.
         const opArgs = ['mcp-operate', '.'];
+        if (!s.mcpOnly) { opArgs.push('--no-socket'); }
         // Surface each ENABLED interactive capability as an explicit arg, so the
         // managed .mcp.json is self-documenting and mcp-operate serves the feature
         // even if it couldn't read settings. Driven by the workspace settings —

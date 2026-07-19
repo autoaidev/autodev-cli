@@ -85,6 +85,19 @@ export class ConfigManager {
     if (root) {
       const projectFile = path.join(root, '.claude', 'settings.json');
       _mergeJson(projectFile, (cfg) => { setBypass(cfg); }, log, 'Claude project settings');
+      // Mark the workspace TRUSTED in ~/.claude.json. Claude Code IGNORES a
+      // project's permissions.allow / defaultMode until the workspace is trusted
+      // ("this workspace has not been trusted" → allow entries skipped), so a
+      // plain `claude -p` (no IS_SANDBOX bypass) would still be denied. A
+      // workspace bound via the office setup command is trusted by construction.
+      const claudeJson = path.join(os.homedir(), '.claude.json');
+      _mergeJson(claudeJson, (cfg) => {
+        const projects = _obj(cfg['projects']);
+        const proj = _obj(projects[root]);
+        proj['hasTrustDialogAccepted'] = true;
+        projects[root] = proj;
+        cfg['projects'] = projects;
+      }, log, 'Claude workspace trust');
     }
   }
 

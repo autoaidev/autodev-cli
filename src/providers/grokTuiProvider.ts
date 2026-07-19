@@ -357,6 +357,113 @@ function ensureGrokPickerDisabled(log: (m: string) => void): void {
   } catch { /* best effort — the poll-loop dismissal is the backstop */ }
 }
 
+/** Cap a string field to `max` chars, appending an ellipsis when truncated. */
+function _truncStr(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+/**
+ * Parse a grok tool_call `arguments` JSON string into a plain OBJECT suitable
+ * for the office `tool_input` field, which the pixel-office normalizer requires
+ * to be an array/object (a raw string is dropped). Long string values are
+ * truncated so a huge write/patch payload can't bloat the hook line. Non-JSON
+ * arguments fall back to `{ _raw: <truncated> }` so tool_input is still an object.
+ */
+function _parseToolInput(argsStr: string | undefined): Record<string, unknown> {
+  const raw = (argsStr ?? '').trim();
+  if (!raw) { return {}; }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      for (const k of Object.keys(obj)) {
+        if (typeof obj[k] === 'string') { obj[k] = _truncStr(obj[k] as string, 2000); }
+      }
+      return obj;
+    }
+    // JSON that isn't an object (number/array/string) — wrap it.
+    return { value: parsed };
+  } catch {
+    return { _raw: _truncStr(raw, 2000) };
+  }
+}
+
+/** Assistant tool_call record entry as persisted in grok's chat_history.jsonl. */
+interface GrokToolCall { id?: string; name?: string; arguments?: string }
+
+/**
+ * Scan NEW chat_history.jsonl records past `offset` and emit ONE rich hook event
+ * per grok tool call: `PreToolUse` when the assistant record's `tool_calls[]`
+ * entry first appears (carrying tool_name + parsed tool_input), then `PostToolUse`
+ * when its matching `tool_result` (by tool_call_id) lands (carrying tool_name +
+ * tool_input + tool_output.text). `pending` (keyed by tool_call id) survives
+ * across polls so a Pre/Post pair split over two reads is matched. Advances the
+ * offset only past COMPLETE lines so a half-written trailing record is re-read.
+ *
+ * grok's OWN native tools (Read/Edit/Bash/Glob/…) are what surface here. Office
+ * MCP tools (`mcp__…`) are skipped: the office already records those server-side
+ * (OfficeMcpController → provider 'mcp-operator'), so emitting them again would
+ * double-render the same call.
+ */
+function scanGrokToolEvents(
+  root: string,
+  file: string,
+  offset: number,
+  pending: Map<string, { name: string; input: Record<string, unknown> }>,
+): number {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return offset; }
+  if (size <= offset) { return offset; }
+  let raw = '';
+  try {
+    const len = size - offset;
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, offset); } finally { fs.closeSync(fd); }
+    raw = buf.toString('utf8');
+  } catch { return offset; }
+
+  const lastNl = raw.lastIndexOf('\n');
+  if (lastNl < 0) { return offset; } // no complete line yet
+  const complete = raw.slice(0, lastNl);
+  const newOffset = offset + Buffer.byteLength(complete, 'utf8') + 1; // +1 for the \n
+
+  for (const line of complete.split('\n')) {
+    const s = line.trim();
+    if (!s) { continue; }
+    let o: { type?: string; role?: string; tool_calls?: GrokToolCall[]; tool_call_id?: string; content?: unknown };
+    try { o = JSON.parse(s); } catch { continue; }
+    const kind = o.type || o.role;
+
+    if (kind === 'assistant' && Array.isArray(o.tool_calls)) {
+      for (const tc of o.tool_calls) {
+        const name = (tc?.name || '').trim();
+        if (!name) { continue; }
+        if (name.startsWith('mcp__')) { continue; } // office logs MCP tools server-side
+        const input = _parseToolInput(tc?.arguments);
+        _emitGrokHook(root, 'PreToolUse', { tool_name: name, tool_input: input });
+        if (tc?.id) { pending.set(tc.id, { name, input }); }
+      }
+      continue;
+    }
+
+    if (kind === 'tool_result') {
+      const id = o.tool_call_id;
+      if (!id) { continue; }
+      const p = pending.get(id);
+      if (!p) { continue; } // no matching Pre (e.g. resumed history / skipped mcp tool) — don't emit an empty event
+      pending.delete(id);
+      const outText = typeof o.content === 'string' ? o.content : (o.content == null ? '' : JSON.stringify(o.content));
+      _emitGrokHook(root, 'PostToolUse', {
+        tool_name: p.name,
+        tool_input: p.input,
+        tool_output: { text: _truncStr(outText, 2000) },
+      });
+    }
+  }
+  return newOffset;
+}
+
 /** Compact one-line marker for a grok tool call (for the live activity feed). */
 function formatToolCall(tc: { name?: string; arguments?: string }): string {
   const name = tc?.name || 'tool';
@@ -579,6 +686,14 @@ function runGrokTmuxTurn(
     let chatOffset = (() => { try { return fs.statSync(chatPath).size; } catch { return 0; } })();
     let chatEmitted = false;
 
+    // Rich tool-event stream: a SEPARATE offset over the same transcript so each
+    // grok tool call becomes one PreToolUse + one PostToolUse (payload-carrying)
+    // hook event in the office feed. `pendingTools` matches a Post to its Pre by
+    // tool_call id across polls. Seeded at the same size so only THIS turn's tools
+    // are emitted, not the resumed history.
+    let toolOffset = chatOffset;
+    const pendingTools = new Map<string, { name: string; input: Record<string, unknown> }>();
+
     // Submit the prompt.
     log(`Grok TUI: sending turn (${(() => { try { return fs.statSync(promptFilePath).size; } catch { return 0; } })()} bytes)`);
     pastePrompt(sess, promptFilePath);
@@ -631,6 +746,10 @@ function runGrokTmuxTurn(
         _lastActivityMs.set(root, Date.now());
       }
 
+      // 1c) Emit rich per-tool hook events (Pre/PostToolUse with payload) from the
+      //     SAME transcript, on an independent offset.
+      toolOffset = scanGrokToolEvents(root, chatPath, toolOffset, pendingTools);
+
       // 2) Snapshot for detection (also catches a mid-turn reauth prompt).
       const snap = capturePane(sess.name);
       if (REAUTH_MARKERS.test(snap)) {
@@ -669,6 +788,8 @@ function runGrokTmuxTurn(
           try { fs.appendFileSync(stdoutFile, tail.text, 'utf8'); } catch { /* ignore */ }
           emitLines(tail.text);
         }
+        // Flush any tool events written between the last poll and turn-end.
+        toolOffset = scanGrokToolEvents(root, chatPath, toolOffset, pendingTools);
         // Safety net: if the transcript path never resolved (grok layout change /
         // encoding drift) yet the pane clearly produced output, fall back to a
         // cleaned pane tail so the turn is never silently empty.

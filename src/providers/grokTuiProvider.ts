@@ -441,7 +441,10 @@ function scanGrokToolEvents(
         if (!name) { continue; }
         if (name.startsWith('mcp__')) { continue; } // office logs MCP tools server-side
         const input = _parseToolInput(tc?.arguments);
-        _emitGrokHook(root, 'PreToolUse', { tool_name: name, tool_input: input });
+        // tool_use_id lets the office pair this PreToolUse with its PostToolUse
+        // into ONE step card (useToolPairing keys on rawPayload.tool_use_id).
+        // Without it, Pre and Post render as two separate cards = duplicates.
+        _emitGrokHook(root, 'PreToolUse', { tool_name: name, tool_input: input, tool_use_id: tc?.id });
         if (tc?.id) { pending.set(tc.id, { name, input }); }
       }
       continue;
@@ -458,6 +461,7 @@ function scanGrokToolEvents(
         tool_name: p.name,
         tool_input: p.input,
         tool_output: { text: _truncStr(outText, 2000) },
+        tool_use_id: id, // pair with the PreToolUse above (see note there)
       });
     }
   }

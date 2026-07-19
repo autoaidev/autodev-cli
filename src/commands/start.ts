@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from '../sdk';
 import { CLI_VERSION } from '../version';
+import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
 
 const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui'] as const;
 
@@ -18,9 +19,29 @@ export function startCommand(program: Command): void {
     .option('--todo <file>', 'Path to TODO.md (relative to workspace)', 'TODO.md')
     .option('--once', 'Run until the TODO drains, then exit (default: poll forever)')
     .option('--session-name <name>', 'Display name for this session (opencode --title, copilot --name, shown in pixel-office)')
-    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string; once?: boolean; sessionName?: string }) => {
+    .option('--force', 'Start even if another loop already owns this workspace (bypass the duplicate-loop guard)')
+    .action(async (workspacePath: string | undefined, opts: { provider?: string; todo: string; once?: boolean; sessionName?: string; force?: boolean }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       const todoFile = path.resolve(cwd, opts.todo);
+
+      // ── Duplicate-loop guard ───────────────────────────────────────────────
+      // The running `autodev start` loop drops .autodev/ws-presence.lock
+      // ({pid, slug, ts}) once its WS connects and refreshes ts every heartbeat.
+      // If a DIFFERENT, still-alive loop already holds a FRESH lock for this
+      // workspace, a second loop would open a competing WS that (last-wins on the
+      // server's slug index) evicts the first every ~5s — a WebSocket flap. Bail
+      // out cleanly instead. --force bypasses (intentional takeover/restart). At
+      // boot we haven't written our own lock yet, so the guard only ever sees the
+      // OTHER loop's lock — never our own — and never kills a lone re-connecting
+      // loop.
+      if (!opts.force) {
+        const ownerPid = foreignLoopOwner(readPresenceLock(cwd));
+        if (ownerPid !== null) {
+          log.warn(`⚠ Another autodev loop (pid ${ownerPid}) already owns this workspace — exiting to avoid a duplicate connection.`);
+          log.gray('  Run `autodev start --force` to take over anyway.');
+          process.exit(0);
+        }
+      }
 
       // Parent-death watchdog: when a manager spawns this loop and sets
       // AUTODEV_EXIT_WITH_PARENT=1 (the desktop app does), exit if that parent

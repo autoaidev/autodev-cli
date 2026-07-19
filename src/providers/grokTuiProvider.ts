@@ -669,9 +669,13 @@ function runGrokTmuxTurn(
       // re-read the offset after startup so the splash/menu text isn't streamed
       // as "turn output".
       readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
-    } else {
-      _emitGrokHook(root, 'SessionStart', { source: 'resume' });
     }
+    // NOTE: when the session is REUSED (not justLaunched) we deliberately emit NO
+    // SessionStart. The grok process is persistent across turns — one tmux launch
+    // serves many turns — so a per-turn "startup"/SessionStart is semantically
+    // false and made the office Events feed show a phantom "startup" every turn,
+    // reading as "the grok agent restarts each time" when it does not. A turn
+    // boundary is already conveyed by the prompt/task and the tool events.
 
     // Clean-output source: grok's structured transcript. Seed the offset at the
     // current size so we emit only THIS turn's assistant records, not the

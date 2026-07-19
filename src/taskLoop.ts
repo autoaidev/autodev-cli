@@ -196,6 +196,11 @@ export class TaskLoopRunner {
   /** Dispatch attempt counter per task key (id or text). After 3 failed attempts the
    *  loop force-marks the task done so it doesn't block the queue indefinitely. */
   private _taskAttempts = new Map<string, number>();
+  /** Task keys (id or text) flagged as provider hard-failures this session.
+   *  These must NOT be auto-completed by the give_up / stranded-[~] heuristics —
+   *  a blocked task stays [~] + reported failed until it is retried. Cleared when
+   *  a fresh [ ] dispatch of the same task begins (provider presumably recovered). */
+  private _blockedTasks = new Set<string>();
   /** Counts completed tasks since the last auto-compact run. */
   private _autoCompactCounter = 0;
   /** Counts completed tasks since the last session reset. */
@@ -304,6 +309,7 @@ export class TaskLoopRunner {
     this._iterations = 0;
     this._compactedTaskLines.clear();
     this._taskAttempts.clear();
+    this._blockedTasks.clear();
     this._autoCompactCounter = 0;
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
@@ -1294,7 +1300,11 @@ export class TaskLoopRunner {
             if (cleanExit) {
               this._cb?.log(`⏳ opencode-cli exited cleanly with [~] task — waiting for external response…`);
             } else {
-              const stranded = tasks.filter(t => t.status === 'in-progress');
+              // Exclude tasks flagged as provider hard-failures: those were left
+              // [~] ON PURPOSE to signal "blocked / needs attention". Auto-marking
+              // them done here would re-introduce the exact false-green we fixed.
+              const stranded = tasks.filter(t =>
+                t.status === 'in-progress' && !this._blockedTasks.has(t.id ?? t.text));
               for (const t of stranded) {
                 // Auto-mark as [x] done rather than resetting to [ ].
                 // Resetting to [ ] causes an infinite loop: the agent picks it
@@ -1331,6 +1341,10 @@ export class TaskLoopRunner {
         // If the agent hasn't marked it done after 3 attempts, force-mark it
         // ourselves and move on so the queue doesn't get stuck.
         const taskKey = task.id ?? task.text;
+        // A fresh [ ] dispatch means this task is being retried — the provider
+        // has presumably recovered, so clear any prior hard-failure flag and let
+        // it complete (or fail) honestly on its own merits this time.
+        this._blockedTasks.delete(taskKey);
         const attempts = (this._taskAttempts.get(taskKey) ?? 0) + 1;
         this._taskAttempts.set(taskKey, attempts);
         const maxAttempts = settings.maxTaskAttempts ?? 3;
@@ -2453,9 +2467,60 @@ export class TaskLoopRunner {
           }
         }
 
-        const decision = exitHandler?.decide() ?? { kind: 'remind' as const };
+        // opencode's SDK path surfaces a session.error as an `[ERROR] …` line in
+        // its stdout capture yet still writes exit-code 0 — so the process exit
+        // code alone can't see it. Pass that sentinel through so a session.error
+        // ("No model available" on a copilot-backed free plan, etc.) is treated
+        // as the provider hard-failure it is, not a completed task.
+        const stdoutError = ((isOpenCodeCli || isOpencodeSdk) && /\[ERROR\]/.test(exitStdout))
+          ? 'session-error'
+          : null;
+        const decision = exitHandler?.decide({ exitedNonZero, stdoutError })
+          ?? { kind: 'remind' as const };
 
         if (decision.kind === 'done') { return; }
+
+        if (decision.kind === 'hard_fail') {
+          // The PROVIDER hard-failed (reauth / session error / watchdog-no-output
+          // / crash / model unavailable) and produced no real work. Do NOT mark
+          // the task [x] done — that would report an outage as SUCCESS. Instead
+          // flag it [~] blocked, report an honest failure to the office (task_fail
+          // → TASK_STATE_FAILED, "needs attention") and record a StopFailure hook
+          // so external monitors see it too. The task stays claimable/retryable.
+          const reason = decision.reason;
+          this._failedCount++;
+          const taskKey = task.id ?? task.text;
+          this._blockedTasks.add(taskKey);
+          // Drop the attempt counter so a later retry gets a clean run rather
+          // than being force-marked done on its first re-dispatch.
+          this._taskAttempts.delete(taskKey);
+          this._cb?.log(`⛔ Provider hard-failure (${reason}) — NOT marking done; flagging task as blocked/needs-attention: ${discordLabel(task.text)}`);
+          await todoWriter.markInProgress(todoPath, task).catch(() => {});
+          const duration = Math.round((Date.now() - taskStartTime) / 1000);
+          const errText = `provider hard-failure: ${reason} (task not completed — needs attention)`;
+          this._notifyWebhook('task_fail', {
+            iteration: this._iterations,
+            task:      { text: task.text, id: task.id },
+            duration,
+            error:     errText,
+            reason,
+            workDir:   this._workspaceRoot,
+            gitRepo:   this._gitRepo,
+            gitBranch: this._gitBranch,
+          });
+          this._notifyDiscord(`⛔ **Provider failure — task blocked (not done):**\n${discordLabel(task.text)}\n\`${reason}\``);
+          if (this._workspaceRoot) {
+            appendHookEventLine(this._workspaceRoot, {
+              hook_event_name: 'StopFailure', event_type: 'stop_failure',
+              provider: activeProvider, cwd: this._workspaceRoot, error: reason,
+              title: 'Provider failure', message: errText, tool_name: '',
+              timestamp: new Date().toISOString(),
+            });
+          }
+          cleanup();
+          resolve();
+          return;
+        }
 
         if (decision.kind === 'deferred') {
           this._cb?.log(`↩️ CLI exited with task [~] deferred — moving to next pending task: ${discordLabel(task.text)}`);

@@ -102,6 +102,11 @@ export function applyWsUrl(cwd: string, wsUrl: string): void {
   // Same as applySetupUrl: write the office MCP server as part of binding.
   try {
     ConfigManager.syncProjectMcpServers(cwd, (m) => log.gray(`  ${m}`));
+    // Grant the managed MCP tools (permissions.allow) so a copy-paste
+    // `claude -p` / MCP-client agent can OPERATE, not just connect — the bind is
+    // often the only setup step before the agent runs (no `autodev start`/IDE
+    // activation to apply permissions later).
+    ConfigManager.applyClaudePermissions(cwd, (m) => log.gray(`  ${m}`));
   } catch (e) {
     log.warn(`MCP config sync skipped: ${(e as Error).message}`);
   }
@@ -157,6 +162,11 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
   // `autodev connect` command already does.
   try {
     ConfigManager.syncProjectMcpServers(cwd, (m) => log.gray(`  ${m}`));
+    // Grant the managed MCP tools (permissions.allow) so a copy-paste
+    // `claude -p` / MCP-client agent can OPERATE, not just connect — the bind is
+    // often the only setup step before the agent runs (no `autodev start`/IDE
+    // activation to apply permissions later).
+    ConfigManager.applyClaudePermissions(cwd, (m) => log.gray(`  ${m}`));
   } catch (e) {
     log.warn(`MCP config sync skipped: ${(e as Error).message}`);
   }

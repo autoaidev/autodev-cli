@@ -53,14 +53,23 @@ export class ConfigManager {
    * strip any stale "*" an older version left in `allow`.
    */
   static applyClaudePermissions(root?: string, log?: (m: string) => void): void {
+    // Managed MCP servers whose tools an agent should always be allowed to call.
+    const managedMcp = [...new Set([...DEFAULT_MCP_SERVERS.map(s => s.name), 'memory', 'pixel-office'])];
+    const managedAllows = managedMcp.map(n => `mcp__${n}`);
     const setBypass = (cfg: Record<string, unknown>) => {
       const perms = _obj(cfg['permissions']);
       perms['defaultMode'] = 'bypassPermissions';
-      // Remove the invalid wildcard allow rule if present; keep any real entries.
-      if (Array.isArray(perms['allow'])) {
-        const cleaned = (perms['allow'] as unknown[]).filter((a) => a !== '*');
-        if (cleaned.length) { perms['allow'] = cleaned; } else { delete perms['allow']; }
-      }
+      // defaultMode:bypassPermissions is NOT honored by a non-interactive
+      // `claude -p` / MCP-client session without an interactive trust step, so a
+      // copy-paste MCP agent could CONNECT but had its office tool calls declined
+      // (e.g. mcp__pixel-office__check_messages). Add EXPLICIT per-server allow
+      // rules for the managed MCP servers — those ARE honored in default mode.
+      // `mcp__<server>` grants all tools of that server and is VALID (unlike the
+      // "*" wildcard, which Claude rejects — we still strip any stale "*").
+      const existing = Array.isArray(perms['allow'])
+        ? (perms['allow'] as unknown[]).filter((a) => a !== '*').map(String)
+        : [];
+      perms['allow'] = [...new Set([...existing, ...managedAllows])];
       cfg['permissions'] = perms;
       return perms;
     };

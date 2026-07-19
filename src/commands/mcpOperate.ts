@@ -9,6 +9,7 @@ import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
 import { OfficeSocket } from '../officeSocket';
+import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
 import { handleFbRequest } from '../fileBrowser';
 import { handleGitRequest } from '../git/gitRequest';
 import { VncSessionManager } from '../vnc/manager';
@@ -294,33 +295,34 @@ export function mcpOperateCommand(program: Command): void {
         }
       };
 
-      const startSocket = async (): Promise<void> => {
-        if (opts.socket === false) { return; }
-        // Auto-skip the presence socket when a co-located `autodev start` loop
-        // already owns this slug's live connection (it drops ws-presence.lock).
-        // A second socket is last-wins on the server: it would STEAL the slug
-        // from the loop and instant messages would land in this bridge's
-        // wait_for_events — which nothing reads — and vanish. This makes the loop
-        // vs bridge split safe even if someone forgets --no-socket. HTTP tools
-        // still work fully; only presence/steer delivery is deferred to the loop.
-        try {
-          const raw = fs.readFileSync(path.join(cwd, '.autodev', 'ws-presence.lock'), 'utf8');
-          const lock = JSON.parse(raw) as { pid?: number; ts?: number };
-          const pidAlive = typeof lock.pid === 'number' && ((): boolean => {
-            try { process.kill(lock.pid, 0); return true; } catch { return false; }
-          })();
-          const fresh = typeof lock.ts === 'number' && (Date.now() - lock.ts) < 3 * 60_000;
-          if (pidAlive && fresh) {
-            process.stderr.write('autodev mcp-operate: a loop already holds this slug’s presence socket — staying poll-only (HTTP tools still work).\n');
-            return;
-          }
-        } catch { /* no lock / unreadable → this bridge owns presence */ }
-        const wsUrl = officeWsUrl(endpoint);
-        if (!wsUrl) { return; }
-        // The slug is needed for the ?endpoint= WS auth. Prefer the workspace
-        // binding — it works for EVERY endpoint, including the A2A one
-        // (…/api/mcp/a2a), which has no whoami tool. Fall back to whoami only for a
-        // raw --url/--key invocation with no bound settings.
+      // ── Presence socket lifecycle (runtime-driven, self-healing) ─────────────
+      // Whether the bridge holds the presence socket is decided at RUNTIME from
+      // ACTUAL loop presence, NOT a static config flag. A co-located `autodev
+      // start` loop drops+refreshes .autodev/ws-presence.lock; while a live loop
+      // owns the slug the bridge stays poll-only — the loop owns presence + steer
+      // delivery, and a 2nd (last-wins) socket would steal the slug and swallow the
+      // instant messages the loop is meant to deliver. With NO live loop the bridge
+      // keeps its socket = the MCP-only agent's only presence signal (so it shows
+      // online). A periodic reconcile (set up after the lifecycle flags below)
+      // yields or re-opens as loops appear/die, so a grok-respawn race self-heals in
+      // seconds instead of flapping forever. Liveness uses the SAME rules as
+      // presenceGuard (foreignLoopOwner: pid alive + ts fresh) so the loop and the
+      // bridge always agree on "is a loop alive".
+      const wsUrl = officeWsUrl(endpoint);
+      let presenceSlug: string | null = null;
+      let openingSocket = false;
+
+      // True when a DIFFERENT, still-alive loop currently owns this workspace's
+      // presence (fresh ws-presence.lock with a live pid) — then the bridge must
+      // NOT hold a socket. Null → no owner → the bridge may own presence itself.
+      const loopOwnsPresence = (): boolean => foreignLoopOwner(readPresenceLock(cwd)) !== null;
+
+      // Resolve the office slug once (workspace binding preferred — it works for
+      // EVERY endpoint including the A2A one, which has no whoami tool; whoami only
+      // as a fallback for a raw --url/--key invocation). Cached so a socket re-open
+      // after a loop exits never re-runs whoami.
+      const resolveSlug = async (): Promise<string | null> => {
+        if (presenceSlug) { return presenceSlug; }
         let slug = (settings.webhookSlug || '').trim();
         if (!slug) {
           try {
@@ -329,9 +331,11 @@ export function mcpOperateCommand(program: Command): void {
             slug = (text.match(/slug:\s*([a-z0-9][a-z0-9-]*)/i)?.[1]) ?? '';
           } catch { /* whoami failed — skip presence, bridge still works */ }
         }
-        if (!slug) { process.stderr.write('autodev mcp-operate: could not resolve slug — presence socket disabled.\n'); return; }
+        presenceSlug = slug || null;
+        return presenceSlug;
+      };
 
-        socket = new OfficeSocket(wsUrl, key, slug, {
+      const buildSocket = (slug: string): OfficeSocket => new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),
           meta: {
             provider: 'mcp-operator', cliVersion: CLI_VERSION,
@@ -425,10 +429,38 @@ export function mcpOperateCommand(program: Command): void {
               triggerWork();
             }
           },
-        });
-        socket.start();
+      });
+
+      // Open the presence socket UNLESS: manually disabled (--no-socket), the
+      // bridge went dormant (superseded by a newer bridge) or is shutting down, we
+      // already hold a socket, an open is in flight, or a live loop already owns
+      // presence. Guards are re-checked AFTER the async slug resolve (a loop may
+      // appear, or we may be superseded, while whoami is in flight).
+      const ensurePresenceSocket = async (): Promise<void> => {
+        if (opts.socket === false || superseded || closed) { return; }
+        if (socket || openingSocket) { return; }
+        if (!wsUrl || loopOwnsPresence()) { return; }
+        openingSocket = true;
+        try {
+          const slug = await resolveSlug();
+          if (!slug) { process.stderr.write('autodev mcp-operate: could not resolve slug — presence socket disabled.\n'); return; }
+          // opts.socket can't change across the await; re-check the mutable guards.
+          if (superseded || closed || socket || loopOwnsPresence()) { return; }
+          socket = buildSocket(slug);
+          socket.start();
+          process.stderr.write(`autodev mcp-operate: no live loop owns slug '${slug}' — opening presence socket (this bridge is presence).\n`);
+        } finally { openingSocket = false; }
       };
-      void startSocket();
+
+      // A live loop has (re)taken the slug → drop our presence socket so the loop
+      // owns presence + steer delivery (its socket is last-wins on the server
+      // anyway). HTTP tools keep working; presence is deferred to the loop.
+      const yieldPresenceToLoop = (): void => {
+        if (!socket) { return; }
+        process.stderr.write('autodev mcp-operate: a live loop now owns this slug — closing bridge presence socket (loop delivers steers).\n');
+        try { socket.destroy(); } catch { /* ignore */ }
+        socket = null;
+      };
 
       // ── Forward the client session's OWN tool activity to the office ─────────
       // A loop agent (`autodev start`) tails .autodev/hooks-events.jsonl and ships
@@ -622,6 +654,26 @@ export function mcpOperateCommand(program: Command): void {
         try { socket?.destroy(); } catch { /* ignore */ }
       }, 1500);
       supersedeTimer.unref?.();
+
+      // Kick off presence now, then reconcile it with ACTUAL loop liveness every
+      // few seconds so the loop↔bridge split is always driven by runtime state, not
+      // a guessed config flag:
+      //   • a live loop owns the slug  → yield (close our socket; loop delivers steers)
+      //   • no live loop + we're mcp-only → (re)open so presence returns
+      // The decision is a pure function of loop liveness (stable while the loop
+      // refreshes its lock every ~25s), so it settles instead of oscillating: a
+      // grok-respawned bridge that lost the race and opened a socket closes it
+      // within one tick once the loop's lock is seen; a loop that dies frees the
+      // slug and the bridge re-opens.
+      void ensurePresenceSocket();
+      const presenceReconcileTimer = setInterval(() => {
+        if (closed || opts.socket === false) { return; }
+        // `superseded` bridges already dropped their socket and must never re-open.
+        if (superseded) { return; }
+        if (loopOwnsPresence()) { yieldPresenceToLoop(); }
+        else { void ensurePresenceSocket(); }
+      }, 4000);
+      presenceReconcileTimer.unref?.();
 
       startHookForwarding();
 

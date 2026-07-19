@@ -5,6 +5,8 @@ import { log } from '../logger';
 import { AutoDev, LoopStartOptions } from '../sdk';
 import { CLI_VERSION } from '../version';
 import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
+import { TODO_TEMPLATE } from './init';
+import { installHooks, areHooksInstalled } from '../hooksManager';
 
 const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui'] as const;
 
@@ -85,10 +87,21 @@ export function startCommand(program: Command): void {
         process.exit(1);
       }
 
+      // Auto-scaffold instead of bailing: a workspace bound to an office (e.g. a
+      // freshly-created agent) often has the .autodev/ binding but no TODO.md, and
+      // exiting here left it dead. Create a starter TODO.md (+ ensure hooks) so the
+      // loop starts, connects, and idles/polls for office tasks. Only the missing
+      // pieces are created; an existing TODO.md is never touched.
       if (!fs.existsSync(todoFile)) {
-        log.error(`No TODO.md found at ${todoFile}`);
-        log.info('Run `autodev init` to create a starter TODO.md');
-        process.exit(1);
+        try {
+          fs.writeFileSync(todoFile, TODO_TEMPLATE, 'utf8');
+          if (!areHooksInstalled('project', cwd)) { installHooks('project', cwd); }
+          log.info(`No TODO.md found — created a starter scaffold at ${todoFile}`);
+        } catch (e) {
+          log.error(`No TODO.md at ${todoFile} and could not create one: ${(e as Error).message}`);
+          log.info('Run `autodev init` to create a starter TODO.md');
+          process.exit(1);
+        }
       }
 
       log.section('🤖 AutoAIDev — Autonomous Task Loop');

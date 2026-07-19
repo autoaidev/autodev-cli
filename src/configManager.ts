@@ -262,14 +262,17 @@ export class ConfigManager {
         // loop's provider never reads) and vanish — AND the two sockets then ping-pong
         // the slug, flapping the connection every few seconds.
         //
-        // The bridge DOES auto-detect a live loop (ws-presence.lock, 1.4.72) and skip
-        // its socket — but grok RESPAWNS the bridge, and a respawned instance can lose
-        // the race and open a socket anyway, causing exactly that flap. So --no-socket
-        // stays the RELIABLE guard for loop agents; the auto-detect is only a safety
-        // net for a manual mcp-operate that forgets the flag. An MCP-only agent (no
-        // loop, no lock) keeps its socket = presence.
+        // We DON'T bake --no-socket into the managed config anymore. It used to be
+        // added for every non-mcpOnly agent, but `mcpOnly` is a STATIC guess (only
+        // `autodev connect --mcp-only` ever sets it) — an agent bound via `autodev
+        // setup`/the office "MCP client" flow never set it, so the bridge got
+        // --no-socket, never opened its presence socket, and showed OFFLINE even
+        // though it was connected. Instead the bridge decides at RUNTIME from actual
+        // loop presence (ws-presence.lock): if a live loop owns the slug it stays
+        // poll-only (no flap); if there's no loop it keeps its socket = presence, and
+        // it self-heals if a loop later appears/dies. The --no-socket CLI option still
+        // exists as a manual override, we just don't hard-code it as the default guard.
         const opArgs = ['mcp-operate', '.'];
-        if (!s.mcpOnly) { opArgs.push('--no-socket'); }
         // Surface each ENABLED interactive capability as an explicit arg, so the
         // managed .mcp.json is self-documenting and mcp-operate serves the feature
         // even if it couldn't read settings. Driven by the workspace settings —

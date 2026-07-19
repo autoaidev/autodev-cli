@@ -31,7 +31,7 @@ import {
  *    this reason — the parser (/^\s*(?:-\s*)?\[\s+\]\s*(.+)$/) is whitespace-
  *    tolerant, so an example checkbox is executed even indented inside a comment.
  */
-const TODO_TEMPLATE = `# TODO
+export const TODO_TEMPLATE = `# TODO
 
 ## Todo
 

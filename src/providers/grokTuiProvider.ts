@@ -468,19 +468,6 @@ function scanGrokToolEvents(
   return newOffset;
 }
 
-/** Compact one-line marker for a grok tool call (for the live activity feed). */
-function formatToolCall(tc: { name?: string; arguments?: string }): string {
-  const name = tc?.name || 'tool';
-  let arg = '';
-  try {
-    const a = JSON.parse(tc?.arguments || '{}') as Record<string, unknown>;
-    const cand = a.target_file ?? a.file_path ?? a.path ?? a.command ?? a.query ?? a.message ?? a.to ?? '';
-    if (typeof cand === 'string') { arg = cand; }
-  } catch { /* non-JSON args — just show the name */ }
-  arg = arg.replace(/\s+/g, ' ').trim().slice(0, 80);
-  return `» ${name}${arg ? ` ${arg}` : ''}`;
-}
-
 /**
  * Read new chat_history.jsonl records past `offset` and render only the
  * user-facing parts: assistant prose + compact tool-call markers. Skips
@@ -514,7 +501,10 @@ function drainChatHistory(file: string, offset: number): { text: string; offset:
     if ((o.type || o.role) !== 'assistant') { continue; }
     const c = (o.content || '').trim();
     if (c) { out += c + '\n'; }
-    for (const tc of o.tool_calls || []) { out += formatToolCall(tc) + '\n'; }
+    // NOTE: tool calls are NOT appended as "» tool" text markers here — they are
+    // emitted as proper PreToolUse/PostToolUse hook events by scanGrokToolEvents,
+    // which the office renders as (richer, paired) step cards. Emitting them here
+    // too made every grok tool call appear TWICE (a card AND a text line).
   }
   return { text: out, offset: newOffset };
 }

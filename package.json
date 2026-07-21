@@ -1,6 +1,6 @@
 {
   "name": "autodev-cli",
-  "version": "1.4.86",
+  "version": "1.4.87",
   "description": "AutoAIDev CLI — autonomous AI task loop with VS Code / Cursor launcher",
   "license": "MIT",
   "bin": {

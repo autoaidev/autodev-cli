@@ -129,16 +129,18 @@ function proxy(endpoint: string, key: string, body: unknown): Promise<Record<str
 export function mcpOperateCommand(program: Command): void {
   program
     .command('mcp-operate [path]')
-    .description('Run a stdio MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Add it with: claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <url>')
+    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <url>')
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
+    .option('--http-port <port>', 'Run a persistent MCP-over-HTTP (Streamable HTTP) server on this port instead of stdio. Point an opencode `type: remote` MCP at http://<host>:<port>/mcp.', (v) => parseInt(v, 10))
+    .option('--http-host <host>', 'Bind address for --http-port (default 127.0.0.1).')
     .option('--no-socket', 'Do not open the presence WebSocket (stay on poll-based presence only).')
     .option('--file-browser', 'Serve the office file browser for this MCP-only agent (read/write files in the workspace over the office file browser).')
     .option('--git', 'Serve the office git panel for this MCP-only agent (status/diff/stage/commit/branch in the workspace over the office git panel).')
     .option('--vnc', 'Serve office VNC remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
     .option('--rdp', 'Serve office RDP remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
     .option('--mcp-update', 'Honor mcp_update frames: sync remote-supplied MCP config into the workspace (relaunch to pick up spawn changes).')
-    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean; git?: boolean; vnc?: boolean; rdp?: boolean; mcpUpdate?: boolean }) => {
+    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean; git?: boolean; vnc?: boolean; rdp?: boolean; mcpUpdate?: boolean; httpPort?: number; httpHost?: string }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       let settings = loadSettingsForRoot(cwd);
       const endpoint = opts.url || officeMcpUrl(settings.serverBaseUrl);
@@ -800,26 +802,27 @@ export function mcpOperateCommand(program: Command): void {
         }
       };
 
-      rl.on('line', async (line: string) => {
-        const t = line.trim();
-        if (!t) { return; }
-        let req: { id?: unknown; method?: string };
-        try { req = JSON.parse(t); } catch { return; }
-
+      // ── Single JSON-RPC request path (shared by stdio + HTTP) ────────────────
+      // Process ONE inbound MCP message and return the response object to send
+      // back, or null for a notification / message with no reply. Both the stdio
+      // line reader and the HTTP handler call this, so wait_for_events blocking,
+      // tools/list augmentation, and notification forwarding all live in ONE place
+      // regardless of transport.
+      const dispatch = async (req: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown> | null> => {
         // Notifications (no id) are one-way — nothing to reply. Forward the
-        // handshake ones opportunistically but never write a response for them.
+        // handshake ones opportunistically but never return a response for them.
         if (req.id === undefined || req.id === null) {
           if (typeof req.method === 'string' && req.method.startsWith('notifications/')) {
             // Fire-and-forget over the socket when ready, else HTTP.
-            if (wsReady()) { socket!.sendFrame({ type: 'operator_request', method: req.method, params: (req as { params?: unknown }).params ?? {} }); }
+            if (wsReady()) { socket!.sendFrame({ type: 'operator_request', method: req.method, params: req.params ?? {} }); }
             else { proxy(endpoint, key, req).catch(() => { /* best effort */ }); }
           }
-          return;
+          return null;
         }
 
         // Local tool: wait_for_events — stream office activity from the socket
         // instead of proxying to the server. Blocks until an event (or timeout).
-        const params = (req as { params?: { name?: string; arguments?: { timeout_seconds?: unknown } } }).params;
+        const params = req.params as { name?: string; arguments?: { timeout_seconds?: unknown } } | undefined;
         if (req.method === 'tools/call' && params?.name === 'wait_for_events') {
           inflight++;
           try {
@@ -829,9 +832,8 @@ export function mcpOperateCommand(program: Command): void {
             const text = events.length
               ? `Office activity (${events.length} event${events.length === 1 ? '' : 's'}):\n${events.join('\n')}\n\nUse get_events / check_messages for detail, then call wait_for_events again to keep listening.`
               : `No new events in ${secs}s. Call wait_for_events again to keep listening.`;
-            send({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text }] } });
+            return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text }] } };
           } finally { inflight--; maybeExit(); }
-          return;
         }
 
         inflight++;
@@ -842,15 +844,91 @@ export function mcpOperateCommand(program: Command): void {
             const result = res['result'] as { tools?: unknown[] } | undefined;
             if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL); }
           }
-          send(res);
+          return res;
         } catch (e) {
-          send({ jsonrpc: '2.0', id: req.id, error: { code: -32603, message: 'proxy error: ' + ((e as Error)?.message ?? String(e)) } });
+          return { jsonrpc: '2.0', id: req.id, error: { code: -32603, message: 'proxy error: ' + ((e as Error)?.message ?? String(e)) } };
         } finally {
           inflight--;
           maybeExit();
         }
-      });
+      };
 
-      rl.on('close', () => { closed = true; maybeExit(); });
+      // ── Transport: persistent HTTP (Streamable HTTP) OR stdio ────────────────
+      // opencode's `type: remote` MCP client (MCP.connectRemote) tries Streamable
+      // HTTP first — POST JSON-RPC to the configured `url`, Accept
+      // `application/json, text/event-stream` — then falls back to legacy SSE. It
+      // also opens a standalone GET SSE stream after `initialized` but TOLERATES a
+      // 405 there. So the persistent sidecar needs only: POST → single JSON-RPC
+      // reply as `application/json` (202 for notification-only bodies), GET → 405
+      // (no server-initiated stream; office activity reaches the model via the
+      // wait_for_events tool, exactly as over stdio). This lets ONE always-on
+      // bridge serve both `opencode serve` and every `opencode run` with no
+      // stdio-spawn dependency and no flap.
+      if (opts.httpPort) {
+        const httpHost = opts.httpHost || '127.0.0.1';
+        const sessionId = crypto.randomUUID();
+        const httpServer = http.createServer((hreq, hres) => {
+          // No standalone server→client SSE stream: the client tolerates 405 on
+          // the GET it opens after `initialized` (if(status===405)return).
+          if (hreq.method === 'GET') { hres.writeHead(405, { 'Content-Type': 'text/plain' }); hres.end('Method Not Allowed'); return; }
+          // Session teardown — acknowledge and move on (stateless bridge).
+          if (hreq.method === 'DELETE') { hres.writeHead(204); hres.end(); return; }
+          if (hreq.method !== 'POST') { hres.writeHead(405, { 'Content-Type': 'text/plain' }); hres.end('Method Not Allowed'); return; }
+          let body = '';
+          hreq.on('data', (c) => { body += c; if (body.length > 8 * 1024 * 1024) { hreq.destroy(); } });
+          hreq.on('end', async () => {
+            let parsed: unknown;
+            try { parsed = JSON.parse(body); } catch {
+              hres.writeHead(400, { 'Content-Type': 'application/json' });
+              hres.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
+              return;
+            }
+            const batch = Array.isArray(parsed);
+            const msgs = (batch ? parsed : [parsed]) as Array<{ id?: unknown; method?: string; params?: unknown }>;
+            const isInit = msgs.some((m) => m && m.method === 'initialize');
+            const responses: Record<string, unknown>[] = [];
+            for (const m of msgs) {
+              try { const r = await dispatch(m); if (r) { responses.push(r); } }
+              catch (e) {
+                if (m && m.id !== undefined && m.id !== null) {
+                  responses.push({ jsonrpc: '2.0', id: m.id, error: { code: -32603, message: 'bridge error: ' + ((e as Error)?.message ?? String(e)) } });
+                }
+              }
+            }
+            // Notification/response-only body → 202 Accepted, no content.
+            if (responses.length === 0) {
+              hres.writeHead(202, isInit ? { 'Mcp-Session-Id': sessionId } : {});
+              hres.end();
+              return;
+            }
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (isInit) { headers['Mcp-Session-Id'] = sessionId; }
+            hres.writeHead(200, headers);
+            hres.end(JSON.stringify(batch ? responses : responses[0]));
+          });
+          hreq.on('error', () => { try { hres.writeHead(400); hres.end(); } catch { /* ignore */ } });
+        });
+        httpServer.on('error', (e) => {
+          process.stderr.write(`autodev mcp-operate: HTTP server error — ${e instanceof Error ? e.message : String(e)}\n`);
+          process.exit(1);
+        });
+        httpServer.listen(opts.httpPort, httpHost, () => {
+          process.stderr.write(`autodev mcp-operate: persistent Streamable-HTTP MCP listening on http://${httpHost}:${opts.httpPort}/mcp (point an opencode \`type: remote\` MCP at this URL).\n`);
+        });
+        // No stdin client in HTTP mode — do NOT read/close on stdin (a detached
+        // sidecar has stdin closed, which would otherwise trip maybeExit). The
+        // HTTP server keeps the process alive.
+        rl.close();
+      } else {
+        rl.on('line', async (line: string) => {
+          const t = line.trim();
+          if (!t) { return; }
+          let req: { id?: unknown; method?: string; params?: unknown };
+          try { req = JSON.parse(t); } catch { return; }
+          const resp = await dispatch(req);
+          if (resp) { send(resp); }
+        });
+        rl.on('close', () => { closed = true; maybeExit(); });
+      }
     });
 }

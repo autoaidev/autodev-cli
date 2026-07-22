@@ -32,8 +32,12 @@ import { buildNotificationEvent } from '../core/liveNarration';
  * single command — no remote-server approval friction, and the key/url stay in
  * autodev config instead of being pasted into the client.
  *
- *   claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <…/api/office-mcp>
+ *   claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <…/api/office-mcp>
  *   # or, inside a bound workspace, just:  autodev mcp-operate
+ *
+ * Name each server pixel-office-<agent-slug> (not a bare "pixel-office"): one MCP
+ * client / Claude session can then operate SEVERAL office characters at once, each
+ * under its own server name, instead of every agent colliding on one shared name.
  */
 
 /** Derive the operator-MCP URL from a bound workspace's serverBaseUrl. */
@@ -130,7 +134,7 @@ function proxy(endpoint: string, key: string, body: unknown): Promise<Record<str
 export function mcpOperateCommand(program: Command): void {
   program
     .command('mcp-operate [path]')
-    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office -- autodev mcp-operate --key <api_key> --url <url>')
+    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <url> (per-agent name lets one client run several characters at once)')
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
     .option('--http-port <port>', 'Run a persistent MCP-over-HTTP (Streamable HTTP) server on this port instead of stdio. Point an opencode `type: remote` MCP at http://<host>:<port>/mcp.', (v) => parseInt(v, 10))

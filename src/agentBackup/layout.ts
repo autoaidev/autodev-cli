@@ -36,6 +36,7 @@ export const WORKSPACE_DIRS: readonly string[] = [
   '.autodev',
   path.posix.join('media', 'profile'),
   path.posix.join('media', 'skills'),
+  path.posix.join('.claude', 'skills'),
 ];
 
 /**

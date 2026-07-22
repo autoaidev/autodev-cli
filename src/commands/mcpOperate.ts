@@ -15,6 +15,7 @@ import { handleGitRequest } from '../git/gitRequest';
 import { VncSessionManager } from '../vnc/manager';
 import { RdpSessionManager } from '../rdp/manager';
 import { saveProjectUserMcp, sanitizeRemoteMcpEntries } from '../core/projectMcp';
+import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from '../core/projectSkills';
 import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 import { buildNotificationEvent } from '../core/liveNarration';
@@ -140,7 +141,8 @@ export function mcpOperateCommand(program: Command): void {
     .option('--vnc', 'Serve office VNC remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
     .option('--rdp', 'Serve office RDP remote-desktop sessions for this MCP-only agent (input forwarding + framebuffer streaming).')
     .option('--mcp-update', 'Honor mcp_update frames: sync remote-supplied MCP config into the workspace (relaunch to pick up spawn changes).')
-    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean; git?: boolean; vnc?: boolean; rdp?: boolean; mcpUpdate?: boolean; httpPort?: number; httpHost?: string }) => {
+    .option('--skill-update', 'Honor skill_update frames: sync remote-supplied Claude Code skills into the workspace (.claude/skills/<slug>/SKILL.md; live-reloads, no relaunch).')
+    .action(async (workspacePath: string | undefined, opts: { url?: string; key?: string; socket?: boolean; fileBrowser?: boolean; git?: boolean; vnc?: boolean; rdp?: boolean; mcpUpdate?: boolean; skillUpdate?: boolean; httpPort?: number; httpHost?: string }) => {
       const cwd = workspacePath ? path.resolve(workspacePath) : process.cwd();
       let settings = loadSettingsForRoot(cwd);
       const endpoint = opts.url || officeMcpUrl(settings.serverBaseUrl);
@@ -153,6 +155,7 @@ export function mcpOperateCommand(program: Command): void {
       let vncEnabled         = opts.vnc === true         || settings.vncEnabled === true;
       let rdpEnabled         = opts.rdp === true         || settings.rdpEnabled === true;
       let mcpUpdateEnabled   = opts.mcpUpdate === true   || settings.mcpUpdateEnabled === true;
+      let skillUpdateEnabled = opts.skillUpdate === true || settings.skillUpdateEnabled === true;
 
       if (!endpoint || !key) {
         process.stderr.write('autodev mcp-operate: need --url and --key (or run inside a workspace bound to an office).\n');
@@ -262,6 +265,7 @@ export function mcpOperateCommand(program: Command): void {
         vncEnabled         = opts.vnc === true         || settings.vncEnabled === true;
         rdpEnabled         = opts.rdp === true         || settings.rdpEnabled === true;
         mcpUpdateEnabled   = opts.mcpUpdate === true   || settings.mcpUpdateEnabled === true;
+        skillUpdateEnabled = opts.skillUpdate === true || settings.skillUpdateEnabled === true;
         applyRemoteDesktopSettings();
       };
 
@@ -294,6 +298,33 @@ export function mcpOperateCommand(program: Command): void {
           logErr('✅ MCP config synced to .mcp.json, opencode.json, .vscode/mcp.json — relaunch `autodev mcp-operate` to spawn any newly-added MCP servers.');
         } catch (err) {
           logErr(`⚠️ MCP update failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
+      // ── Live skill reload (skill_update frame) ───────────────────────────────
+      // The office pushes the agent's FULL effective skill set. Skills live-reload
+      // (Claude re-reads .claude/skills each run), so there is nothing to relaunch —
+      // sanitize, full-replace on disk, fold prose for non-Claude providers, report.
+      const handleSkillUpdate = (skills: unknown[]): void => {
+        reloadBridgeSettings();
+        if (!skillUpdateEnabled) {
+          logErr('🔒 skill_update ignored — skillUpdateEnabled is off (set it in .autodev/settings.json or pass --skill-update to allow)');
+          return;
+        }
+        logErr('🧩 skill_update received — validating and writing .claude/skills…');
+        const { safe, rejected } = sanitizeRemoteSkills(cwd, skills);
+        if (rejected.length) {
+          logErr(`⚠️ skill_update dropped ${rejected.length} entr${rejected.length === 1 ? 'y' : 'ies'}: ${rejected.map(r => `${r.name} (${r.reason})`).join(', ')}`);
+        }
+        try {
+          const { written, removed } = saveProjectSkills(cwd, safe);
+          if (!providerConsumesSkills(settings.provider)) {
+            foldSkillsIntoProfile(cwd, safe);
+          }
+          void ConfigManager.reportProjectSkills(cwd, written, logErr);
+          logErr(`✅ skills synced — wrote ${written.length}, removed ${removed.length} (.claude/skills). Live-reloads on the next run — no relaunch.`);
+        } catch (err) {
+          logErr(`⚠️ skill update failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       };
 
@@ -416,6 +447,13 @@ export function mcpOperateCommand(program: Command): void {
             if (msgType === 'mcp_update') {
               const entries = msg['mcpServers'] as Record<string, unknown> | undefined;
               if (entries && typeof entries === 'object') { handleMcpUpdate(entries); }
+              return;
+            }
+
+            // Live skill reload frame from the office (full effective skill set).
+            if (msgType === 'skill_update') {
+              const skills = msg['skills'];
+              if (Array.isArray(skills)) { handleSkillUpdate(skills); }
               return;
             }
 

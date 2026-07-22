@@ -27,6 +27,7 @@ import { DiscordGateway } from './discordGateway';
 import { WebhookPoller } from './webhookPoller';
 import { EmailTaskPoller } from './emailPoller';
 import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
+import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from './core/projectSkills';
 import { ConfigManager } from './configManager';
 import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
 import { CLI_VERSION } from './version';
@@ -464,6 +465,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setOnSteer((text, onDelivered) => void this._handleSteer(text, onDelivered));
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
+      this._webhookPoller.setOnSkillUpdate((skills) => this._handleSkillUpdate(skills));
       this._webhookPoller.setOnExportRequest((agentId) => void this._handleExportRequest(agentId));
       this._webhookPoller.setOnRestoreRequest((agentId, downloadUrl) => void this._handleRestoreRequest(agentId, downloadUrl));
       this._webhookPoller.setOnExportConfig((exportEnabled, exportDailyBackup, agentId) => this._handleExportConfig(exportEnabled, exportDailyBackup, agentId));
@@ -677,6 +679,43 @@ export class TaskLoopRunner {
       return;
     }
     void this.restart();
+  }
+
+  /**
+   * Handle skill_update pushed from pixel-office: validate + write the agent's
+   * FULL effective skill set to `.claude/skills/<slug>/SKILL.md`. Skills
+   * live-reload (Claude re-reads them each run), so this does NOT restart the
+   * loop — it just sanitizes, full-replaces on disk, folds a prose block into
+   * AGENTS.md for non-Claude providers, and reports the applied names.
+   */
+  private _handleSkillUpdate(skills: unknown[]): void {
+    const root = this._workspaceRoot;
+    if (!root) return;
+    // Opt-in gate: remote-supplied skills become instruction files a running
+    // Claude agent live-reads. Ignore unless explicitly enabled, mirroring
+    // mcpUpdateEnabled / enableFileBrowser / gitEnabled.
+    if (!this._settings?.skillUpdateEnabled) {
+      this._cb?.log('🔒 skill_update ignored — skillUpdateEnabled is off (set it in .autodev/settings.json to allow)');
+      return;
+    }
+    this._cb?.log('🧩 skill_update received — validating and writing .claude/skills…');
+    const { safe, rejected } = sanitizeRemoteSkills(root, skills);
+    if (rejected.length) {
+      this._cb?.log(`⚠️ skill_update dropped ${rejected.length} entr${rejected.length === 1 ? 'y' : 'ies'}: ${rejected.map(r => `${r.name} (${r.reason})`).join(', ')}`);
+    }
+    try {
+      // Full-replace: writes the safe set and prunes previously-synced skills
+      // that are gone (even when `safe` is empty — that clears them all).
+      const { written, removed } = saveProjectSkills(root, safe);
+      // Non-Claude providers can't load SKILL.md — fold a prose block into AGENTS.md.
+      if (!providerConsumesSkills(this._settings?.provider)) {
+        foldSkillsIntoProfile(root, safe);
+      }
+      void ConfigManager.reportProjectSkills(root, written, (m) => this._cb?.log(m));
+      this._cb?.log(`✅ skills synced — wrote ${written.length}, removed ${removed.length} (.claude/skills). Live-reloads on the next run — no restart.`);
+    } catch (err) {
+      this._cb?.log(`⚠️ skill update failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** Handle export_request from pixel-office: create backup zip and upload. */

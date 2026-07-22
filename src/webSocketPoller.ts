@@ -49,6 +49,7 @@ export class WebSocketPoller {
   private _onSteer: ((text: string, onDelivered: () => void) => void) | null = null;
   private _onCommand: ((cmd: string) => void) | null = null;
   private _onMcpUpdate: ((entries: Record<string, unknown>) => void) | null = null;
+  private _onSkillUpdate: ((skills: unknown[]) => void) | null = null;
   private _onExportRequest: ((agentId: string) => void) | null = null;
   private _onRestoreRequest: ((agentId: string, downloadUrl: string) => void) | null = null;
   private _onExportConfig: ((exportEnabled: boolean, exportDailyBackup: boolean, agentId: string) => void) | null = null;
@@ -91,6 +92,9 @@ export class WebSocketPoller {
 
   /** Called when a mcp_update frame arrives — receives the new mcpServers map. */
   setOnMcpUpdate(cb: (entries: Record<string, unknown>) => void): void { this._onMcpUpdate = cb; }
+
+  /** Called when a skill_update frame arrives — receives the agent's full effective skill set. */
+  setOnSkillUpdate(cb: (skills: unknown[]) => void): void { this._onSkillUpdate = cb; }
 
   /** Called when an export_request frame arrives — agent should create + upload a backup. */
   setOnExportRequest(cb: (agentId: string) => void): void { this._onExportRequest = cb; }
@@ -465,6 +469,16 @@ export class WebSocketPoller {
       const entries = msg['mcpServers'] as Record<string, unknown> | undefined;
       if (entries && typeof entries === 'object') {
         this._onMcpUpdate?.(entries);
+      }
+      return;
+    }
+
+    // ── Skill update from pixel-office ───────────────────────────────────────
+
+    if (msgType === 'skill_update') {
+      const skills = msg['skills'];
+      if (Array.isArray(skills)) {
+        this._onSkillUpdate?.(skills);
       }
       return;
     }

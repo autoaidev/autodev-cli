@@ -48,6 +48,15 @@ export interface AutodevSettings {
    * enableFileBrowser / gitEnabled). Even when enabled, entries are validated.
    */
   mcpUpdateEnabled: boolean;
+  /**
+   * Opt-in: honor `skill_update` frames pushed over the WS channel. When false
+   * (default), inbound skill_update frames are ignored. Writing remote-supplied
+   * skills drops instruction files into `.claude/skills/` that a running Claude
+   * agent live-reads, so it is an instruction-injection surface and must be
+   * explicitly enabled (mirrors mcpUpdateEnabled). Even when enabled, each skill
+   * is validated (slug shape, size caps, workspace path containment).
+   */
+  skillUpdateEnabled: boolean;
   hooksEnabled: boolean;
   hooksScope: 'project' | 'global';
   openCodeHooksEnabled: boolean;
@@ -260,6 +269,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   enableFileBrowser: false,
   gitEnabled: false,
   mcpUpdateEnabled: false,
+  skillUpdateEnabled: false,
   hooksEnabled: false,
   hooksScope: 'project',
   openCodeHooksEnabled: false,

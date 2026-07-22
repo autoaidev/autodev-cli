@@ -174,6 +174,12 @@ export class WebhookPoller {
     }
   }
 
+  setOnSkillUpdate(cb: (skills: unknown[]) => void): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setOnSkillUpdate(cb);
+    }
+  }
+
   setOnExportRequest(cb: (agentId: string) => void): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setOnExportRequest(cb);

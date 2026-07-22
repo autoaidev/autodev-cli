@@ -305,6 +305,7 @@ export class ConfigManager {
         if (s.vncEnabled)        { opArgs.push('--vnc'); }
         if (s.rdpEnabled)        { opArgs.push('--rdp'); }
         if (s.mcpUpdateEnabled)  { opArgs.push('--mcp-update'); }
+        if (s.skillUpdateEnabled) { opArgs.push('--skill-update'); }
         builtinsForJson['pixel-office'] = { command: 'autodev', args: opArgs };
       }
     } catch { /* ignore — office binding is optional */ }
@@ -467,6 +468,35 @@ export class ConfigManager {
         body: JSON.stringify({ servers }),
       });
       log?.(`MCP: reported ${servers.length} servers to pixel-office`);
+    } catch { /* best-effort */ }
+  }
+
+  /**
+   * Report the applied skill slugs back to pixel-office so the office UI can show
+   * which skills the agent actually took. Mirrors reportProjectMcp: derives the
+   * office origin from the workspace binding (no hardcoded URL), sends names ONLY,
+   * best-effort / fire-and-forget.
+   */
+  static async reportProjectSkills(root: string, skills: string[], log?: (m: string) => void): Promise<void> {
+    try {
+      const s = loadSettingsForRoot(root);
+      const key = s.serverApiKey || '';
+      let origin = '';
+      try {
+        const u = new URL(s.serverBaseUrl || '');
+        const proto = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
+        origin = `${proto}//${u.host}`;
+      } catch { /* not office-bound */ }
+      if (! origin || ! key) { return; }
+
+      const f = (globalThis as unknown as { fetch?: typeof fetch }).fetch;
+      if (! f) { return; }
+      await f(`${origin}/api/agent-skill-report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ skills }),
+      });
+      log?.(`Skills: reported ${skills.length} skills to pixel-office`);
     } catch { /* best-effort */ }
   }
 

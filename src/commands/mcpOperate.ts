@@ -246,7 +246,19 @@ export function mcpOperateCommand(program: Command): void {
           const id = body.id !== undefined && body.id !== null ? body.id : `wsreq-${++wsReqSeq}`;
           const k = String(id);
           const timer = setTimeout(() => { wsPending.delete(k); reject(new Error('operator_request timed out')); }, 20_000);
-          wsPending.set(k, (resp) => { clearTimeout(timer); resolve(resp); });
+          wsPending.set(k, (resp) => {
+            clearTimeout(timer);
+            // A JSON-RPC error with no result (e.g. a stale long-running WS server
+            // missing a newly-added office tool) → REJECT so callOffice fails over
+            // to the HTTP proxy, which php-fpm always serves with fresh code. A
+            // normal result resolves. Without this, a stale WS silently returns an
+            // empty result and callers like ask_user hard-fail on JSON.parse('').
+            if (resp && resp['error'] && (resp['result'] === undefined || resp['result'] === null)) {
+              reject(new Error(String((resp['error'] as { message?: unknown } | undefined)?.message ?? 'operator_response error')));
+            } else {
+              resolve(resp);
+            }
+          });
           socket!.sendFrame({ type: 'operator_request', id, method: body.method, params: body.params ?? {} });
         });
       // Prefer the socket when ready; fall back to HTTP otherwise (startup handshake,
@@ -939,11 +951,15 @@ export function mcpOperateCommand(program: Command): void {
 
             // Format the office's answer array into readable text for the model.
             const fmtOne = (ans: { value?: unknown; values?: unknown; otherText?: unknown }): string => {
-              const val = Array.isArray(ans?.values)
-                ? (ans.values as unknown[]).map((v) => `"${String(v)}"`).join(', ')
-                : `"${String(ans?.value ?? '')}"`;
-              const other = ans?.otherText ? ` (other: ${String(ans.otherText)})` : '';
-              return val + other;
+              const other = ans?.otherText ? String(ans.otherText) : '';
+              if (Array.isArray(ans?.values) && (ans.values as unknown[]).length > 0) {
+                const v = (ans.values as unknown[]).map((x) => `"${String(x)}"`).join(', ');
+                return other ? `${v} (other: "${other}")` : v;
+              }
+              const hasValue = ans?.value !== undefined && ans?.value !== null && String(ans.value) !== '';
+              if (hasValue) { return other ? `"${String(ans.value)}" (other: "${other}")` : `"${String(ans.value)}"`; }
+              // Free-text only (no preset option chosen): show the typed answer directly.
+              return other ? `"${other}"` : '"(no answer)"';
             };
             const formatAnswers = (answers: unknown): string => {
               if (!Array.isArray(answers) || answers.length === 0) {

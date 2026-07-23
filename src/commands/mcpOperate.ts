@@ -134,7 +134,7 @@ function proxy(endpoint: string, key: string, body: unknown): Promise<Record<str
 export function mcpOperateCommand(program: Command): void {
   program
     .command('mcp-operate [path]')
-    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <url> (per-agent name lets one client run several characters at once)')
+    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Adds two bridge-synthesized tools on top of the office tools: wait_for_events (block on live office activity) and ask_user (ask the user a decision / multi-step wizard and BLOCK for their answer). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <url> (per-agent name lets one client run several characters at once)')
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
     .option('--http-port <port>', 'Run a persistent MCP-over-HTTP (Streamable HTTP) server on this port instead of stdio. Point an opencode `type: remote` MCP at http://<host>:<port>/mcp.', (v) => parseInt(v, 10))
@@ -194,6 +194,29 @@ export function mcpOperateCommand(program: Command): void {
         name: 'wait_for_events',
         description: "Block until new office activity arrives over the live socket (or a timeout), then return it. Teammates' messages, status changes, task assignments and tool activity stream in as they happen — call this in a loop to react in real time. Returns any buffered events immediately.",
         inputSchema: { type: 'object', properties: { timeout_seconds: { type: 'integer', description: 'Max seconds to wait for the next event (default 25, max 55).' } }, required: [] as string[] },
+      };
+
+      // ── Blocking user-decision tool (ask_user) ───────────────────────────────
+      // Ask the user to make a real decision — a single question OR a multi-step
+      // wizard — and BLOCK until they answer in the pixel-office chat, then return
+      // their answer so the model continues. Bridge-synthesized like WAIT_TOOL, so
+      // it reaches every provider (claude/opencode/grok/copilot) uniformly. The
+      // office holds the request state; this tool just creates it and polls.
+      const ASK_USER_TOOL = {
+        name: 'ask_user',
+        description: "Ask the user to make a decision and BLOCK for their answer. Use for genuine either/or choices the user must make. Provide clear options; set allow_other to let them type a custom answer; use steps for a multi-step wizard. Single question: pass { question, options, allow_other?, multi_select? }. Wizard: pass { title?, steps: [{ question, options, allow_other?, multi_select? }] }. Each option is a string OR an object { label, description }. The call does not return until the user answers (or dismisses) in the office chat.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            question:     { type: 'string',  description: 'The decision to ask (single-question form).' },
+            options:      { type: 'array',   description: 'Choices for the single question — strings, or { label, description } objects.', items: {} },
+            allow_other:  { type: 'boolean', description: 'Let the user type a custom free-text answer in addition to the listed options.' },
+            multi_select: { type: 'boolean', description: 'Let the user pick more than one option.' },
+            title:        { type: 'string',  description: 'Optional title shown above a multi-step wizard.' },
+            steps:        { type: 'array',   description: 'Wizard steps (multi-step form) — each { question, options, allow_other?, multi_select? }.', items: { type: 'object' } },
+          },
+          required: [] as string[],
+        },
       };
 
       // ── Presence WebSocket (optional; --no-socket disables) ──────────────────
@@ -878,13 +901,119 @@ export function mcpOperateCommand(program: Command): void {
           } finally { inflight--; maybeExit(); }
         }
 
+        // Local blocking tool: ask_user — create a user-decision request in the
+        // office and BLOCK until the user answers in pixel-office chat (or a cap
+        // elapses). Poll get_choice_answer in SHORT calls (never one long call:
+        // the WS proxy caps at 20s, HTTP at 120s) and keep the agent's status
+        // fresh so it doesn't flip to idle while blocked. inflight++/maybeExit
+        // exactly like wait_for_events keeps the process alive while waiting.
+        if (req.method === 'tools/call' && params?.name === 'ask_user') {
+          inflight++;
+          // Tunables (mirror wait_for_events' small consts).
+          const ASK_MAX_MS       = 15 * 60 * 1000; // overall cap before returning "still pending"
+          const ASK_POLL_MS      = 3_000;          // short poll cadence (office is fast)
+          const ASK_HEARTBEAT_MS = 60_000;         // refresh 'waiting' status well under the 120s idle flip
+          try {
+            const a = ((req.params as { arguments?: Record<string, unknown> } | undefined)?.arguments) ?? {};
+
+            // Call an office tool over the same WS/HTTP channel and read its first
+            // text-content block (same extraction as officeTool / wait_for_events).
+            const askOfficeTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
+              const r = await callOffice({ id: `ask-${name}-${++wsReqSeq}`, method: 'tools/call', params: { name, arguments: args } });
+              return ((r['result'] as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text) ?? '';
+            };
+
+            // Build create_choice_request arguments: pass through single OR wizard
+            // form untouched (the office validates the shape).
+            const createArgs: Record<string, unknown> = {};
+            const isWizard = Array.isArray(a['steps']);
+            if (isWizard) {
+              createArgs.steps = a['steps'];
+              if (typeof a['title'] === 'string') { createArgs.title = a['title']; }
+            } else {
+              if (a['question']     !== undefined) { createArgs.question     = a['question']; }
+              if (a['options']      !== undefined) { createArgs.options      = a['options']; }
+              if (a['allow_other']  !== undefined) { createArgs.allow_other  = a['allow_other']; }
+              if (a['multi_select'] !== undefined) { createArgs.multi_select = a['multi_select']; }
+            }
+
+            // Format the office's answer array into readable text for the model.
+            const fmtOne = (ans: { value?: unknown; values?: unknown; otherText?: unknown }): string => {
+              const val = Array.isArray(ans?.values)
+                ? (ans.values as unknown[]).map((v) => `"${String(v)}"`).join(', ')
+                : `"${String(ans?.value ?? '')}"`;
+              const other = ans?.otherText ? ` (other: ${String(ans.otherText)})` : '';
+              return val + other;
+            };
+            const formatAnswers = (answers: unknown): string => {
+              if (!Array.isArray(answers) || answers.length === 0) {
+                return 'The user answered, but no selection was returned.';
+              }
+              if (!isWizard && answers.length === 1) {
+                return `The user chose: ${fmtOne(answers[0] as Record<string, unknown>)}`;
+              }
+              const steps = (a['steps'] as Array<{ question?: string }> | undefined) ?? [];
+              const lines = (answers as Array<Record<string, unknown>>).map((ans) => {
+                const idx = typeof ans?.stepIndex === 'number' ? ans.stepIndex : 0;
+                const q = steps[idx]?.question ?? `step ${idx + 1}`;
+                return `Step ${idx + 1} (${q}): ${fmtOne(ans)}`;
+              });
+              return `The user completed the wizard:\n${lines.join('\n')}`;
+            };
+
+            // 1) Create the request. On any failure, return an error result (never hang).
+            let requestId = '';
+            try {
+              const createText = await askOfficeTool('create_choice_request', createArgs);
+              const parsed = JSON.parse(createText) as { request_id?: string };
+              requestId = (parsed?.request_id ?? '').toString();
+            } catch (e) {
+              return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'Could not create the user-decision request: ' + ((e as Error)?.message ?? String(e)) + '. Nothing was shown to the user.' }] } };
+            }
+            if (!requestId) {
+              return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'The office did not return a request id — the user-decision request was not created, so no question reached the user.' }] } };
+            }
+
+            // 2) BLOCK: re-poll get_choice_answer in short calls; heartbeat status.
+            const started = Date.now();
+            let lastBeat = Date.now();
+            while (!closed) {
+              if (Date.now() - started > ASK_MAX_MS) {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: `No answer yet — the request (id ${requestId}) is still pending after ${Math.round(ASK_MAX_MS / 60000)} minutes. It remains open; you can continue with other work and check back, or ask again.` }] } };
+              }
+              let statusText = '';
+              try { statusText = await askOfficeTool('get_choice_answer', { request_id: requestId }); } catch { statusText = ''; }
+              let status = 'pending';
+              let answers: unknown = null;
+              if (statusText) {
+                try { const p = JSON.parse(statusText) as { status?: string; answers?: unknown }; status = p.status ?? 'pending'; answers = p.answers ?? null; } catch { /* keep pending */ }
+              }
+              if (status === 'answered') {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: formatAnswers(answers) }] } };
+              }
+              if (status === 'cancelled') {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'The user dismissed the request without answering.' }] } };
+              }
+              // Heartbeat: keep the agent marked 'waiting' (best-effort) so it does
+              // not flip to idle after ~120s while genuinely blocked on the user.
+              if (Date.now() - lastBeat > ASK_HEARTBEAT_MS) {
+                lastBeat = Date.now();
+                askOfficeTool('set_status', { status: 'waiting' }).catch(() => { /* best-effort */ });
+              }
+              await new Promise<void>((res) => { const t = setTimeout(res, ASK_POLL_MS); t.unref?.(); });
+            }
+            // Tool torn down (stdin closed / shutdown) before the user answered.
+            return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'The ask_user request was interrupted before the user answered.' }] } };
+          } finally { inflight--; maybeExit(); }
+        }
+
         inflight++;
         try {
           const res = await callOffice(req);
           // Advertise the local streaming tool alongside the server's own tools.
           if (req.method === 'tools/list') {
             const result = res['result'] as { tools?: unknown[] } | undefined;
-            if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL); }
+            if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL, ASK_USER_TOOL); }
           }
           return res;
         } catch (e) {

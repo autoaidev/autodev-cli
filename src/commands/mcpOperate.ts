@@ -19,6 +19,7 @@ import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, provide
 import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 import { buildNotificationEvent } from '../core/liveNarration';
+import { redactSecrets, redactDeep } from '../core/redactSecrets';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -134,7 +135,7 @@ function proxy(endpoint: string, key: string, body: unknown): Promise<Record<str
 export function mcpOperateCommand(program: Command): void {
   program
     .command('mcp-operate [path]')
-    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Adds two bridge-synthesized tools on top of the office tools: wait_for_events (block on live office activity) and ask_user (ask the user a decision / multi-step wizard and BLOCK for their answer). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <url> (per-agent name lets one client run several characters at once)')
+    .description('Run an MCP server that operates a pixel-office agent (bridges to …/api/office-mcp). Adds two bridge-synthesized tools on top of the office tools: wait_for_events (block on live office activity) and ask_user (ask the user a decision / multi-step wizard and BLOCK for their answer). Speaks stdio by default; add --http-port to run a PERSISTENT streamable-HTTP sidecar an opencode `type: remote` MCP can attach to. Add stdio with: claude mcp add pixel-office-<agent-slug> -- autodev mcp-operate --key <api_key> --url <url> (per-agent name lets one client run several characters at once). All outbound agent content (hook events, tool output, assistant narration, task results / A2A replies) is secret-redacted before it leaves the machine.')
     .option('--url <url>', 'Operator MCP URL (…/api/office-mcp). Default: derived from the workspace binding.')
     .option('--key <apiKey>', 'The character api_key (Bearer). Default: the workspace serverApiKey.')
     .option('--http-port <port>', 'Run a persistent MCP-over-HTTP (Streamable HTTP) server on this port instead of stdio. Point an opencode `type: remote` MCP at http://<host>:<port>/mcp.', (v) => parseInt(v, 10))
@@ -599,7 +600,9 @@ export function mcpOperateCommand(program: Command): void {
         let transcriptOffset = 0;
         const seenAsst = new Set<string>();   // assistant-entry uuids already forwarded
         const forwardAssistant = (text: string): void => {
-          const msg = text.trim();
+          // Redact secrets from the assistant prose BEFORE it leaves the machine
+          // — this bubble is stored + rendered in the office chat.
+          const msg = redactSecrets(text.trim());
           if (!msg || !socket) { return; }
           const ev = buildNotificationEvent(settings.provider || 'claude', cwd, msg.length > 1800 ? msg.slice(0, 1800) + '…' : msg) as Record<string, unknown>;
           ev._session_name = sessionNameForHooks;
@@ -689,7 +692,9 @@ export function mcpOperateCommand(program: Command): void {
                 const toolName = (ev['tool_name'] as string) || '';
                 if (toolName.startsWith('mcp__')) { continue; }
                 ev._session_name = sessionNameForHooks;   // so the office can label it
-                socket.sendFrame({ type: 'hook_event', data: ev });
+                // Redact secrets from the whole hook object (tool_input.command,
+                // tool_response, file contents, …) before it leaves the machine.
+                socket.sendFrame({ type: 'hook_event', data: redactDeep(ev) });
                 const name = (ev['hook_event_name'] as string) || (ev['hook'] as string) || (ev['event'] as string) || '';
                 if (WORKING_HOOKS.has(name)) { sawWork = true; }
               } catch { /* skip malformed lines */ }
@@ -824,7 +829,8 @@ export function mcpOperateCommand(program: Command): void {
             if (closed) { break; }
             await officeTool('start_task', { task_id: t.id });
             const result = await runWorker(`You are working as the office agent in this workspace. Complete this task using your own tools (edit/create files as needed), then briefly summarize what you did.\n\nTASK: ${t.title}`);
-            await officeTool('complete_task', { task_id: t.id, result: (result || 'Done.').slice(0, 1500) });
+            // The worker summary is stored + shown in the office task feed — redact secrets.
+            await officeTool('complete_task', { task_id: t.id, result: redactSecrets((result || 'Done.').slice(0, 1500)) });
             logErr(`🤖 autonomy: completed task ${t.id} (${t.title.slice(0, 40)})`);
           }
 
@@ -837,7 +843,8 @@ export function mcpOperateCommand(program: Command): void {
             if (closed || replied >= 3) { break; }
             const reply = (await runWorker(`A teammate "${m.from}" sent you this message in the office:\n\n"${m.body}"\n\nIf a reply is warranted, output ONLY the reply text — concise, and do NOT ask a question back unless truly essential. If the message needs work in this workspace, do it, then reply with what you did. If no reply is needed, output exactly: NO_REPLY`)).trim();
             if (reply && !/^NO_REPLY/i.test(reply)) {
-              await officeTool('send_message', { to: m.from, message: reply.slice(0, 1000) });
+              // The A2A reply is delivered + shown in the office chat — redact secrets.
+              await officeTool('send_message', { to: m.from, message: redactSecrets(reply.slice(0, 1000)) });
               logErr(`🤖 autonomy: replied to ${m.from}`);
               replied++;
             }

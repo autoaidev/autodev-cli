@@ -45,6 +45,7 @@ export type LoopState = 'idle' | 'running' | 'stopping' | 'paused';
 import { RateLimitError, RateLimitDetector, AuthError, AuthDetector } from './rateLimit';
 import { CliExitHandler } from './cliExit';
 import { LiveNarrationStreamer, appendHookEventLine, stripAnsi } from './core/liveNarration';
+import { redactDeep } from './core/redactSecrets';
 
 class ContextLengthError extends Error {
   constructor(readonly rawMessage: string) {
@@ -1130,7 +1131,10 @@ export class TaskLoopRunner {
               const ev = JSON.parse(line);
               // Inject session name (workspace folder) so pixel office can display it
               if (sessionName) { ev._session_name = sessionName; }
-              this._webhookPoller!.sendFrame({ type: 'hook_event', data: ev });
+              // Redact secrets from the whole hook object (tool_input/tool_response/
+              // assistant narration/file contents) before it leaves the machine —
+              // this stream is stored + rendered in the office feed/chat.
+              this._webhookPoller!.sendFrame({ type: 'hook_event', data: redactDeep(ev) });
             } catch { /* skip malformed lines */ }
           }
         } catch { /* ignore read errors */ }

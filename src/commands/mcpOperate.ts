@@ -205,7 +205,7 @@ export function mcpOperateCommand(program: Command): void {
       // office holds the request state; this tool just creates it and polls.
       const ASK_USER_TOOL = {
         name: 'ask_user',
-        description: "Ask the user to make a decision and BLOCK for their answer. Use for genuine either/or choices the user must make. Provide clear options; set allow_other to let them type a custom answer; use steps for a multi-step wizard. Single question: pass { question, options, allow_other?, multi_select? }. Wizard: pass { title?, steps: [{ question, options, allow_other?, multi_select? }] }. Each option is a string OR an object { label, description }. The call does not return until the user answers (or dismisses) in the office chat.",
+        description: "Ask the user to make a decision and BLOCK for their answer. Use for genuine either/or choices the user must make. Provide clear options; set allow_other to let them type a custom answer; use steps for a multi-step wizard. Single question: pass { question, options, allow_other?, multi_select? }. Wizard: pass { title?, steps: [{ question, options, allow_other?, multi_select? }] }. Each option is a string OR an object { label, description }. IMPORTANT: if the call returns 'Still waiting...', call ask_user AGAIN with the SAME { request_id } it gives you (do NOT create a new question) — keep re-calling until you get the user's answer.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -215,7 +215,8 @@ export function mcpOperateCommand(program: Command): void {
             multi_select: { type: 'boolean', description: 'Let the user pick more than one option.' },
             title:        { type: 'string',  description: 'Optional title shown above a multi-step wizard.' },
             steps:        { type: 'array',   description: 'Wizard steps (multi-step form) — each { question, options, allow_other?, multi_select? }.', items: { type: 'object' } },
-          },
+            request_id:   { type: 'string',  description: 'Resume waiting for an EXISTING request (do NOT create a new one). Pass the id from a prior "Still waiting" ask_user result to keep polling until the user answers.' },
+},
           required: [] as string[],
         },
       };
@@ -929,7 +930,7 @@ export function mcpOperateCommand(program: Command): void {
         if (req.method === 'tools/call' && params?.name === 'ask_user') {
           inflight++;
           // Tunables (mirror wait_for_events' small consts).
-          const ASK_MAX_MS       = 15 * 60 * 1000; // overall cap before returning "still pending"
+          const ASK_INVOCATION_MS = 50_000;        // cap ONE call under opencode's ~60s remote-MCP client timeout; the model re-calls with request_id to keep waiting
           const ASK_POLL_MS      = 3_000;          // short poll cadence (office is fast)
           const ASK_HEARTBEAT_MS = 60_000;         // refresh 'waiting' status well under the 120s idle flip
           try {
@@ -984,25 +985,32 @@ export function mcpOperateCommand(program: Command): void {
               return `The user completed the wizard:\n${lines.join('\n')}`;
             };
 
-            // 1) Create the request. On any failure, return an error result (never hang).
-            let requestId = '';
-            try {
-              const createText = await askOfficeTool('create_choice_request', createArgs);
-              const parsed = JSON.parse(createText) as { request_id?: string };
-              requestId = (parsed?.request_id ?? '').toString();
-            } catch (e) {
-              return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'Could not create the user-decision request: ' + ((e as Error)?.message ?? String(e)) + '. Nothing was shown to the user.' }] } };
-            }
+            // 1) Create the request — UNLESS resuming an existing one (request_id
+            // passed back after a prior "Still waiting" return). Resuming avoids
+            // re-asking and lets a long wait span several short sub-60s calls.
+            let requestId = typeof a['request_id'] === 'string' ? String(a['request_id']).trim() : '';
             if (!requestId) {
-              return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'The office did not return a request id — the user-decision request was not created, so no question reached the user.' }] } };
+              try {
+                const createText = await askOfficeTool('create_choice_request', createArgs);
+                const parsed = JSON.parse(createText) as { request_id?: string };
+                requestId = (parsed?.request_id ?? '').toString();
+              } catch (e) {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'Could not create the user-decision request: ' + ((e as Error)?.message ?? String(e)) + '. Nothing was shown to the user.' }] } };
+              }
+              if (!requestId) {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'The office did not return a request id — the user-decision request was not created, so no question reached the user.' }] } };
+              }
             }
 
             // 2) BLOCK: re-poll get_choice_answer in short calls; heartbeat status.
             const started = Date.now();
             let lastBeat = Date.now();
             while (!closed) {
-              if (Date.now() - started > ASK_MAX_MS) {
-                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: `No answer yet — the request (id ${requestId}) is still pending after ${Math.round(ASK_MAX_MS / 60000)} minutes. It remains open; you can continue with other work and check back, or ask again.` }] } };
+              // Return BEFORE the client's request timeout (opencode's remote MCP
+              // caps a single call at ~60s). The request stays open server-side;
+              // the model re-calls ask_user with this request_id to keep waiting.
+              if (Date.now() - started > ASK_INVOCATION_MS) {
+                return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: `Still waiting for the user to answer — the question is live in the office chat. To keep waiting, call ask_user AGAIN with { "request_id": "${requestId}" } (do NOT create a new question).` }] } };
               }
               let statusText = '';
               try { statusText = await askOfficeTool('get_choice_answer', { request_id: requestId }); } catch { statusText = ''; }

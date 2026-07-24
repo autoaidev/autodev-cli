@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import { URL } from 'url';
 import { Command } from 'commander';
 import { loadSettingsForRoot } from '../core/settingsLoader';
+import { resolveConfiguredModel } from '../core/modelInfo';
 import { OfficeSocket } from '../officeSocket';
 import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
 import { handleFbRequest } from '../fileBrowser';
@@ -413,6 +414,10 @@ export function mcpOperateCommand(program: Command): void {
           log: (l) => process.stderr.write(l + '\n'),
           meta: {
             provider: 'mcp-operator', cliVersion: CLI_VERSION,
+            // The MCP-only agent's worker provider drives real turns; announce its
+            // effective model (undefined when it runs an account default) so the
+            // office can badge the model. 'mcp-operator' is only the transport marker.
+            model: resolveConfiguredModel(settings),
             fileBrowserEnabled, gitEnabled, vncEnabled, rdpEnabled,
             // Announce the desktop host/port too (parity with the loop's meta) so
             // the office persists the real target instead of defaulting to :5900.

@@ -26,6 +26,7 @@ import { PeriodicActionManager, PERIODIC_ACTIONS } from './periodicActions';
 import { DiscordGateway } from './discordGateway';
 import { WebhookPoller } from './webhookPoller';
 import { EmailTaskPoller } from './emailPoller';
+import { resolveConfiguredModel } from './core/modelInfo';
 import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
 import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from './core/projectSkills';
 import { ConfigManager } from './configManager';
@@ -362,7 +363,13 @@ export class TaskLoopRunner {
     // `cliVersion` rides in the meta merged into every webhook frame — notably
     // the agent_online (hello) frame — so pixel-office can record which CLI
     // version each agent runs (surfacing stale, steer-incapable agents).
-    this._webhook?.setMeta({ provider: settings.provider, cliVersion: CLI_VERSION, workDir: root, hostname: this._hostname, gitRepo: this._gitRepo, gitBranch: this._gitBranch });
+    // `model` — the effective friendly model name (Opus 4.8 / kimi-k2.7-code /
+    // grok-code). Resolved from the provider's configured override; undefined
+    // when the provider runs its account default (office gates the field). Rides
+    // in setMeta so it merges into every frame, notably agent_online, where the
+    // office records it against the agent for the per-agent model badge.
+    const effectiveModel = resolveConfiguredModel(settings);
+    this._webhook?.setMeta({ provider: settings.provider, cliVersion: CLI_VERSION, model: effectiveModel, workDir: root, hostname: this._hostname, gitRepo: this._gitRepo, gitBranch: this._gitBranch });
 
     this._discordPoller = (settings.discordToken && settings.discordChannelId && settings.discordOwners)
       ? new DiscordPoller(settings.discordToken, settings.discordChannelId, settings.discordOwners)
@@ -414,6 +421,7 @@ export class TaskLoopRunner {
           // mis-detected as 'claude' by the office's hook-based fallback.
           provider:           this._settings?.provider,
           cliVersion:         CLI_VERSION,
+          model:              this._settings ? resolveConfiguredModel(this._settings) : undefined,
           hostname:           this._hostname,
           workDir:            this._workspaceRoot ?? '',
           gitRepo:            this._gitRepo,
@@ -536,6 +544,7 @@ export class TaskLoopRunner {
     this._notifyWebhook('agent_online', {
       provider:           settings.provider,
       cliVersion:         CLI_VERSION,
+      model:              effectiveModel,
       hostname:           this._hostname,
       workDir:            root,
       gitRepo:            this._gitRepo,

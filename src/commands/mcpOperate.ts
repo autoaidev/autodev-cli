@@ -23,7 +23,7 @@ import { buildNotificationEvent } from '../core/liveNarration';
 import { extractClaudeUsage, type ClaudeUsagePayload } from '../core/claudeUsage';
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
-import { fmtNode, renderNeighbors } from '../graphRender';
+import { fmtNode, renderNeighbors, renderMap, renderSearch } from '../graphRender';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -252,12 +252,13 @@ export function mcpOperateCommand(program: Command): void {
       const GRAPH_TOOLS = [
         {
           name: 'graph_add_node',
-          description: `Write a typed fact to the durable PROJECT GRAPH (\`.autodev/graph/\`, shared across agents and sessions — the graph persists after your context is gone). This is NOT prose memory; it is a structured, sourced, versioned graph. Node types: ${NODE_TYPES.join(' | ')}. Provenance (your run + agent id) is attached automatically. INVARIANTS enforced: a 'claim' needs source:"file:line"/url/source-node-id OR inference:true; an 'artifact' needs version; an 'evaluation' needs rubric. Entities dedupe by name (idempotent — re-adding merges aliases). Returns the node id to link with graph_add_edge.`,
+          description: `Write a typed fact to the durable PROJECT GRAPH (\`.autodev/graph/\`, shared across agents and sessions — the graph persists after your context is gone). This is NOT prose memory; it is a structured, sourced, versioned graph. Node types: ${NODE_TYPES.join(' | ')}. Provenance (your run + agent id) is attached automatically. INVARIANTS enforced: a 'claim' needs source:"file:line"/url/source-node-id OR inference:true; an 'artifact' needs version; an 'evaluation' needs rubric. Entities dedupe by name (idempotent — re-adding merges aliases). SHOULD pass a one-line \`summary\` on substantial nodes (entity/decision/question/artifact/agent_run) — it powers navigation, ranking and the cold-start map. Returns the node id to link with graph_add_edge.`,
           inputSchema: { type: 'object', properties: {
             type: { type: 'string', description: `One of: ${NODE_TYPES.join(', ')}` },
             name: { type: 'string', description: 'Short label / surface form of the fact.' },
             id: { type: 'string', description: 'Pin an id to upsert an existing node (optional; entities auto-dedupe by name).' },
             body: { type: 'string', description: 'Fuller detail (optional).' },
+            summary: { type: 'string', description: 'One-line gist for navigation (recommended on substantial entity/decision/question/artifact/agent_run nodes). Used in ranking and as the node\'s shown gist; interior nodes without one get a deterministic structural rollup.' },
             source: { type: 'string', description: 'Where the fact came from: a file:line, url, or a source-node id. Required for claims unless inference:true.' },
             inference: { type: 'boolean', description: 'Set true for a claim that is your reasoning, not a cited source.' },
             version: { type: 'string', description: 'For artifacts: the version/commit/semver this node describes.' },
@@ -279,14 +280,33 @@ export function mcpOperateCommand(program: Command): void {
         },
         {
           name: 'graph_query',
-          description: 'Search the project graph for nodes by type and/or free text. Returns matching nodes (freshest first) with ids to expand or link. Superseded nodes are hidden unless include_superseded is set.',
+          description: 'Search the project graph by type and/or free text. RELEVANCE-RANKED (vectorless TF·IDF over name/summary/aliases/body, lifted by recency + connectivity) — a multi-word intent uses OR-semantics so a near-miss no longer returns empty, and the most relevant node outranks the merely-most-recent. Exact-substring matches are always included. Long bodies are truncated explicitly. Superseded nodes hidden unless include_superseded.',
           inputSchema: { type: 'object', properties: {
             type: { type: 'string', description: 'Filter by node type.' },
-            text: { type: 'string', description: 'Case-insensitive substring over name/body/aliases.' },
+            text: { type: 'string', description: 'Free-text intent; tokenized, OR-matched and ranked over name/summary/aliases/body.' },
             id: { type: 'string', description: 'Fetch one node by id.' },
+            mode: { type: 'string', enum: ['relevance', 'recent'], description: "Ranking: 'relevance' (default) or 'recent' (pure recency)." },
             include_superseded: { type: 'boolean' },
             limit: { type: 'integer', description: 'Max results (default 30, max 200).' },
           }, required: [] as string[] },
+        },
+        {
+          name: 'graph_map',
+          description: "COLD-START anchor index — call this FIRST when you don't yet have a node id/name. Ranks the graph's connectivity hubs by degree and bundles the open questions, freshest decisions, and live contradictions, each with a one-line summary. This is the \"where do I start\" entry point; then expand a hub with graph_neighbors or dig an intent with graph_search.",
+          inputSchema: { type: 'object', properties: {
+            depth: { type: 'integer', description: 'Reserved for hierarchical expansion (currently depth 0: the hub index).' },
+            focus_type: { type: 'string', description: 'Restrict hubs to one node type (e.g. entity, decision).' },
+            max_children: { type: 'integer', description: 'Cap per section (default 10, max 50).' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_search',
+          description: 'REASONING-BASED, best-first, CITABLE retrieval (vectorless — you are the reasoner). Seeds with a relevance-ranked query on your intent, then best-first expands a relevance-priority frontier (preferring strong provenance edges: supports/derived_from/produced/evaluates/depends_on/parent_of over relates_to/mentions), scoring newly-found nodes against the intent, up to node_budget. Returns a ranked bundle: each row cites [id] with a one-line WHY (matched terms + the edge-path from its seed) plus contradiction/inference flags. Read the ~12 summaries and reason over them.',
+          inputSchema: { type: 'object', properties: {
+            intent: { type: 'string', description: 'What you are looking for, in words.' },
+            node_budget: { type: 'integer', description: 'Max nodes in the bundle (default 12, max 60).' },
+            hops: { type: 'integer', description: 'Max expansion depth from a seed (default 2, max 4).' },
+          }, required: ['intent'] as string[] },
         },
         {
           name: 'graph_neighbors',
@@ -313,7 +333,7 @@ export function mcpOperateCommand(program: Command): void {
         },
         {
           name: 'graph_stats',
-          description: 'Health of the project graph: node/edge counts by type, superseded count, isolated (unlinked) nodes, contradictions, and open questions. Use to spot gaps worth filling.',
+          description: 'Health of the project graph: node/edge counts by type, superseded count, isolated (unlinked) nodes, contradictions, open questions, and summary coverage (unsummarized / stale). Use to spot gaps worth filling.',
           inputSchema: { type: 'object', properties: {}, required: [] as string[] },
         },
       ];
@@ -325,6 +345,7 @@ export function mcpOperateCommand(program: Command): void {
             const { node, created } = graph.addNode({
               type: String(a.type ?? ''), name: String(a.name ?? ''),
               id: a.id ? String(a.id) : undefined, body: a.body ? String(a.body) : undefined,
+              summary: a.summary ? String(a.summary) : undefined,
               source: a.source ? String(a.source) : undefined,
               inference: a.inference === true || undefined,
               version: a.version ? String(a.version) : undefined,
@@ -347,8 +368,30 @@ export function mcpOperateCommand(program: Command): void {
               type: a.type ? String(a.type) : undefined, text: a.text ? String(a.text) : undefined,
               id: a.id ? String(a.id) : undefined, includeSuperseded: a.include_superseded === true,
               limit: a.limit ? Number(a.limit) : undefined,
+              mode: a.mode === 'recent' ? 'recent' : undefined,
             });
-            return rows.length ? `${rows.length} node(s):\n${rows.map((n) => fmtNode(n, graph.contradictionsFor(n.id))).join('\n')}` : 'No matching nodes. Add facts with graph_add_node.';
+            return rows.length
+              ? `${rows.length} node(s):\n${rows.map((n) => {
+                const es = graph.effectiveSummary(n);
+                return fmtNode(n, graph.contradictionsFor(n.id), { summary: es?.synthesized ? es.text : undefined, synthesized: es?.synthesized, stale: graph.summaryStale(n) });
+              }).join('\n')}`
+              : 'No matching nodes. Add facts with graph_add_node.';
+          }
+          if (name === 'graph_map') {
+            const m = graph.map({
+              depth: a.depth != null ? Number(a.depth) : undefined,
+              focusType: a.focus_type ? String(a.focus_type) : undefined,
+              maxChildren: a.max_children != null ? Number(a.max_children) : undefined,
+            });
+            return renderMap(m);
+          }
+          if (name === 'graph_search') {
+            const res = graph.search({
+              intent: String(a.intent ?? ''),
+              nodeBudget: a.node_budget != null ? Number(a.node_budget) : undefined,
+              hops: a.hops != null ? Number(a.hops) : undefined,
+            });
+            return renderSearch(res);
           }
           if (name === 'graph_neighbors') {
             const res = graph.neighbors({
@@ -384,6 +427,7 @@ export function mcpOperateCommand(program: Command): void {
               + `nodes=${s.nodeCount} (${byType(s.nodesByType)})\n`
               + `edges=${s.edgeCount} (${byType(s.edgesByType)})\n`
               + `superseded=${s.superseded} · isolated=${s.isolated} · contradictions=${s.contradictions} · openQuestions=${s.openQuestions}\n`
+              + `unsummarized=${s.unsummarized} · staleSummaries=${s.staleSummaries}\n`
               + `log: ${s.totalOps} ops → ${s.nodeCount + s.edgeCount} live (deadWeight=${s.deadWeight}, ${dwPct}%) · ${kb} KB · ~${s.estTokens} tokens · lastReplay=${s.lastReplayMs}ms`
               + (health.length ? `\nhealth: ${health.join(' · ')}` : '');
           }

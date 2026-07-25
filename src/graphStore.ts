@@ -61,6 +61,14 @@ export interface GraphNode {
   type: GraphNodeType;
   name: string;
   body?: string;
+  /**
+   * A one-line gist of the node — the navigation enabler (Tier 1, item 3).
+   * Agent-supplied at write (the writing agent already holds the context, and it
+   * rides its provenance like any write). Optional and purely additive: old log
+   * lines without `summary` replay fine. When absent on an interior/hub node, a
+   * deterministic structural rollup is synthesized on read (no LLM call).
+   */
+  summary?: string;
   props?: Record<string, unknown>;
   /** Where the fact came from (a citation, url, file:line, or a source node id). */
   source?: string;
@@ -98,6 +106,8 @@ export interface AddNodeInput {
   name: string;
   id?: string;
   body?: string;
+  /** One-line gist (Tier 1). Stamped with a `summaryAt` prop so staleness is detectable. */
+  summary?: string;
   props?: Record<string, unknown>;
   source?: string;
   inference?: boolean;
@@ -139,7 +149,7 @@ function slug(s: string): string {
  * `"UsageService"` → `["usage","service"]`, `"usage-service"` → `["usage","service"]`,
  * `"HTTPServer v2"` → `["http","server","v2"]`.
  */
-function tokenize(s: string): string[] {
+export function tokenize(s: string): string[] {
   return String(s || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')      // camelCase boundary
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')   // ACRONYMWord → ACRONYM Word
@@ -211,6 +221,63 @@ function edgeAllowed(rel: GraphEdgeType, fromType: GraphNodeType, toType: GraphN
   return `edge "${rel}" expects ${rules.map(describeRule).join(' or ')}, but got (${fromType})→(${toType})`;
 }
 
+// ── Relevance ranking (Tier 1, item 1) ──────────────────────────────────────
+// A deliberately VECTORLESS scorer: field-weighted TF·IDF over the resident node
+// set, lifted by recency + degree. Honours PageIndex's "similarity ≠ relevance" —
+// no embeddings, fully explainable. Field weights: name > summary ≈ aliases > body.
+const FIELD_WEIGHTS: { field: 'name' | 'summary' | 'aliases' | 'body'; weight: number }[] = [
+  { field: 'name', weight: 3 },
+  { field: 'summary', weight: 2 },
+  { field: 'aliases', weight: 2 },
+  { field: 'body', weight: 1 },
+];
+/** Weight of the recency lift in finalScore = textScore·(1 + wRecency·decay + wDegree·log1p(deg)). */
+const W_RECENCY = 0.5;
+/** Weight of the connectivity (degree) lift. */
+const W_DEGREE = 0.3;
+/** Recency half-life-ish constant in days: exp(-ageDays/RECENCY_TAU). */
+const RECENCY_TAU_DAYS = 30;
+/** Guaranteed-inclusion floor for an exact-substring hit that scored 0 on tokens
+ *  (keeps the old substring behaviour a strict subset of ranked results). */
+const SUBSTR_FLOOR = 0.001;
+
+/** Provenance strength for best-first expansion: strong provenance edges outrank weak ones. */
+const EDGE_STRENGTH: Record<string, number> = {
+  supports: 3, derived_from: 3, produced: 3, evaluates: 3, depends_on: 3, parent_of: 3,
+  supersedes: 2, revises: 2, resolved_to: 2, contradicts: 2,
+  mentions: 1, relates_to: 1,
+};
+
+/** A scored query row (Tier 1) — reused by graph_query, graph_map and graph_search. */
+export interface ScoredNode { node: GraphNode; score: number; textScore: number; matched: string[]; substring: boolean; }
+
+/** One "where do I start" map entry: a node plus its effective (authored or synthesized) summary. */
+export interface MapEntry {
+  id: string; type: GraphNodeType; name: string;
+  summary?: string; synthesized?: boolean; stale?: boolean; degree: number;
+}
+export interface GraphMap {
+  hubs: MapEntry[];
+  questions: MapEntry[];
+  decisions: MapEntry[];
+  contradictions: { a: { id: string; name: string }; b: { id: string; name: string } }[];
+}
+
+/** One row of a graph_search bundle — citable, with the edge-path from its seed. */
+export interface SearchRow {
+  id: string; type: GraphNodeType; name: string;
+  score: number; matched: string[];
+  summary?: string; synthesized?: boolean;
+  inference?: boolean;
+  seedId: string;
+  /** The edge used to reach this node (undefined for a seed). */
+  via?: { edge: GraphEdgeType; fromId: string; dir: 'out' | 'in' };
+  /** Hop descriptors from the seed, e.g. ["supports→ claim:ab12"] — for explainability. */
+  path: string[];
+  conflicts: { id: string; name: string }[];
+}
+export interface SearchResult { intent: string; terms: string[]; budget: number; hops: number; rows: SearchRow[]; }
+
 export class GraphStore {
   private readonly dir: string;
   private readonly file: string;
@@ -231,6 +298,11 @@ export class GraphStore {
   private parseFailures = 0;
   /** wall-clock ms of the last (incremental or full) reload. */
   private lastReplayMs = 0;
+  /** Monotonic node-set version bumped by apply() — the invalidation signal reload uses. */
+  private mutationSeq = 0;
+  /** IDF over the resident node set, memoised until mutationSeq changes (item 1). */
+  private idfCache: Map<string, number> | null = null;
+  private idfCacheSeq = -1;
 
   constructor(workspaceRoot: string, private identity: Identity) {
     this.dir = path.join(workspaceRoot, '.autodev', 'graph');
@@ -255,6 +327,7 @@ export class GraphStore {
     this.appliedOps = 0;
     this.parseFailures = 0;
     this.lastOffset = 0;
+    this.idfCache = null;
   }
 
   /**
@@ -324,6 +397,7 @@ export class GraphStore {
 
   private apply(op: LogOp): void {
     this.appliedOps++;
+    this.mutationSeq++; // invalidates the IDF cache (same signal reload rides)
     if (op.op === 'node') {
       const { op: _o, ...node } = op;
       this.nodes.set(node.id, node as GraphNode);
@@ -423,10 +497,17 @@ export class GraphStore {
     const now = new Date().toISOString();
     const existing = this.nodes.get(id);
 
+    // Stamp when the summary was (re)written so staleness — gaining children or being
+    // superseded AFTER the summary — is detectable without a separate op format.
+    const summaryProvided = input.summary != null && String(input.summary).trim() !== '';
+    let props = input.props ?? existing?.props;
+    if (summaryProvided) { props = { ...(props || {}), summaryAt: now }; }
+
     const node: GraphNode = {
       id, type, name,
       body: input.body ?? existing?.body,
-      props: input.props ?? existing?.props,
+      summary: summaryProvided ? String(input.summary).trim() : existing?.summary,
+      props,
       source: input.source ?? existing?.source,
       inference: input.inference ?? existing?.inference,
       version: input.version ?? existing?.version,
@@ -532,25 +613,112 @@ export class GraphStore {
     return (this.adjacency.get(id) || []).length;
   }
 
-  query(opts: { type?: string; text?: string; id?: string; includeSuperseded?: boolean; limit?: number }): GraphNode[] {
+  // ── relevance ranking (Tier 1, item 1) ────────────────────────────────────
+
+  /** IDF over the resident node set, memoised until the node set mutates. */
+  private idf(): Map<string, number> {
+    if (this.idfCache && this.idfCacheSeq === this.mutationSeq) { return this.idfCache; }
+    const df = new Map<string, number>();
+    const N = this.nodes.size || 1;
+    for (const n of this.nodes.values()) {
+      const toks = new Set<string>([
+        ...tokenize(n.name),
+        ...tokenize(n.summary || ''),
+        ...tokenize((n.aliases || []).join(' ')),
+        ...tokenize(n.body || ''),
+      ]);
+      for (const t of toks) { df.set(t, (df.get(t) || 0) + 1); }
+    }
+    const idf = new Map<string, number>();
+    for (const [t, d] of df) { idf.set(t, Math.log(1 + N / (1 + d))); }
+    this.idfCache = idf;
+    this.idfCacheSeq = this.mutationSeq;
+    return idf;
+  }
+
+  /** Exponential recency lift in [0,1]: 1 at now, decaying with age (τ≈30d). */
+  private recencyDecay(ts: string | undefined): number {
+    const ms = Date.parse(ts || '');
+    if (!isFinite(ms)) { return 0; }
+    const days = Math.max(0, (Date.now() - ms) / 86400000);
+    return Math.exp(-days / RECENCY_TAU_DAYS);
+  }
+
+  /** Field-weighted TF·IDF text score for a node against a set of query terms. */
+  private scoreNode(n: GraphNode, terms: string[], idf: Map<string, number>): { score: number; matched: string[] } {
+    if (!terms.length) { return { score: 0, matched: [] }; }
+    const fieldTokens: Record<string, string[]> = {
+      name: tokenize(n.name),
+      summary: tokenize(n.summary || ''),
+      aliases: tokenize((n.aliases || []).join(' ')),
+      body: tokenize(n.body || ''),
+    };
+    let score = 0;
+    const matched: string[] = [];
+    for (const term of terms) {
+      let tf = 0;
+      for (const { field, weight } of FIELD_WEIGHTS) {
+        for (const tok of fieldTokens[field]) { if (tok === term) { tf += weight; } }
+      }
+      if (tf > 0) { score += tf * (idf.get(term) || 0); matched.push(term); }
+    }
+    return { score, matched };
+  }
+
+  /**
+   * Relevance-ranked query (Tier 1, item 1). OR-semantics: a node is a hit if it
+   * matches ≥1 query term OR contains the intent as an exact substring (the old
+   * behaviour, kept as a guaranteed-inclusion signal → strict superset). Ranked by
+   * `textScore·(1 + wRecency·decay + wDegree·log1p(degree))`. `mode:'recent'` keeps
+   * the pure recency order; superseded nodes hidden unless includeSuperseded.
+   */
+  scoredQuery(opts: { type?: string; text?: string; id?: string; includeSuperseded?: boolean; limit?: number; mode?: 'relevance' | 'recent' }): ScoredNode[] {
     this.reloadIfChanged();
     const limit = Math.max(1, Math.min(200, opts.limit ?? 30));
     const type = opts.type ? String(opts.type).toLowerCase() : undefined;
-    const text = opts.text ? String(opts.text).toLowerCase() : undefined;
-    const out: GraphNode[] = [];
+    const text = opts.text ? String(opts.text) : undefined;
+    const textLower = text ? text.toLowerCase() : undefined;
+    const terms = text ? Array.from(new Set(tokenize(text))) : [];
+    const idf = terms.length ? this.idf() : null;
+    const mode = opts.mode ?? 'relevance';
+
+    const rows: ScoredNode[] = [];
     for (const n of this.nodes.values()) {
       if (opts.id && n.id !== opts.id) { continue; }
       if (type && n.type !== type) { continue; }
       if (!opts.includeSuperseded && n.supersededBy) { continue; }
-      if (text) {
-        const hay = `${n.name}\n${n.body ?? ''}\n${(n.aliases || []).join(' ')}`.toLowerCase();
-        if (!hay.includes(text)) { continue; }
+      if (textLower) {
+        const { score: ts, matched } = this.scoreNode(n, terms, idf as Map<string, number>);
+        const hay = `${n.name}\n${n.summary ?? ''}\n${n.body ?? ''}\n${(n.aliases || []).join(' ')}`.toLowerCase();
+        const substring = hay.includes(textLower);
+        let textScore = ts;
+        if (substring && textScore <= 0) { textScore = SUBSTR_FLOOR; } // guaranteed inclusion
+        if (textScore <= 0) { continue; } // no term hit and no substring — a real miss
+        const final = textScore * (1 + W_RECENCY * this.recencyDecay(n.updatedAt) + W_DEGREE * Math.log1p(this.degree(n.id)));
+        rows.push({ node: n, score: final, textScore, matched, substring });
+      } else {
+        rows.push({ node: n, score: this.recencyDecay(n.updatedAt), textScore: 0, matched: [], substring: false });
       }
-      out.push(n);
     }
-    // freshest first — recent verified facts are the most useful context
-    out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return out.slice(0, limit);
+    rows.sort((a, b) => {
+      if (mode === 'recent' || !textLower) {
+        const r = (b.node.updatedAt || '').localeCompare(a.node.updatedAt || '');
+        if (r !== 0) { return r; }
+        return b.score - a.score;
+      }
+      if (b.score !== a.score) { return b.score - a.score; }
+      return (b.node.updatedAt || '').localeCompare(a.node.updatedAt || '');
+    });
+    return rows.slice(0, limit);
+  }
+
+  /**
+   * Search nodes by type and/or text. Thin wrapper over {@link scoredQuery}: with
+   * `text` it returns relevance-ranked hits (item 1); without, recency order. The
+   * old pure-substring behaviour survives as a guaranteed-inclusion subset.
+   */
+  query(opts: { type?: string; text?: string; id?: string; includeSuperseded?: boolean; limit?: number; mode?: 'relevance' | 'recent' }): GraphNode[] {
+    return this.scoredQuery(opts).map((r) => r.node);
   }
 
   /**
@@ -602,10 +770,216 @@ export class GraphStore {
     return { center, nodes: [...nodeOut.values()], edges: edgeOut, dist: Object.fromEntries(dist) };
   }
 
+  // ── summaries (Tier 1, item 3) ────────────────────────────────────────────
+
+  /** Distinct neighbour nodes of a node (via the adjacency index). */
+  private neighborNodes(id: string): GraphNode[] {
+    const out: GraphNode[] = [];
+    const seen = new Set<string>();
+    for (const e of this.adjacency.get(id) || []) {
+      const other = e.from === id ? e.to : e.from;
+      if (seen.has(other)) { continue; }
+      seen.add(other);
+      const nn = this.nodes.get(other);
+      if (nn) { out.push(nn); }
+    }
+    return out;
+  }
+
+  /** `parent_of` children of a node (this node as the parent). */
+  private childrenOf(id: string): GraphNode[] {
+    const out: GraphNode[] = [];
+    for (const e of this.adjacency.get(id) || []) {
+      if (e.type === 'parent_of' && e.from === id) {
+        const c = this.nodes.get(e.to);
+        if (c) { out.push(c); }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * DETERMINISTIC one-line rollup for an interior/hub node with NO authored
+   * summary — NO LLM call. Synthesised from structure: child (or, absent
+   * `parent_of` children, neighbour) type counts + the top child names by degree.
+   * Returns undefined for a leaf/low-degree node (nothing to summarise).
+   */
+  rollupSummary(id: string): string | undefined {
+    let kids = this.childrenOf(id);
+    if (!kids.length) {
+      if (this.degree(id) < 3) { return undefined; } // a leaf — no structure to roll up
+      kids = this.neighborNodes(id);
+    }
+    if (!kids.length) { return undefined; }
+    const counts = new Map<string, number>();
+    for (const k of kids) { counts.set(k.type, (counts.get(k.type) || 0) + 1); }
+    const countStr = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([t, c]) => `${c} ${t}`)
+      .join(', ');
+    const top = [...kids]
+      .sort((a, b) => this.degree(b.id) - this.degree(a.id))
+      .slice(0, 3)
+      .map((k) => k.name);
+    return `${countStr} · top: ${top.join(', ')}`;
+  }
+
+  /**
+   * The summary to SHOW for a node: the authored one if present, else the
+   * deterministic structural rollup (flagged synthesized), else nothing.
+   */
+  effectiveSummary(node: GraphNode): { text: string; synthesized: boolean } | undefined {
+    if (node.summary && node.summary.trim()) { return { text: node.summary.trim(), synthesized: false }; }
+    const roll = this.rollupSummary(node.id);
+    return roll ? { text: roll, synthesized: true } : undefined;
+  }
+
+  /**
+   * An AUTHORED summary is stale when the node has been superseded, or gained a
+   * `parent_of` child AFTER the summary was written (`props.summaryAt`). Nodes
+   * with no authored summary are "unsummarized", not stale.
+   */
+  summaryStale(node: GraphNode): boolean {
+    if (!node.summary || !node.summary.trim()) { return false; }
+    if (node.supersededBy) { return true; }
+    const at = Date.parse(String(node.props?.summaryAt ?? node.updatedAt));
+    if (!isFinite(at)) { return false; }
+    for (const e of this.adjacency.get(node.id) || []) {
+      if (e.type === 'parent_of' && e.from === node.id && Date.parse(e.createdAt) > at) { return true; }
+    }
+    return false;
+  }
+
+  private mapEntry(node: GraphNode): MapEntry {
+    const es = this.effectiveSummary(node);
+    return {
+      id: node.id, type: node.type, name: node.name,
+      summary: es?.text, synthesized: es?.synthesized,
+      stale: this.summaryStale(node) || undefined,
+      degree: this.degree(node.id),
+    };
+  }
+
+  // ── cold-start anchor index (Tier 1, item 2) ───────────────────────────────
+
+  /**
+   * "Where do I start" for an agent with no id/name in hand. Ranks entities (and
+   * any node when `focusType` unset) by degree() over the adjacency index, and
+   * bundles the open `question`s, freshest `decision`s, and live `contradicts`
+   * pairs it already knows how to find. Purely read-side; render via graphRender.
+   */
+  map(opts?: { depth?: number; focusType?: string; maxChildren?: number }): GraphMap {
+    this.reloadIfChanged();
+    const topK = Math.max(1, Math.min(50, opts?.maxChildren ?? 10));
+    const focus = opts?.focusType ? String(opts.focusType).toLowerCase() : undefined;
+
+    const live = [...this.nodes.values()].filter((n) => !n.supersededBy);
+    const hubs = live
+      .filter((n) => this.degree(n.id) > 0 && (!focus || n.type === focus))
+      .sort((a, b) => this.degree(b.id) - this.degree(a.id) || (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+      .slice(0, topK)
+      .map((n) => this.mapEntry(n));
+
+    const freshest = (t: GraphNodeType): MapEntry[] => live
+      .filter((n) => n.type === t)
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+      .slice(0, topK)
+      .map((n) => this.mapEntry(n));
+
+    // live (unsuperseded on both ends) contradicts pairs, deduped
+    const seenPair = new Set<string>();
+    const contradictions: GraphMap['contradictions'] = [];
+    for (const e of this.edges.values()) {
+      if (e.type !== 'contradicts') { continue; }
+      const a = this.nodes.get(e.from);
+      const b = this.nodes.get(e.to);
+      if (!a || !b || a.supersededBy || b.supersededBy) { continue; }
+      const key = [a.id, b.id].sort().join('|');
+      if (seenPair.has(key)) { continue; }
+      seenPair.add(key);
+      contradictions.push({ a: { id: a.id, name: a.name }, b: { id: b.id, name: b.name } });
+      if (contradictions.length >= topK) { break; }
+    }
+
+    return { hubs, questions: freshest('question'), decisions: freshest('decision'), contradictions };
+  }
+
+  // ── reasoning-based best-first retrieval (Tier 1, item 4) ──────────────────
+
+  /**
+   * Vectorless, explainable, CITABLE retrieval — the PageIndex centrepiece done
+   * without embeddings and without a server-side model (the calling agent is the
+   * reasoner). Seed with the item-1 ranked query on `intent`, then best-first
+   * expand a relevance-priority frontier: pop the best node, expand 1 hop
+   * (strong provenance edges — supports/derived_from/produced/evaluates/
+   * depends_on/parent_of — before weak relates_to/mentions), score newly-found
+   * nodes against the intent, push. Stop at node_budget. Each returned row cites
+   * `[id]` with the matched terms and the edge-path from its seed.
+   */
+  search(opts: { intent: string; nodeBudget?: number; hops?: number }): SearchResult {
+    this.reloadIfChanged();
+    const budget = Math.max(1, Math.min(60, opts.nodeBudget ?? 12));
+    const hops = Math.max(1, Math.min(4, opts.hops ?? 2));
+    const intent = String(opts.intent || '');
+    const terms = Array.from(new Set(tokenize(intent)));
+    const idf = this.idf();
+
+    interface Rec { node: GraphNode; score: number; matched: string[]; seedId: string; depth: number; path: string[]; via?: SearchRow['via']; }
+    const rows = new Map<string, Rec>();
+    const frontier: { id: string; score: number; depth: number }[] = [];
+
+    const seedK = Math.min(budget, Math.max(3, Math.ceil(budget / 2)));
+    for (const s of this.scoredQuery({ text: intent, mode: 'relevance', limit: seedK })) {
+      rows.set(s.node.id, { node: s.node, score: s.score, matched: s.matched, seedId: s.node.id, depth: 0, path: [] });
+      frontier.push({ id: s.node.id, score: s.score, depth: 0 });
+    }
+
+    while (frontier.length && rows.size < budget) {
+      frontier.sort((a, b) => b.score - a.score);
+      const cur = frontier.shift() as { id: string; score: number; depth: number };
+      if (cur.depth >= hops) { continue; }
+      const curRec = rows.get(cur.id);
+      if (!curRec) { continue; }
+      const incident = [...(this.adjacency.get(cur.id) || [])]
+        .sort((x, y) => (EDGE_STRENGTH[y.type] || 0) - (EDGE_STRENGTH[x.type] || 0));
+      for (const e of incident) {
+        if (rows.size >= budget) { break; }
+        const otherId = e.from === cur.id ? e.to : e.from;
+        if (rows.has(otherId)) { continue; }
+        const other = this.nodes.get(otherId);
+        if (!other || other.supersededBy) { continue; } // superseded hidden by default
+        const { score: ts, matched } = this.scoreNode(other, terms, idf);
+        const textScore = ts > 0 ? ts : SUBSTR_FLOOR * 0.5; // reachable-but-off-intent nodes stay citable, ranked low
+        const final = textScore * (1 + W_RECENCY * this.recencyDecay(other.updatedAt) + W_DEGREE * Math.log1p(this.degree(otherId)));
+        const dir: 'out' | 'in' = e.from === cur.id ? 'out' : 'in';
+        const path = [...curRec.path, `${e.type}${dir === 'out' ? '→' : '←'} ${other.type}:${other.id}`];
+        rows.set(otherId, { node: other, score: final, matched, seedId: curRec.seedId, depth: cur.depth + 1, path, via: { edge: e.type, fromId: cur.id, dir } });
+        frontier.push({ id: otherId, score: final, depth: cur.depth + 1 });
+      }
+    }
+
+    const out: SearchRow[] = [...rows.values()]
+      .sort((a, b) => b.score - a.score)
+      .map((r) => {
+        const es = this.effectiveSummary(r.node);
+        return {
+          id: r.node.id, type: r.node.type, name: r.node.name,
+          score: r.score, matched: r.matched,
+          summary: es?.text, synthesized: es?.synthesized,
+          inference: r.node.inference,
+          seedId: r.seedId, via: r.via, path: r.path,
+          conflicts: this.contradictionsFor(r.node.id),
+        };
+      });
+    return { intent, terms, budget, hops, rows: out };
+  }
+
   stats(): {
     nodeCount: number; edgeCount: number;
     nodesByType: Record<string, number>; edgesByType: Record<string, number>;
     superseded: number; isolated: number; contradictions: number; openQuestions: number;
+    // Tier 1 summary telemetry (item 3)
+    unsummarized: number; staleSummaries: number;
     // Tier 0 telemetry (item 8)
     fileBytes: number; totalOps: number; deadWeight: number; deadWeightRatio: number;
     lastReplayMs: number; estTokens: number; parseFailures: number; tornFinalLine: boolean;
@@ -618,13 +992,18 @@ export class GraphStore {
       edgesByType[e.type] = (edgesByType[e.type] || 0) + 1;
       estTokens += estimateTokens(`${e.type}${e.from}${e.to}${e.source ?? ''}`);
     }
-    let isolated = 0;
+    // Types that benefit most from a summary (item 3).
+    const SUMMARY_TYPES = new Set<GraphNodeType>(['entity', 'decision', 'question', 'artifact', 'agent_run']);
+    let isolated = 0, unsummarized = 0, staleSummaries = 0;
     for (const n of this.nodes.values()) {
       nodesByType[n.type] = (nodesByType[n.type] || 0) + 1;
       if (n.supersededBy) { superseded++; }
       if (n.type === 'question' && !n.supersededBy) { openQuestions++; }
       if (this.degree(n.id) === 0 && !n.supersededBy) { isolated++; }
-      estTokens += estimateTokens(`${n.name}${n.body ?? ''}`);
+      const hasSummary = !!(n.summary && n.summary.trim());
+      if (!n.supersededBy && SUMMARY_TYPES.has(n.type) && !hasSummary) { unsummarized++; }
+      if (hasSummary && this.summaryStale(n)) { staleSummaries++; }
+      estTokens += estimateTokens(`${n.name}${n.summary ?? ''}${n.body ?? ''}`);
     }
     const contradictions = edgesByType['contradicts'] || 0;
     const live = this.nodes.size + this.edges.size;
@@ -632,6 +1011,7 @@ export class GraphStore {
     return {
       nodeCount: this.nodes.size, edgeCount: this.edges.size,
       nodesByType, edgesByType, superseded, isolated, contradictions, openQuestions,
+      unsummarized, staleSummaries,
       fileBytes: this.lastSize < 0 ? 0 : this.lastSize,
       totalOps: this.appliedOps,
       deadWeight,

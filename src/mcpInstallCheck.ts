@@ -20,7 +20,8 @@ export interface McpInstallInfo {
 }
 
 interface CheckTarget {
-  command: string;
+  /** Remote (http/sse) MCP entries have no command — treated as status 'unknown'. */
+  command?: string;
   args: string[];
 }
 

@@ -110,7 +110,8 @@ export interface AutodevSettings {
    * provider's project-local config (.mcp.json, .claude/settings.local.json,
    * opencode.json, .vscode/mcp.json) alongside the autodev defaults.
    */
-  mcpServers: Record<string, { command: string; args?: string[]; env?: Record<string, string>; enabled?: boolean }>;
+  // `command` is optional: remote (http/sse) MCP entries omit it and set `url`.
+  mcpServers: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; enabled?: boolean; type?: 'stdio' | 'http' | 'sse'; url?: string; headers?: Record<string, string> }>;
   /**
    * Names of built-in MCP servers (from DEFAULT_MCP_SERVERS) that the user
    * has explicitly disabled. Built-ins default to enabled when not listed.

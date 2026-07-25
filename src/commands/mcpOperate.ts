@@ -21,6 +21,7 @@ import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 import { buildNotificationEvent } from '../core/liveNarration';
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
+import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -220,6 +221,163 @@ export function mcpOperateCommand(program: Command): void {
 },
           required: [] as string[],
         },
+      };
+
+      // ── Project graph (durable, shared, cross-session memory) ────────────────
+      // A typed knowledge/work graph persisted under `<workspace>/.autodev/graph/`.
+      // DISTINCT from prose memory: structured, sourced, versioned facts that many
+      // agents read and write across sessions. The graph tools below are
+      // bridge-synthesized (handled locally, never proxied to the office) so they
+      // reach every provider uniformly — like wait_for_events / ask_user.
+      const graphRunId = `run-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${crypto.randomBytes(2).toString('hex')}`;
+      const graphIdentity = {
+        agentId: String(
+          (settings as { agentName?: string; characterName?: string; name?: string }).agentName
+          || (settings as { characterName?: string }).characterName
+          || (settings as { name?: string }).name
+          || path.basename(cwd) || 'agent',
+        ),
+        runId: graphRunId,
+      };
+      const graph = new GraphStore(cwd, graphIdentity);
+      const GRAPH_TOOLS = [
+        {
+          name: 'graph_add_node',
+          description: `Write a typed fact to the durable PROJECT GRAPH (\`.autodev/graph/\`, shared across agents and sessions — the graph persists after your context is gone). This is NOT prose memory; it is a structured, sourced, versioned graph. Node types: ${NODE_TYPES.join(' | ')}. Provenance (your run + agent id) is attached automatically. INVARIANTS enforced: a 'claim' needs source:"file:line"/url/source-node-id OR inference:true; an 'artifact' needs version; an 'evaluation' needs rubric. Entities dedupe by name (idempotent — re-adding merges aliases). Returns the node id to link with graph_add_edge.`,
+          inputSchema: { type: 'object', properties: {
+            type: { type: 'string', description: `One of: ${NODE_TYPES.join(', ')}` },
+            name: { type: 'string', description: 'Short label / surface form of the fact.' },
+            id: { type: 'string', description: 'Pin an id to upsert an existing node (optional; entities auto-dedupe by name).' },
+            body: { type: 'string', description: 'Fuller detail (optional).' },
+            source: { type: 'string', description: 'Where the fact came from: a file:line, url, or a source-node id. Required for claims unless inference:true.' },
+            inference: { type: 'boolean', description: 'Set true for a claim that is your reasoning, not a cited source.' },
+            version: { type: 'string', description: 'For artifacts: the version/commit/semver this node describes.' },
+            rubric: { type: 'string', description: 'For evaluations: the criteria judged against.' },
+            aliases: { type: 'array', description: 'Other names for this entity.', items: { type: 'string' } },
+            props: { type: 'object', description: 'Arbitrary structured attributes.' },
+          }, required: ['type', 'name'] as string[] },
+        },
+        {
+          name: 'graph_add_edge',
+          description: `Link two project-graph nodes with a typed, optionally-sourced edge. Edge types: ${EDGE_TYPES.join(' | ')}. Pass the from/to node ids returned by graph_add_node or graph_query.`,
+          inputSchema: { type: 'object', properties: {
+            type: { type: 'string', description: `One of: ${EDGE_TYPES.join(', ')}` },
+            from: { type: 'string', description: 'Source node id.' },
+            to: { type: 'string', description: 'Target node id.' },
+            source: { type: 'string', description: 'Evidence for this relationship (optional).' },
+            props: { type: 'object' },
+          }, required: ['type', 'from', 'to'] as string[] },
+        },
+        {
+          name: 'graph_query',
+          description: 'Search the project graph for nodes by type and/or free text. Returns matching nodes (freshest first) with ids to expand or link. Superseded nodes are hidden unless include_superseded is set.',
+          inputSchema: { type: 'object', properties: {
+            type: { type: 'string', description: 'Filter by node type.' },
+            text: { type: 'string', description: 'Case-insensitive substring over name/body/aliases.' },
+            id: { type: 'string', description: 'Fetch one node by id.' },
+            include_superseded: { type: 'boolean' },
+            limit: { type: 'integer', description: 'Max results (default 30, max 200).' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_neighbors',
+          description: "Build task context FROM the graph (not a dump): resolve a node/entity by id or name, expand 1-3 hops over allowed edge types, and return a small, citable subgraph. Call this at the START of a task to recall what the swarm already knows before acting.",
+          inputSchema: { type: 'object', properties: {
+            id: { type: 'string', description: 'Center node id (or use name).' },
+            name: { type: 'string', description: 'Center node by name/alias (resolved to the node).' },
+            hops: { type: 'integer', description: 'Expansion depth 1-3 (default 1).' },
+            edge_types: { type: 'array', description: 'Restrict traversal to these edge types.', items: { type: 'string' } },
+            limit: { type: 'integer', description: 'Max edges to return (default 40).' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_supersede',
+          description: "Version a fact instead of deleting it: create a replacement node, link it with a 'supersedes' edge, and flag the old node (which stays addressable). Use when a stored fact changed.",
+          inputSchema: { type: 'object', properties: {
+            old_id: { type: 'string', description: 'Id of the node being replaced.' },
+            name: { type: 'string', description: 'Name of the replacement node.' },
+            body: { type: 'string' }, source: { type: 'string' }, inference: { type: 'boolean' },
+            version: { type: 'string' }, rubric: { type: 'string' }, props: { type: 'object' },
+          }, required: ['old_id', 'name'] as string[] },
+        },
+        {
+          name: 'graph_stats',
+          description: 'Health of the project graph: node/edge counts by type, superseded count, isolated (unlinked) nodes, contradictions, and open questions. Use to spot gaps worth filling.',
+          inputSchema: { type: 'object', properties: {}, required: [] as string[] },
+        },
+      ];
+      const graphToolNames = new Set(GRAPH_TOOLS.map((t) => t.name));
+
+      // Serialize a node/edge compactly for the model — stable ids for citation.
+      const fmtNode = (n: { id: string; type: string; name: string; source?: string; version?: string; inference?: boolean; supersededBy?: string; body?: string }): string => {
+        const tags: string[] = [];
+        if (n.source) { tags.push(`src=${n.source}`); }
+        if (n.version) { tags.push(`v=${n.version}`); }
+        if (n.inference) { tags.push('inference'); }
+        if (n.supersededBy) { tags.push(`superseded→${n.supersededBy}`); }
+        const body = n.body ? ` — ${n.body.replace(/\s+/g, ' ').slice(0, 160)}` : '';
+        return `- [${n.id}] ${n.type} "${n.name}"${tags.length ? ' (' + tags.join(', ') + ')' : ''}${body}`;
+      };
+      const handleGraphTool = (name: string, a: Record<string, unknown>): string => {
+        try {
+          if (name === 'graph_add_node') {
+            const { node, created } = graph.addNode({
+              type: String(a.type ?? ''), name: String(a.name ?? ''),
+              id: a.id ? String(a.id) : undefined, body: a.body ? String(a.body) : undefined,
+              source: a.source ? String(a.source) : undefined,
+              inference: a.inference === true || undefined,
+              version: a.version ? String(a.version) : undefined,
+              rubric: a.rubric ? String(a.rubric) : undefined,
+              aliases: Array.isArray(a.aliases) ? (a.aliases as unknown[]).map(String) : undefined,
+              props: (a.props && typeof a.props === 'object') ? a.props as Record<string, unknown> : undefined,
+            });
+            return `${created ? 'Created' : 'Updated'} node [${node.id}] ${node.type} "${node.name}". Link it with graph_add_edge.`;
+          }
+          if (name === 'graph_add_edge') {
+            const e = graph.addEdge({
+              type: String(a.type ?? ''), from: String(a.from ?? ''), to: String(a.to ?? ''),
+              source: a.source ? String(a.source) : undefined,
+              props: (a.props && typeof a.props === 'object') ? a.props as Record<string, unknown> : undefined,
+            });
+            return `Added edge [${e.id}]: (${e.from}) -${e.type}-> (${e.to}).`;
+          }
+          if (name === 'graph_query') {
+            const rows = graph.query({
+              type: a.type ? String(a.type) : undefined, text: a.text ? String(a.text) : undefined,
+              id: a.id ? String(a.id) : undefined, includeSuperseded: a.include_superseded === true,
+              limit: a.limit ? Number(a.limit) : undefined,
+            });
+            return rows.length ? `${rows.length} node(s):\n${rows.map(fmtNode).join('\n')}` : 'No matching nodes. Add facts with graph_add_node.';
+          }
+          if (name === 'graph_neighbors') {
+            const res = graph.neighbors({
+              idOrName: String(a.id ?? a.name ?? ''), hops: a.hops ? Number(a.hops) : undefined,
+              edgeTypes: Array.isArray(a.edge_types) ? (a.edge_types as unknown[]).map(String) : undefined,
+              limit: a.limit ? Number(a.limit) : undefined,
+            });
+            if (!res) { return `No node matches "${String(a.id ?? a.name ?? '')}". Try graph_query first.`; }
+            const edgeLines = res.edges.map((e) => `- (${e.from}) -${e.type}-> (${e.to})${e.source ? ` [src=${e.source}]` : ''}`);
+            return `Context around [${res.center.id}] "${res.center.name}":\nNODES (${res.nodes.length}):\n${res.nodes.map(fmtNode).join('\n')}\nEDGES (${res.edges.length}):\n${edgeLines.join('\n') || '(none)'}`;
+          }
+          if (name === 'graph_supersede') {
+            const { oldId, node } = graph.supersede(String(a.old_id ?? ''), {
+              type: '', name: String(a.name ?? ''), body: a.body ? String(a.body) : undefined,
+              source: a.source ? String(a.source) : undefined, inference: a.inference === true || undefined,
+              version: a.version ? String(a.version) : undefined, rubric: a.rubric ? String(a.rubric) : undefined,
+              props: (a.props && typeof a.props === 'object') ? a.props as Record<string, unknown> : undefined,
+            });
+            return `Superseded [${oldId}] with [${node.id}] "${node.name}". The old node stays addressable.`;
+          }
+          if (name === 'graph_stats') {
+            const s = graph.stats();
+            const byType = (m: Record<string, number>): string => Object.entries(m).map(([k, v]) => `${k}:${v}`).join(', ') || '(none)';
+            return `Project graph @ ${graph.path}\nnodes=${s.nodeCount} (${byType(s.nodesByType)})\nedges=${s.edgeCount} (${byType(s.edgesByType)})\nsuperseded=${s.superseded} · isolated=${s.isolated} · contradictions=${s.contradictions} · openQuestions=${s.openQuestions}`;
+          }
+          return `unknown graph tool: ${name}`;
+        } catch (e) {
+          if (e instanceof GraphInvariantError) { return `Rejected (graph invariant): ${e.message}`; }
+          return `graph error: ${(e as Error)?.message ?? String(e)}`;
+        }
       };
 
       // ── Presence WebSocket (optional; --no-socket disables) ──────────────────
@@ -926,6 +1084,16 @@ export function mcpOperateCommand(program: Command): void {
           } finally { inflight--; maybeExit(); }
         }
 
+        // Local tools: graph_* — read/write the durable project graph on local
+        // disk (.autodev/graph/). Handled here, never proxied to the office, so
+        // every provider gets the same persistent shared memory. Synchronous and
+        // fast (a JSONL append / in-memory replay), so no inflight bookkeeping.
+        if (req.method === 'tools/call' && typeof params?.name === 'string' && graphToolNames.has(params.name)) {
+          const args = ((req.params as { arguments?: Record<string, unknown> } | undefined)?.arguments) ?? {};
+          const text = handleGraphTool(params.name, args);
+          return { jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text }] } };
+        }
+
         // Local blocking tool: ask_user — create a user-decision request in the
         // office and BLOCK until the user answers in pixel-office chat (or a cap
         // elapses). Poll get_choice_answer in SHORT calls (never one long call:
@@ -1049,7 +1217,7 @@ export function mcpOperateCommand(program: Command): void {
           // Advertise the local streaming tool alongside the server's own tools.
           if (req.method === 'tools/list') {
             const result = res['result'] as { tools?: unknown[] } | undefined;
-            if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL, ASK_USER_TOOL); }
+            if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL, ASK_USER_TOOL, ...GRAPH_TOOLS); }
           }
           return res;
         } catch (e) {

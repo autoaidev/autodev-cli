@@ -164,6 +164,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
       'Before spawning subagent: decide approach, write detailed brief (mission, context, files, patterns, done criteria).',
     ],
   },
+  {
+    id: '20-project-graph', label: 'Project Graph — Durable Shared Memory', file: '20-project-graph.md',
+    keyRules: [
+      'Durable typed graph at .autodev/graph/ — shared across agents & sessions. Graph ≠ memory: structured, sourced, versioned facts, not prose. The agent forgets, the graph does not.',
+      'At task start: graph_neighbors to recall what is known. While working: graph_add_node/add_edge to record claims (with source), decisions, artifacts (with version), evaluations (with rubric).',
+      'Invariants: a claim needs source or inference:true; an artifact needs version; an evaluation needs rubric. Version facts with graph_supersede (never delete).',
+    ],
+  },
 ];
 
 /** Returns all section IDs in order — useful as the default "all enabled" value. */
@@ -174,7 +182,20 @@ export const ALL_SECTION_IDS: string[] = PROFILE_SECTIONS.map(s => s.id);
 // ---------------------------------------------------------------------------
 
 function profileMediaDir(): string {
-  return path.join(__dirname, '..', 'media', 'profile');
+  // Resolve the profile media across the contexts this code runs in:
+  //  • CLI native — __dirname is autodev-cli/out, so ../media/profile is the source.
+  //  • Bundled VS Code extension — esbuild inlines this file, so __dirname is the
+  //    extension's out/; its build copies the CLI media next to the bundle, so
+  //    ../media/profile resolves there too.
+  //  • Dev extension (tsc, not bundled) — loaded through the symlinked autodev-cli
+  //    package; fall back to node_modules/autodev-cli/media/profile.
+  const candidates = [
+    path.join(__dirname, '..', 'media', 'profile'),
+    path.join(__dirname, '..', 'node_modules', 'autodev-cli', 'media', 'profile'),
+    path.join(__dirname, 'media', 'profile'),
+  ];
+  for (const c of candidates) { if (fs.existsSync(c)) { return c; } }
+  return candidates[0];
 }
 
 function md5(content: string): string {

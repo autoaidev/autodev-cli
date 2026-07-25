@@ -12,7 +12,13 @@ import { loadSettingsForRoot } from './core/settingsLoader';
 // ---------------------------------------------------------------------------
 
 /** Agent profile instructions written for each task run */
-export const AGENT_PROFILE_FILE = '.autodev/AGENT_PROFILE.md';
+// The single master reference. AGENTS.md / CLAUDE.md point ONLY here; this file
+// (autoresearch-style "program") describes every other reference — the profile
+// sections, the control spec, and the auto-mode loop tools.
+export const AGENT_PROFILE_FILE = '.autodev/program.md';
+// Legacy name we now migrate away from (older workspaces have this + a block that
+// listed all section files); rebuildProfile removes it so only program.md remains.
+const LEGACY_PROFILE_FILE = '.autodev/AGENT_PROFILE.md';
 
 /** Directory where per-task message files are stored */
 export const MESSAGES_DIR = '.autodev/messages';
@@ -30,45 +36,28 @@ const AGENT_REF_END   = '<!-- autodev:profile-ref:end -->';
  * Idempotent — replaces the existing block on every rebuild.
  * Creates the file with just the reference block if it doesn't exist yet.
  */
-function injectAgentProfileRef(root: string, sectionPaths: string[] = []): void {
-  // Inject AGENT_PROFILE.md plus every deployed section file using relative
-  // file:// paths so references survive workspace folder moves/renames.
-  const allPaths = [AGENT_PROFILE_FILE, ...sectionPaths];
+function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void {
+  // BOTH AGENTS.md and CLAUDE.md reference ONLY program.md now. program.md is the
+  // master index that describes every other reference (the profile sections, the
+  // control spec, the loop tools) — so the block stays one line even as sections
+  // grow, and a small-context model loads just the index, then only what it needs.
   const markerRe = /<!-- autodev:profile-ref:begin -->[\s\S]*?<!-- autodev:profile-ref:end -->/;
+  const block = [
+    AGENT_REF_BEGIN,
+    `file://./${AGENT_PROFILE_FILE.replace(/\\/g, '/')}`,
+    `<think>`,
+    `IMPORTANT: Read program.md before proceeding. It is the master index — it describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
+    `</think>`,
+    AGENT_REF_END,
+  ].join('\n');
 
   for (const filename of ['AGENTS.md', 'CLAUDE.md']) {
     const filePath = path.join(root, filename);
-
-    let block: string;
-
-    if (filename === 'CLAUDE.md' && fs.existsSync(path.join(root, 'AGENTS.md'))) {
-      // CLAUDE.md: thin redirect → points to AGENTS.md which is the primary file.
-      // Claude reads AGENTS.md first; all real profile refs live there.
-      block = [
-        AGENT_REF_BEGIN,
-        // Relative file:// path — works regardless of absolute workspace location
-        `file://./AGENTS.md`,
-        `<think>`,
-        `IMPORTANT: AGENTS.md is the primary instruction file. Read and follow all instructions in AGENTS.md before proceeding.`,
-        `</think>`,
-        AGENT_REF_END,
-      ].join('\n');
-    } else {
-      // AGENTS.md (primary) — or CLAUDE.md when no AGENTS.md exists: full reference block.
-      // Use relative file:// paths so references survive workspace moves.
-      const fileLines = allPaths
-        .map(p => `file://./${p.replace(/\\/g, '/')}`)
-        .join('\n');
-      const thinkBlock = `<think>\nIMPORTANT: Read all the instruction files listed above before proceeding.\nThey contain your core protocols, rules, and operational guidelines.\n</think>`;
-      block = `${AGENT_REF_BEGIN}\n${fileLines}\n${thinkBlock}\n${AGENT_REF_END}`;
-    }
-
     let content = '';
     if (fs.existsSync(filePath)) {
       content = fs.readFileSync(filePath, 'utf8');
     }
     if (markerRe.test(content)) {
-      // Replace existing block
       content = content.replace(markerRe, block);
     } else {
       // Prepend block — agents read the top of the file first
@@ -76,6 +65,13 @@ function injectAgentProfileRef(root: string, sectionPaths: string[] = []): void 
     }
     fs.writeFileSync(filePath, content, 'utf8');
   }
+
+  // Migrate away from the old flat index: remove the stale AGENT_PROFILE.md so
+  // program.md is the sole master reference (best-effort; ignore if absent).
+  try {
+    const legacy = path.join(root, LEGACY_PROFILE_FILE);
+    if (fs.existsSync(legacy)) { fs.rmSync(legacy); }
+  } catch { /* best effort */ }
 }
 
 const COPILOT_INSTRUCTIONS_FILE = '.github/copilot-instructions.md';

@@ -90,7 +90,9 @@ export async function sendPromptToAi(
     if (!root) { throw new Error('No workspace root provided'); }
 
     const agentProfileFile = path.join(root, AGENT_PROFILE_FILE);
-    const messageFile = messageFilePath ?? path.join(root, AGENT_PROFILE_FILE.replace('AGENT_PROFILE.md', 'MESSAGE.md'));
+    // MESSAGE.md sits beside program.md in .autodev/ (do NOT derive it by string
+    // -replacing the profile filename — that broke when AGENT_PROFILE.md → program.md).
+    const messageFile = messageFilePath ?? path.join(root, '.autodev', 'MESSAGE.md');
     autodevDir(root);
     ensureProjectGitignore(root, '.autodev/');
     // Sensitive config files that may contain API keys or private server definitions

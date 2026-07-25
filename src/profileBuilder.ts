@@ -224,7 +224,7 @@ function deploySectionFile(section: ProfileSection, root: string): string | null
 // ---------------------------------------------------------------------------
 
 /**
- * Assemble AGENT_PROFILE.md as a compact **index**:
+ * Assemble program.md as a compact **index**:
  * - Each enabled section shows its key rules inline (immediate context).
  * - A `@.autodev/profile/<file>` line lets agents load the full section on demand.
  * - Full section files are copied to `<root>/.autodev/profile/` so the `@`
@@ -244,10 +244,13 @@ export function assembleProfileBody(
   const orderedSections = PROFILE_SECTIONS.filter(s => ids.includes(s.id));
 
   const header = [
-    '# AutoDev Agent Profile',
+    '# AutoDev — program.md',
     '',
-    '> This is a **protocol index**. Each section file is loaded directly by the agent.',
-    '> Key rules are summarised below; full details live in the per-section files.',
+    '> **Master index.** AGENTS.md / CLAUDE.md reference only this file; this file',
+    '> describes and links every AutoDev reference. Each section below shows its key',
+    '> rules inline and a `file://` link to the full section — **load a section only',
+    '> when the task needs it** (small-context-friendly). The control spec and the',
+    '> auto-mode loop tools are described at the end.',
     '',
     '---',
     '',
@@ -260,12 +263,16 @@ export function assembleProfileBody(
     const refPath = deploySectionFile(section, root);
     if (refPath) { sectionPaths.push(refPath); }
     const rulesLines = section.keyRules.map(r => `- ${r}`).join('\n');
+    // The `file://` ref is what makes program.md self-contained now that the
+    // AGENTS.md block lists only program.md: the full section loads on demand.
+    const refLine = refPath ? `file://./${refPath.replace(/\\/g, '/')}` : '';
     // Hash over key rules + ref so the marker changes if either is updated
     const hash = md5(rulesLines + (refPath ?? ''));
     const block = [
       `<!-- AUTODEV:section:${section.id}:begin:md5=${hash} -->`,
       `### ${section.label}`,
       rulesLines,
+      ...(refLine ? [`  ↳ full: ${refLine}`] : []),
       `<!-- AUTODEV:section:${section.id}:end -->`,
     ].join('\n');
     parts.push(block);
@@ -288,6 +295,27 @@ export function assembleProfileBody(
     }).join('\n');
     body += '\n';
   }
+
+  // Runtime references: the control spec + the auto-mode loop tools. program.md
+  // "describes all other references", so these belong here alongside the sections.
+  body += [
+    '',
+    '---',
+    '',
+    '## Runtime — Control Spec & Auto-Mode Loop Tools',
+    '',
+    '- **Control spec** (optional): `file://./.autodev/CONTROL.md` — a per-project spec',
+    '  (verify command, protected files, keep/revert rule, budget, escalation). When it',
+    '  defines a `verify` command, the loop runs **verify_and_keep** after each task:',
+    '  green → commit + mark `[x]`; red → auto-revert + reopen. With no control spec the',
+    '  loop behaves normally. See skill `autodev-core-loop`.',
+    '- **Auto-mode cadence tools** — the loop runs these itself every N tasks (set N in',
+    '  settings); you do NOT hand-run them: **memory-checkpoint** (persist memory + living',
+    '  docs) and **autolearn** (distil JOURNAL rows → LESSONS/skills/conventions).',
+    '- **Journal** — records are appended deterministically (`journal_append`); do not',
+    '  hand-format the table.',
+    '',
+  ].join('\n');
 
   // Always append SOUL.md reference so agents load their identity anchor first.
   body += [

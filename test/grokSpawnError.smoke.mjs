@@ -82,8 +82,15 @@ ok('ENOENT is reported as a MISSING BINARY, not a bare errno', () => {
 ok("SessionStart is gated on the 'spawn' event, not emitted optimistically", () => {
   assert.ok(/child\.once\('spawn'[\s\S]{0,120}SessionStart/.test(src),
     'SessionStart must only fire once the child is confirmed running');
-  const beforeChild = src.slice(0, src.indexOf("child.once('spawn'"));
-  const stray = beforeChild.match(/_emitGrokHook\(root, 'SessionStart'/g) || [];
+  // Scope the premature-emit check to the SPAWN path (sendGrokPrompt). The other
+  // provider function in this file, runGrokTmuxTurn, legitimately emits
+  // SessionStart after ensureSession() confirms the tmux session launched — a
+  // different launch mechanism whose emit must NOT be counted as a spawn-path stray.
+  const spawnFnStart = src.indexOf('export function sendGrokPrompt(');
+  assert.ok(spawnFnStart >= 0, 'sendGrokPrompt (the spawn path) must exist');
+  const spawnGate = src.indexOf("child.once('spawn'", spawnFnStart);
+  const beforeGate = src.slice(spawnFnStart, spawnGate);
+  const stray = beforeGate.match(/_emitGrokHook\(root, 'SessionStart'/g) || [];
   assert.strictEqual(stray.length, 0, 'no SessionStart may be emitted before the spawn is confirmed');
 });
 

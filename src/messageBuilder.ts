@@ -431,24 +431,31 @@ export function buildMessage(
   const todoPath = path.join(todoDir, 'TODO.md');
   const taskMessage = buildTaskInstruction(task, todoPath, root, meta.noCommit);
 
-  const messageFile = writeMessageFile(root, taskMessage);
-
-  // Task message FIRST so the agent sees what to do immediately,
-  // then the full protocol/profile follows as context.
-  const parts: string[] = [];
+  // System reminders that must precede the task text. The dispatcher feeds the
+  // model from the messageFile (via writeCombinedFile), NOT from the returned
+  // `prompt` string, so these MUST be written into the messageFile — otherwise
+  // they are silently dropped for every provider.
+  const reminders: string[] = [];
   // On the first turn of the session (same signal as includeProfile), prepend a
-  // short system reminder pointing at program.md (protocol index) + SOUL.md
-  // (identity anchor). Gated on program.md actually existing so a deleted file
+  // short system reminder pointing at PROGRAM.md (protocol index) + SOUL.md
+  // (identity anchor). Gated on PROGRAM.md actually existing so a deleted file
   // never produces a broken pointer. Once per session/loop start — not every turn.
   if (includeProfile) {
     const reminder = firstTurnSystemReminder(root);
-    if (reminder) { parts.push(reminder); }
+    if (reminder) { reminders.push(reminder); }
   }
   // On ANY turn, if SOUL.md changed since we last saw it (e.g. the office edited the
   // agent's identity live), tell the agent to re-read it — not just on turn 1.
   const soulUpd = soulUpdatedReminder(root);
-  if (soulUpd) { parts.push(soulUpd); }
-  parts.push(taskMessage);
+  if (soulUpd) { reminders.push(soulUpd); }
+
+  // Reminders FIRST, then the task text, written to the file the model reads.
+  const messageBody = [...reminders, taskMessage].join('\n\n---\n\n');
+  const messageFile = writeMessageFile(root, messageBody);
+
+  // The combined `prompt` string mirrors the same ordering for the (currently
+  // unused) UI-provider path; profile is appended by writeCombinedFile at dispatch.
+  const parts: string[] = [...reminders, taskMessage];
   if (includeProfile && finalProfileBody.trim()) {
     parts.push(`# Project Instructions (AUTODEV.md)\n\n${finalProfileBody.trim()}`);
   }

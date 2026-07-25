@@ -43,9 +43,17 @@ ok('a stale allow:["*"] is stripped and replaced with defaultMode', () => {
   assert.ok(!('allow' in perms) || !perms.allow.includes('*'), 'the invalid wildcard is gone');
 });
 
-ok('real allow entries survive; only the "*" is removed', () => {
+ok('real allow entries survive; the "*" is removed; managed MCP allows are added', () => {
   const perms = project({ permissions: { allow: ['Bash(ls)', '*', 'mcp__pixel-office__*'] } }).permissions;
-  assert.deepStrictEqual(perms.allow, ['Bash(ls)', 'mcp__pixel-office__*'], 'kept valid rules, dropped "*"');
+  // The invalid wildcard is dropped (the security-relevant guarantee)…
+  assert.ok(!perms.allow.includes('*'), 'the invalid "*" wildcard is dropped');
+  // …pre-existing valid rules are preserved…
+  assert.ok(perms.allow.includes('Bash(ls)'), 'kept the Bash(ls) rule');
+  assert.ok(perms.allow.includes('mcp__pixel-office__*'), 'kept the explicit pixel-office glob');
+  // …and explicit per-server allows for the managed MCP servers are appended
+  // (defaultMode alone is NOT honored by a non-interactive `claude -p`).
+  assert.ok(perms.allow.includes('mcp__pixel-office'), 'added the managed pixel-office allow');
+  assert.ok(perms.allow.includes('mcp__memory'), 'added the managed memory allow');
   assert.strictEqual(perms.defaultMode, 'bypassPermissions');
 });
 

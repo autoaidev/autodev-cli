@@ -18,6 +18,7 @@ import path from 'node:path';
 
 const { buildMessage, firstTurnSystemReminder, rebuildProfile } =
   await import('../out/messageBuilder.js');
+const { writeCombinedFile } = await import('../out/core/commandHelpers.js');
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -64,6 +65,42 @@ ok('buildMessage: first turn injects the reminder ahead of the task', () => {
     prompt.indexOf('<system-reminder>') < prompt.indexOf('NEXT TASK TO BEGIN'),
     'reminder must precede the task message',
   );
+});
+
+// ── R1d: DISPATCH TRUTH — the reminder must reach the model, which reads the
+// messageFile (via writeCombinedFile), NOT the returned `prompt`. Guards the
+// regression where reminders lived only in the discarded `prompt` string. ──
+ok('buildMessage: first-turn reminder is in the messageFile the model actually reads', () => {
+  const d = tmpRoot();
+  const { messageFile } = buildMessage(task, d, d, true);
+  const msg = fs.readFileSync(messageFile, 'utf8');
+  assert.ok(msg.includes('<system-reminder>'), 'messageFile itself must carry the reminder');
+  assert.match(msg, /PROGRAM\.md/);
+  assert.match(msg, /SOUL\.md/);
+  // And the combined file the dispatcher feeds the model must too.
+  const combined = fs.readFileSync(
+    writeCombinedFile(d, path.join(d, '.autodev', 'PROGRAM.md'), messageFile, true), 'utf8');
+  assert.ok(combined.includes('<system-reminder>'), 'dispatched combined file must carry the reminder');
+  assert.ok(
+    combined.indexOf('<system-reminder>') < combined.indexOf('NEXT TASK TO BEGIN'),
+    'reminder must precede the task in the dispatched file',
+  );
+});
+
+// ── R1e: DISPATCH TRUTH for the SOUL-updated re-read reminder (the office edits
+// SOUL.md live) — it must land in the messageFile, not just `prompt`. ──
+ok('buildMessage: live SOUL edit → re-read reminder reaches the messageFile', () => {
+  const d = tmpRoot();
+  const soul = path.join(d, 'SOUL.md');
+  fs.writeFileSync(soul, '# Soul\nName: Nova\n');
+  fs.utimesSync(soul, new Date(1000_000), new Date(1000_000));
+  buildMessage(task, d, d, false);            // observe once → marker recorded, silent
+  fs.writeFileSync(soul, '# Soul\nName: Nova\n\n## Persona\nNow a designer.\n');
+  fs.utimesSync(soul, new Date(2000_000), new Date(2000_000)); // office edit advances mtime
+  const { messageFile } = buildMessage(task, d, d, false);     // subsequent turn
+  const msg = fs.readFileSync(messageFile, 'utf8');
+  assert.match(msg, /UPDATED/, 'messageFile must tell the agent SOUL.md was updated');
+  assert.match(msg, /Re-read `SOUL\.md`/, 'messageFile must instruct re-reading SOUL.md');
 });
 
 // ── R1c: subsequent turn (includeProfile=false) → no reminder. ──

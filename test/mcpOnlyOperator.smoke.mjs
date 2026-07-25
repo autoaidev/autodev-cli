@@ -69,7 +69,11 @@ ok('loop agent → pixel-office is the operator bridge (--no-socket) via the aut
   assert.ok(po.command.includes('mcp-operate'), 'via the mcp-operate bridge');
   assert.strictEqual(po.command[2], '.', 'relative workspace path (portable config)');
   assert.ok(!po.command.includes('--url'), 'operator (office-mcp) default, not A2A');
-  assert.ok(po.command.includes('--no-socket'), 'loop agent skips the socket (loop owns the slug / steer delivery)');
+  // --no-socket is NO LONGER baked into the managed config: mcpOnly is a static
+  // guess that mis-flagged office/`setup`-bound agents OFFLINE. The bridge now
+  // decides at RUNTIME from ws-presence.lock — poll-only if a live loop owns the
+  // slug, presence socket otherwise (self-healing). See configManager.ts.
+  assert.ok(!po.command.includes('--no-socket'), 'no hard-coded --no-socket; bridge self-skips at runtime via the presence lock');
 });
 
 // ---------------------------------------------------------------------------
@@ -116,7 +120,9 @@ ok('grok loop agent → .grok/config.toml pixel-office is the CLI operator bridg
   assert.ok(/\[mcp_servers\.pixel-office\]/.test(toml), 'has a pixel-office mcp_servers block');
   assert.ok(/command\s*=\s*"autodev"/.test(toml), 'loop grok bridges via the autodev CLI');
   assert.ok(!toml.includes('/api/mcp/a2a'), 'loop grok uses the operator (office-mcp) default, not A2A');
-  assert.ok(toml.includes('--no-socket'), 'loop grok skips the socket (the loop owns the slug / steers)');
+  // No baked-in --no-socket: the grok bridge, like opencode, self-skips its socket
+  // at RUNTIME when a live loop owns the slug (ws-presence.lock). See configManager.ts.
+  assert.ok(!toml.includes('--no-socket'), 'no hard-coded --no-socket; grok bridge self-skips at runtime via the presence lock');
   assert.ok(!toml.includes('AGENTKEY'), 'no api_key leaked into the grok config');
 });
 
@@ -132,11 +138,13 @@ ok('grok mcp-only agent → .grok/config.toml pixel-office is the operator comma
 });
 
 // ---------------------------------------------------------------------------
-// 4. Both modes bridge to the operator (full toolkit, no token, no A2A), and
-//    differ ONLY by the presence socket: mcp-only keeps it, loop skips it so the
-//    loop's own WS stays the slug's live connection and receives office steers.
+// 4. Both modes bridge to the operator (full toolkit, no token, no A2A) with an
+//    IDENTICAL managed config. The presence socket is no longer baked in via the
+//    static mcpOnly guess (which mis-flagged office/`setup`-bound agents OFFLINE);
+//    the bridge decides at RUNTIME from ws-presence.lock — poll-only when a live
+//    loop owns the slug, presence socket otherwise. See configManager.ts.
 // ---------------------------------------------------------------------------
-ok('loop vs mcp-only differ only by the presence socket', () => {
+ok('loop and mcp-only share one config; presence is a runtime decision', () => {
   const loop = boundWorkspace(false);
   const only = boundWorkspace(true);
   ConfigManager.syncProjectMcpServers(loop);
@@ -146,9 +154,10 @@ ok('loop vs mcp-only differ only by the presence socket', () => {
   assert.strictEqual(a.type, 'local');
   assert.strictEqual(b.type, 'local');
   assert.ok(!a.command.includes('--url') && !b.command.includes('--url'), 'both use the operator (office-mcp) default');
-  assert.ok(a.command.includes('--no-socket'), 'loop skips the socket (loop owns the slug / steer delivery)');
-  assert.ok(!b.command.includes('--no-socket'), 'mcp-only keeps the socket (bridge is its presence)');
-  assert.notDeepStrictEqual(a.command, b.command, 'the two modes differ');
+  // --no-socket is never hard-coded in either mode now (runtime lock decides).
+  assert.ok(!a.command.includes('--no-socket'), 'loop config carries no baked-in --no-socket');
+  assert.ok(!b.command.includes('--no-socket'), 'mcp-only config carries no baked-in --no-socket');
+  assert.deepStrictEqual(a.command, b.command, 'both modes produce the identical managed config');
 });
 
 console.log(`\n${pass} checks passed`);

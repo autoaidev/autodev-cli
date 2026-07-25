@@ -14,14 +14,20 @@
 //   (h) graph_map cold-start index — hubs + open questions + decisions + live contradictions
 //   (i) node summaries — round-trip; deterministic rollup when absent; legacy lines load; staleness
 //   (j) graph_search — ranked, citable, best-first bundle with a path that prefers provenance edges
+// And the Tier 2 (structure + scale) work:
+//   (k) source-path auto-scaffold — dir→file→fact parent_of spine, idempotent; area tag; parse guards
+//   (l) graph_toc — depth-bounded tree with summaries + "+K more" collapse + root drill
+//   (m) snapshot+tail materialization == full replay (byte-parity of resident maps); corrupt→fallback
+//   (n) pinned nodes always appear + budget degradation emits explicit omissions/collapse
+//   (o) graph_rollup — deterministic-id summary node upserts, links members, members stay addressable
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  GraphStore, GraphInvariantError, canonicalKey, estimateTokens,
+  GraphStore, GraphInvariantError, canonicalKey, estimateTokens, parseSourcePath,
 } from '../out/graphStore.js';
-import { fmtNode, renderNeighbors, renderMap, renderSearch } from '../out/graphRender.js';
+import { fmtNode, renderNeighbors, renderMap, renderSearch, renderToc } from '../out/graphRender.js';
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + msg); } else { console.log('  ✓ ' + msg); } };
@@ -391,6 +397,231 @@ console.log('(j) graph_search — ranked citable bundle, prefers provenance edge
   const rendered = renderSearch(res);
   ok(rendered.includes('[' + svc.node.id + ']') && /matched/.test(rendered), 'renderSearch cites [id] with a WHY');
   ok(/via .*supports/.test(rendered), 'render shows the supports provenance edge in a WHY line');
+}
+
+// helper: all edges incident to a node (via a hops=1 neighbors expansion)
+const edgesAround = (store, id) => {
+  const r = store.neighbors({ idOrName: id, hops: 1, limit: 500, includeConflicts: true });
+  return r ? r.edges : [];
+};
+
+// ── (k) source-path auto-scaffold: dir→file→fact parent_of spine, idempotent ──
+console.log('(k) parent_of auto-scaffold from source paths');
+{
+  const root = mkWorkspace();
+  const s = mkStore(root, 'a');
+  const cl = s.addNode({ type: 'claim', name: 'charges in cents', source: 'src/foo/bar.ts:12' });
+
+  const dirTop = s.getNode('entity:path:src');
+  const dirMid = s.getNode('entity:path:src/foo');
+  const file = s.getNode('entity:path:src/foo/bar.ts');
+  ok(!!dirTop && !!dirMid && !!file, 'file + ancestor-dir entities were derived from the source path');
+  ok(file.props?.autoScaffold === true && file.props?.kind === 'file', 'derived file entity carries autoScaffold + kind=file');
+  ok(dirTop.props?.kind === 'dir' && dirMid.props?.kind === 'dir', 'derived dir entities carry kind=dir');
+
+  const spine = (from, to) => edgesAround(s, from).some((e) => e.type === 'parent_of' && e.from === from && e.to === to && e.props?.autoScaffold === true);
+  ok(spine(dirTop.id, dirMid.id), 'parent_of: src → src/foo (autoScaffold)');
+  ok(spine(dirMid.id, file.id), 'parent_of: src/foo → src/foo/bar.ts');
+  ok(spine(file.id, cl.node.id), 'parent_of: file → the fact (claim)');
+
+  // idempotency: a second fact from the SAME file reuses the spine, no duplicate dir edges
+  const entBefore = s.query({ type: 'entity', limit: 100 }).length;
+  const cl2 = s.addNode({ type: 'claim', name: 'rounds half-up', source: 'src/foo/bar.ts:20' });
+  const entAfter = s.query({ type: 'entity', limit: 100 }).length;
+  ok(entBefore === 3 && entAfter === 3, 'path entities are deduped — still exactly 3 (dir/dir/file), got ' + entAfter);
+  const srcChildEdges = edgesAround(s, dirTop.id).filter((e) => e.type === 'parent_of' && e.from === dirTop.id);
+  ok(srcChildEdges.length === 1, 'no duplicate dir→dir parent_of edge after a second scaffold (got ' + srcChildEdges.length + ')');
+  ok(spine(file.id, cl2.node.id), 'the new fact hangs under the SAME file entity');
+
+  // props.area convention: an area tag scaffolds an area entity + parent_of link
+  const note = s.addNode({ type: 'note', name: 'billing note', props: { area: 'billing' } });
+  const areaEnt = s.getNode('entity:area:billing');
+  ok(!!areaEnt && areaEnt.props?.autoScaffold === true, 'props.area upserts an area entity');
+  ok(edgesAround(s, areaEnt.id).some((e) => e.type === 'parent_of' && e.from === areaEnt.id && e.to === note.node.id), 'area entity parent_of the tagged node');
+
+  // parse guards: URLs and source-node ids are NOT treated as paths
+  ok(parseSourcePath('src/a/b.ts:10') !== null, 'parseSourcePath accepts a file:line');
+  ok(parseSourcePath('https://example.com/x.ts') === null, 'parseSourcePath rejects a URL');
+  ok(parseSourcePath('source:ab12') === null, 'parseSourcePath rejects a source-node id');
+  ok(parseSourcePath('justaword') === null, 'parseSourcePath rejects a bare word (not a path)');
+
+  // graph_stats nudge: a hub with children but no parent_of spine is flagged
+  const root2 = mkWorkspace();
+  const s2 = mkStore(root2, 'b');
+  const hub = s2.addNode({ type: 'entity', name: 'Spineless Hub' });
+  for (let i = 0; i < 4; i++) {
+    const c = s2.addNode({ type: 'note', name: 'child ' + i });
+    s2.addEdge({ type: 'relates_to', from: hub.node.id, to: c.node.id });
+  }
+  ok(s2.stats().spinelessHubs >= 1, 'graph_stats nudges: a hub with children but no parent_of spine (spinelessHubs≥1)');
+  ok(s.stats().spinelessHubs === 0, 'a graph with a scaffolded spine reports spinelessHubs=0');
+}
+
+// ── (l) graph_toc: depth-bounded tree with summaries + "+K more" collapse ─────
+console.log('(l) graph_toc — depth-bounded, summarized, collapsing');
+{
+  const root = mkWorkspace();
+  const s = mkStore(root, 'a');
+  const r = s.addNode({ type: 'entity', name: 'Root Module', summary: 'the top of the tree' });
+  const childIds = [];
+  for (let i = 0; i < 10; i++) {
+    const c = s.addNode({ type: 'entity', name: 'Child ' + i });
+    s.addEdge({ type: 'parent_of', from: r.node.id, to: c.node.id });
+    childIds.push(c.node.id);
+    // give the first child a grandchild so depth is meaningful
+    if (i === 0) {
+      const g = s.addNode({ type: 'claim', name: 'grandchild claim', inference: true });
+      s.addEdge({ type: 'parent_of', from: c.node.id, to: g.node.id });
+    }
+  }
+  const toc = s.toc({ depth: 2, maxChildren: 3 });
+  const rootNode = toc.roots.find((n) => n.id === r.node.id);
+  ok(!!rootNode, 'toc surfaces the parent_of spine root (no incoming parent_of)');
+  ok(rootNode.summary === 'the top of the tree' && rootNode.synthesized !== true, 'root shows its authored summary');
+  ok(rootNode.childCount === 10 && rootNode.children.length === 3, 'depth-bounded: 10 children, top 3 shown by degree');
+  ok(rootNode.moreChildren === 7, 'the rest collapse to "+K more" (moreChildren=7), got ' + rootNode.moreChildren);
+  // depth=2 shows children but COLLAPSES grandchildren (the child reports "+1 more")
+  const kidAt2 = rootNode.children.find((c) => c.childCount === 1);
+  ok(!!kidAt2 && kidAt2.children.length === 0 && kidAt2.moreChildren === 1, 'depth=2 is bounded: grandchildren collapse under the child');
+  // depth=3 expands one more level
+  const root3 = s.toc({ depth: 3, maxChildren: 3 }).roots.find((n) => n.id === r.node.id);
+  const kidAt3 = root3.children.find((c) => c.childCount === 1);
+  ok(!!kidAt3 && kidAt3.children.length === 1, 'depth=3 expands a grandchild under the child');
+
+  const rendered = renderToc(toc);
+  ok(/\[entity:[^\]]+\] entity "Root Module"/.test(rendered), 'renderToc shows the root [id] line');
+  ok(rendered.includes('… +7 more (drill: graph_toc root=' + r.node.id + ')'), 'renderToc emits the "+K more" drill hint');
+
+  // root= drill expands just that branch
+  const drill = s.toc({ root: r.node.id, depth: 1, maxChildren: 50 });
+  ok(drill.roots.length === 1 && drill.roots[0].childCount === 10, 'root= drill expands the requested branch fully at depth 1');
+
+  // sparse spine → clustering fallback
+  const root2 = mkWorkspace();
+  const s2 = mkStore(root2, 'b');
+  const a = s2.addNode({ type: 'entity', name: 'Alpha' });
+  const b = s2.addNode({ type: 'entity', name: 'Beta' });
+  s2.addEdge({ type: 'relates_to', from: a.node.id, to: b.node.id });
+  const toc2 = s2.toc();
+  ok(toc2.clustered === true && toc2.roots.length >= 1, 'no parent_of spine → graph_toc falls back to deterministic clustering');
+}
+
+// ── (m) snapshot + tail materialization == full replay ───────────────────────
+console.log('(m) snapshot+tail == full replay (disposable cache)');
+{
+  const root = mkWorkspace();
+  const idA = { agentId: 'A', runId: 'run-A' };
+  const A = new GraphStore(root, idA, { snapshot: true });
+  // build a base, then checkpoint a snapshot, then append a tail beyond it
+  const e1 = A.addNode({ type: 'entity', name: 'Payments', summary: 'core' });
+  const c1 = A.addNode({ type: 'claim', name: 'charges in cents', source: 'pay.ts:1' });
+  A.addEdge({ type: 'mentions', from: c1.node.id, to: e1.node.id });
+  ok(A.materializeSnapshot() === true, 'materializeSnapshot writes the cache');
+  const snapPath = path.join(root, '.autodev', 'graph', 'graph.snapshot.json');
+  ok(fs.existsSync(snapPath), 'graph.snapshot.json exists on disk');
+  // tail beyond the snapshot
+  const art = A.addNode({ type: 'artifact', name: 'invoice.pdf', version: '1.0.0' });
+  const run = A.addNode({ type: 'agent_run', name: 'nightly' });
+  A.addEdge({ type: 'produced', from: run.node.id, to: art.node.id });
+  A.supersede(c1.node.id, { type: 'claim', name: 'charges in cents (confirmed)', source: 'pay.ts:2' });
+
+  const snap = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
+  const logSize = fs.statSync(path.join(root, '.autodev', 'graph', 'graph.jsonl')).size;
+  ok(snap.coversBytes > 0 && snap.coversBytes < logSize, 'snapshot covers a PREFIX (tail path is exercised): coversBytes=' + snap.coversBytes + ' < ' + logSize);
+
+  const B = new GraphStore(root, { agentId: 'B', runId: 'run-B' }, { snapshot: true });   // snapshot + tail
+  const C = new GraphStore(root, { agentId: 'C', runId: 'run-C' }, { snapshot: false });  // pure full replay
+  const sB = collectState(B), sC = collectState(C);
+  ok(JSON.stringify(sB.nodes) === JSON.stringify(sC.nodes), 'snapshot+tail NODES byte-identical to full replay');
+  ok(JSON.stringify(sB.edges) === JSON.stringify(sC.edges), 'snapshot+tail EDGES byte-identical to full replay');
+  const stB = B.stats(), stC = C.stats();
+  ok(stB.nodeCount === stC.nodeCount && stB.edgeCount === stC.edgeCount && stB.superseded === stC.superseded, 'resident counts match (' + stB.nodeCount + 'n/' + stB.edgeCount + 'e, superseded=' + stB.superseded + ')');
+
+  // corrupt snapshot → falls back to full replay (JSONL is the sole source of truth)
+  fs.writeFileSync(snapPath, '{ this is not valid json');
+  const D = new GraphStore(root, { agentId: 'D', runId: 'run-D' }, { snapshot: true });
+  const sD = collectState(D);
+  ok(JSON.stringify(sD.nodes) === JSON.stringify(sC.nodes), 'corrupt snapshot → full-replay fallback, state intact');
+}
+
+// ── (n) pinned nodes always appear + budget degradation emits explicit omissions ─
+console.log('(n) pinned core tier + tiered budget degradation');
+{
+  const root = mkWorkspace();
+  const s = mkStore(root, 'a');
+  const center = s.addNode({ type: 'entity', name: 'Context Center' });
+  // a branch with several parent_of children (collapsible to a rollup)
+  const branch = s.addNode({ type: 'entity', name: 'Big Branch' });
+  s.addEdge({ type: 'parent_of', from: center.node.id, to: branch.node.id });
+  for (let i = 0; i < 20; i++) {
+    const c = s.addNode({ type: 'note', name: 'branch child ' + i + ' with a deliberately long name to cost tokens' });
+    s.addEdge({ type: 'parent_of', from: branch.node.id, to: c.node.id });
+  }
+  // a pinned "core" node, NOT in the neighbourhood
+  const core = s.addNode({ type: 'decision', name: 'Working agreement: no force-push', summary: 'never force-push main', pinned: undefined });
+  s.pin(core.node.id);
+  ok(s.pinnedNodes().some((n) => n.id === core.node.id), 'pin() marks a node as core');
+  ok(s.stats().pinned >= 1, 'graph_stats reports pinned count');
+
+  const res = s.neighbors({ idOrName: center.node.id, hops: 2, limit: 200 });
+  const rendered = renderNeighbors(res, {
+    tokenBudget: 40,
+    conflictsFor: () => [],
+    pinned: s.pinnedNodes(),
+    effectiveSummaryFor: (n) => s.effectiveSummary(n),
+    rollupFor: (id) => s.rollupSummary(id),
+  });
+  ok(rendered.includes('[' + center.node.id + ']'), 'center is always shown (even under a tiny budget)');
+  ok(rendered.includes('[' + core.node.id + ']'), 'pinned core node is ALWAYS prepended within budget');
+  ok(/(…\d+ more nodes \/ \d+ edges omitted \(token_budget\))|(branch collapsed)|(name-only)/.test(rendered), 'degradation is EXPLICIT (omission / branch-collapse / name-only), never silent');
+
+  // graph_map also prepends pinned
+  const m = s.map();
+  ok(m.pinned.some((e) => e.id === core.node.id), 'graph_map surfaces the pinned core tier');
+  ok(renderMap(m).includes('PINNED'), 'renderMap shows a PINNED section');
+
+  // reserved area:'core' also pins
+  const root2 = mkWorkspace();
+  const s2 = mkStore(root2, 'b');
+  const inv = s2.addNode({ type: 'note', name: 'invariant X', props: { area: 'core' } });
+  ok(s2.pinnedNodes().some((n) => n.id === inv.node.id), "reserved props.area='core' also pins a node");
+}
+
+// ── (o) graph_rollup: deterministic-id summary node, members addressable ──────
+console.log('(o) graph_rollup — deterministic summary node linking members');
+{
+  const root = mkWorkspace();
+  const s = mkStore(root, 'a');
+  const cluster = s.addNode({ type: 'entity', name: 'Auth Cluster', summary: 'authn/z surface' });
+  const memberIds = [];
+  for (let i = 0; i < 4; i++) {
+    const c = s.addNode({ type: 'claim', name: 'auth fact ' + i, inference: true });
+    s.addEdge({ type: 'parent_of', from: cluster.node.id, to: c.node.id });
+    memberIds.push(c.node.id);
+  }
+  const roll = s.rollup({ idOrName: cluster.node.id });
+  ok(roll.node.id === 'summary:auth-cluster', 'rollup uses a DETERMINISTIC id (summary:<centre-key>), got ' + roll.node.id);
+  ok(roll.created === true && roll.node.props?.rollup === true, 'rollup node is a note with props.rollup=true');
+  ok(memberIds.every((id) => roll.members.includes(id)), 'props.members lists every cluster member');
+
+  // members are linked derived_from and stay fully addressable
+  const rollEdges = edgesAround(s, roll.node.id).filter((e) => e.type === 'derived_from' && e.from === roll.node.id);
+  ok(rollEdges.length === memberIds.length, 'rollup links derived_from → each member (' + rollEdges.length + ')');
+  ok(memberIds.every((id) => s.getNode(id)?.name?.startsWith('auth fact')), 'every member stays fully addressable');
+
+  // re-running upserts the SAME node (concurrent-safe, no duplicate)
+  const roll2 = s.rollup({ idOrName: cluster.node.id });
+  ok(roll2.node.id === roll.node.id && roll2.created === false, 're-running graph_rollup upserts the same id (no duplicate)');
+  const rollupNotes = s.query({ type: 'note', limit: 100 }).filter((n) => n.props?.rollup === true);
+  ok(rollupNotes.length === 1, 'exactly ONE rollup node for the cluster after two runs, got ' + rollupNotes.length);
+
+  // summarize-mode helper returns the rollup node for the centre
+  const got = s.rollupNodeFor('Auth Cluster');
+  ok(got && got.id === roll.node.id, 'rollupNodeFor(centre) returns the summary node (graph_neighbors summarize=true path)');
+
+  // agent-supplied summary is honoured on upsert
+  const roll3 = s.rollup({ idOrName: cluster.node.id, summary: 'hand-written cluster gist' });
+  ok(s.getNode(roll3.node.id)?.summary === 'hand-written cluster gist', 'an agent-supplied summary overrides the deterministic rollup');
 }
 
 if (failures) { console.error(`\n${failures} assertion(s) FAILED`); process.exit(1); }

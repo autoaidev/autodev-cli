@@ -23,7 +23,7 @@ import { buildNotificationEvent } from '../core/liveNarration';
 import { extractClaudeUsage, type ClaudeUsagePayload } from '../core/claudeUsage';
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
-import { fmtNode, renderNeighbors, renderMap, renderSearch } from '../graphRender';
+import { fmtNode, renderNeighbors, renderMap, renderSearch, renderToc } from '../graphRender';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -264,7 +264,8 @@ export function mcpOperateCommand(program: Command): void {
             version: { type: 'string', description: 'For artifacts: the version/commit/semver this node describes.' },
             rubric: { type: 'string', description: 'For evaluations: the criteria judged against.' },
             aliases: { type: 'array', description: 'Other names for this entity.', items: { type: 'string' } },
-            props: { type: 'object', description: 'Arbitrary structured attributes.' },
+            props: { type: 'object', description: 'Arbitrary structured attributes. `area:"<tag>"` groups the node under an auto-created area entity (reserved `area:"core"` also pins it); a `file:line` source auto-scaffolds a dir→file→fact parent_of spine.' },
+            pinned: { type: 'boolean', description: 'Pin as project "core" (invariants / working agreement): graph_map and graph_neighbors ALWAYS prepend pinned nodes within budget.' },
           }, required: ['type', 'name'] as string[] },
         },
         {
@@ -317,8 +318,38 @@ export function mcpOperateCommand(program: Command): void {
             hops: { type: 'integer', description: 'Expansion depth 1-3 (default 1).' },
             edge_types: { type: 'array', description: 'Restrict traversal to these edge types.', items: { type: 'string' } },
             limit: { type: 'integer', description: 'Max edges to traverse (default 40).' },
-            token_budget: { type: 'integer', description: 'Approx token budget for the rendered subgraph (default 1500). Nodes are ranked center→proximity→recency and filled to budget; the rest are reported as "…N more … omitted", never silently dropped.' },
+            token_budget: { type: 'integer', description: 'Approx token budget for the rendered subgraph (default 1500). Nodes are ranked center→pinned→proximity→recency and filled to budget; over budget DEGRADES in tiers (body→name-only, then a branch collapses to its rollup summary), the rest reported as "…N more … omitted", never silently dropped. Pinned "core" nodes are always prepended.' },
             include_conflicts: { type: 'boolean', description: 'Always traverse contradicts edges so conflicting claims stay visible even under an edge_types filter (default true).' },
+            summarize: { type: 'boolean', description: 'PageIndex "return the section summary": if a rollup (graph_rollup) exists for this centre, return that summary node instead of expanding the branch.' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_toc',
+          description: 'Navigable TABLE-OF-CONTENTS — a depth-bounded, summarized hierarchy of the graph (the PageIndex text-stripped overview → drill pattern). The spine is parent_of (roots = entities with no incoming parent_of, auto-built from file:line sources); where the spine is sparse it falls back to deterministic clustering (by props.area, else connected components). Each level shows the top nodes by degree and collapses the rest to "+K more". Pass root=<id> to expand one branch.',
+          inputSchema: { type: 'object', properties: {
+            root: { type: 'string', description: 'Expand this branch (a node id/name). Omit for the top-level TOC.' },
+            depth: { type: 'integer', description: 'Levels to expand (default 2, max 6).' },
+            focus_type: { type: 'string', description: 'Restrict shown children to one node type.' },
+            max_children: { type: 'integer', description: 'Top-N children per level before "+K more" (default 8, max 50).' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_rollup',
+          description: 'Create/upsert a HIERARCHICAL ROLLUP for a cluster (a centre entity\'s parent_of descendants, else its N-hop neighbourhood): a deterministic-id summary node (id summary:<centre-key>, a note with props.rollup=true) linked derived_from→each member (members stay fully addressable). Re-running upserts the same node (concurrent-safe). Pass your own `summary`, or omit it for a deterministic no-LLM rollup. Then graph_neighbors summarize=true returns this summary instead of expanding the branch.',
+          inputSchema: { type: 'object', properties: {
+            id: { type: 'string', description: 'Centre node id (or use name).' },
+            name: { type: 'string', description: 'Centre node by name/alias.' },
+            hops: { type: 'integer', description: 'Neighbourhood radius when the centre has no parent_of descendants (default 1, max 3).' },
+            summary: { type: 'string', description: 'Optional agent-authored rollup text (else a deterministic structural rollup is synthesized).' },
+          }, required: [] as string[] },
+        },
+        {
+          name: 'graph_pin',
+          description: 'Pin (or unpin) a node as project "core" (invariants / working agreement). Pinned nodes are ALWAYS prepended within budget by graph_map and graph_neighbors.',
+          inputSchema: { type: 'object', properties: {
+            id: { type: 'string', description: 'Node id (or use name).' },
+            name: { type: 'string', description: 'Node by name/alias.' },
+            unpin: { type: 'boolean', description: 'Set true to remove the pin.' },
           }, required: [] as string[] },
         },
         {
@@ -342,6 +373,8 @@ export function mcpOperateCommand(program: Command): void {
       const handleGraphTool = (name: string, a: Record<string, unknown>): string => {
         try {
           if (name === 'graph_add_node') {
+            let props = (a.props && typeof a.props === 'object') ? { ...(a.props as Record<string, unknown>) } : undefined;
+            if (a.pinned === true) { props = { ...(props || {}), pinned: true }; }
             const { node, created } = graph.addNode({
               type: String(a.type ?? ''), name: String(a.name ?? ''),
               id: a.id ? String(a.id) : undefined, body: a.body ? String(a.body) : undefined,
@@ -351,7 +384,7 @@ export function mcpOperateCommand(program: Command): void {
               version: a.version ? String(a.version) : undefined,
               rubric: a.rubric ? String(a.rubric) : undefined,
               aliases: Array.isArray(a.aliases) ? (a.aliases as unknown[]).map(String) : undefined,
-              props: (a.props && typeof a.props === 'object') ? a.props as Record<string, unknown> : undefined,
+              props,
             });
             return `${created ? 'Created' : 'Updated'} node [${node.id}] ${node.type} "${node.name}". Link it with graph_add_edge.`;
           }
@@ -394,17 +427,51 @@ export function mcpOperateCommand(program: Command): void {
             return renderSearch(res);
           }
           if (name === 'graph_neighbors') {
+            const idOrName = String(a.id ?? a.name ?? '');
+            // summarize/auto mode (item 5): return the branch's rollup summary node, not the expansion.
+            if (a.summarize === true || a.mode === 'summarize' || a.mode === 'auto') {
+              const roll = graph.rollupNodeFor(idOrName);
+              if (roll) {
+                const members = Array.isArray(roll.props?.members) ? (roll.props?.members as unknown[]) : [];
+                return `Branch summary for "${idOrName}" (summarize mode — expand members with graph_neighbors summarize=false):\n`
+                  + fmtNode(roll, graph.contradictionsFor(roll.id))
+                  + (members.length ? `\nmembers (${members.length}): ${members.map(String).join(', ')}` : '');
+              }
+            }
             const res = graph.neighbors({
-              idOrName: String(a.id ?? a.name ?? ''), hops: a.hops ? Number(a.hops) : undefined,
+              idOrName, hops: a.hops ? Number(a.hops) : undefined,
               edgeTypes: Array.isArray(a.edge_types) ? (a.edge_types as unknown[]).map(String) : undefined,
               limit: a.limit ? Number(a.limit) : undefined,
               includeConflicts: a.include_conflicts !== false,
             });
-            if (!res) { return `No node matches "${String(a.id ?? a.name ?? '')}". Try graph_query first.`; }
+            if (!res) { return `No node matches "${idOrName}". Try graph_query first.`; }
             return renderNeighbors(res, {
               tokenBudget: a.token_budget ? Number(a.token_budget) : undefined,
               conflictsFor: (id) => graph.contradictionsFor(id),
+              pinned: graph.pinnedNodes(),
+              effectiveSummaryFor: (n) => graph.effectiveSummary(n),
+              rollupFor: (id) => graph.rollupSummary(id),
             });
+          }
+          if (name === 'graph_toc') {
+            return renderToc(graph.toc({
+              root: a.root ? String(a.root) : undefined,
+              depth: a.depth != null ? Number(a.depth) : undefined,
+              focusType: a.focus_type ? String(a.focus_type) : undefined,
+              maxChildren: a.max_children != null ? Number(a.max_children) : undefined,
+            }));
+          }
+          if (name === 'graph_rollup') {
+            const { node, members, created } = graph.rollup({
+              idOrName: String(a.id ?? a.name ?? ''),
+              hops: a.hops != null ? Number(a.hops) : undefined,
+              summary: a.summary ? String(a.summary) : undefined,
+            });
+            return `${created ? 'Created' : 'Updated'} rollup [${node.id}] "${node.name}" over ${members.length} member(s) (linked derived_from; members stay addressable). graph_neighbors summarize=true returns it.`;
+          }
+          if (name === 'graph_pin') {
+            const node = graph.pin(String(a.id ?? a.name ?? ''), a.unpin !== true);
+            return `${a.unpin === true ? 'Unpinned' : 'Pinned'} [${node.id}] "${node.name}".`;
           }
           if (name === 'graph_supersede') {
             const { oldId, node } = graph.supersede(String(a.old_id ?? ''), {
@@ -423,11 +490,12 @@ export function mcpOperateCommand(program: Command): void {
             const health: string[] = [];
             if (s.parseFailures > 0) { health.push(`⚠ ${s.parseFailures} corrupt log line(s)`); }
             if (s.tornFinalLine) { health.push('torn final line (pending write)'); }
+            if (s.spinelessHubs > 0) { health.push(`⚠ ${s.spinelessHubs} hub(s) have children but no parent_of spine — add a file:line source or graph_rollup to build the tree`); }
             return `Project graph @ ${graph.path}\n`
               + `nodes=${s.nodeCount} (${byType(s.nodesByType)})\n`
               + `edges=${s.edgeCount} (${byType(s.edgesByType)})\n`
               + `superseded=${s.superseded} · isolated=${s.isolated} · contradictions=${s.contradictions} · openQuestions=${s.openQuestions}\n`
-              + `unsummarized=${s.unsummarized} · staleSummaries=${s.staleSummaries}\n`
+              + `unsummarized=${s.unsummarized} · staleSummaries=${s.staleSummaries} · pinned=${s.pinned} · spinelessHubs=${s.spinelessHubs}\n`
               + `log: ${s.totalOps} ops → ${s.nodeCount + s.edgeCount} live (deadWeight=${s.deadWeight}, ${dwPct}%) · ${kb} KB · ~${s.estTokens} tokens · lastReplay=${s.lastReplayMs}ms`
               + (health.length ? `\nhealth: ${health.join(' · ')}` : '');
           }

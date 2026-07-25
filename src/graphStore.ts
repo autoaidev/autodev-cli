@@ -176,6 +176,39 @@ export function estimateTokens(s: string): number {
   return Math.ceil((s ? s.length : 0) / 4);
 }
 
+// ── Tier 2 constants ─────────────────────────────────────────────────────────
+/** Node types whose `file:line` source triggers the parent_of auto-scaffold (item 1). */
+const SCAFFOLD_SOURCE_TYPES = new Set<GraphNodeType>(['claim', 'artifact', 'decision', 'note']);
+/** Regenerate the materialised snapshot when the uncovered JSONL tail exceeds this many bytes. */
+const SNAPSHOT_TAIL_BYTES = 256 * 1024;
+/** …or this many ops applied since the last snapshot (item 3). */
+const SNAPSHOT_TAIL_OPS = 2000;
+
+/**
+ * Parse a `file:line`-style source into its cumulative path segments — the spine
+ * an auto-scaffold builds (item 1). `"src/foo/bar.ts:12"` → `["src","src/foo",
+ * "src/foo/bar.ts"]`; `"pay.ts:10"` → `["pay.ts"]`. Returns null for a URL, a
+ * source-node id (`source:ab12`), or anything that doesn't look like a path — the
+ * scaffold is deterministic and conservative, never a guess.
+ */
+export function parseSourcePath(source: string | undefined): string[] | null {
+  let s = String(source || '').trim();
+  if (!s) { return null; }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) { return null; }   // url (http://, file://, …)
+  s = s.replace(/:\d+(:\d+)?$/, '');                          // strip :line(:col)
+  s = s.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  if (!s || s.includes('..')) { return null; }
+  // must look like a file path: has a '/' or a dotted extension (rules out `source:ab12`)
+  const looksPath = s.includes('/') || /\.[a-z0-9]+$/i.test(s);
+  if (!looksPath) { return null; }
+  const parts = s.split('/').filter((x) => x && x !== '.');
+  if (!parts.length || parts.length > 20) { return null; }
+  const cumulative: string[] = [];
+  let acc = '';
+  for (const p of parts) { acc = acc ? `${acc}/${p}` : p; cumulative.push(acc); }
+  return cumulative;
+}
+
 // atomicity ceiling for a lock-free appendFileSync: writes at or below PIPE_BUF
 // (4096 on Linux) can't interleave with a concurrent writer. We warn a little
 // below it so a serialized op line that risks a torn interleave is never silent.
@@ -257,10 +290,31 @@ export interface MapEntry {
   summary?: string; synthesized?: boolean; stale?: boolean; degree: number;
 }
 export interface GraphMap {
+  /** Pinned "core" tier (item 4): project invariants always prepended within budget. */
+  pinned: MapEntry[];
   hubs: MapEntry[];
   questions: MapEntry[];
   decisions: MapEntry[];
   contradictions: { a: { id: string; name: string }; b: { id: string; name: string } }[];
+}
+
+/** One node of a navigable table-of-contents (item 2). */
+export interface TocNode {
+  id: string;
+  type: string;
+  name: string;
+  summary?: string;
+  synthesized?: boolean;
+  /** Total parent_of children (before the maxChildren cap). */
+  childCount: number;
+  children: TocNode[];
+  /** Children collapsed by the maxChildren cap or depth bound — the "+K more". */
+  moreChildren?: number;
+}
+export interface TocResult {
+  roots: TocNode[];
+  /** True when the spine was sparse and roots fell back to deterministic clustering. */
+  clustered?: boolean;
 }
 
 /** One row of a graph_search bundle — citable, with the edge-path from its seed. */
@@ -281,6 +335,13 @@ export interface SearchResult { intent: string; terms: string[]; budget: number;
 export class GraphStore {
   private readonly dir: string;
   private readonly file: string;
+  /** Disposable materialised cache for cold-start (item 3). JSONL stays the sole source of truth. */
+  private readonly snapshotFile: string;
+  private readonly snapshotEnabled: boolean;
+  /** Byte offset the on-disk snapshot covers (0 = none loaded/written this session). */
+  private snapshotCoversBytes = 0;
+  /** Ops applied since the last snapshot was written/loaded — the regeneration trigger. */
+  private opsSinceSnapshot = 0;
   private nodes = new Map<string, GraphNode>();
   private edges = new Map<string, GraphEdge>();
   /** nodeId → incident edges (both directions). Rebuilt on clear, kept in step in apply(). */
@@ -304,9 +365,13 @@ export class GraphStore {
   private idfCache: Map<string, number> | null = null;
   private idfCacheSeq = -1;
 
-  constructor(workspaceRoot: string, private identity: Identity) {
+  constructor(workspaceRoot: string, private identity: Identity, opts?: { snapshot?: boolean }) {
     this.dir = path.join(workspaceRoot, '.autodev', 'graph');
     this.file = path.join(this.dir, 'graph.jsonl');
+    this.snapshotFile = path.join(this.dir, 'graph.snapshot.json');
+    // Snapshot is on by default; pass { snapshot: false } for a pure full-replay store
+    // (used by tests to prove snapshot+tail == full replay).
+    this.snapshotEnabled = opts?.snapshot !== false;
     this.reloadIfChanged();
   }
 
@@ -328,6 +393,8 @@ export class GraphStore {
     this.parseFailures = 0;
     this.lastOffset = 0;
     this.idfCache = null;
+    this.snapshotCoversBytes = 0;
+    this.opsSinceSnapshot = 0;
   }
 
   /**
@@ -349,10 +416,14 @@ export class GraphStore {
     }
     if (st.size === this.lastSize && st.mtimeMs === this.lastMtimeMs) { return; }
     const t0 = Date.now();
+    const firstLoad = this.lastSize < 0;
     if (st.size < this.lastOffset) {
       // the file was truncated/rewritten under us — rebuild from scratch.
       this.clear();
-      this.replayRange(0, st.size);
+      this.loadFromScratch(st.size);
+    } else if (firstLoad) {
+      // cold start — try the materialised snapshot, else full replay.
+      this.loadFromScratch(st.size);
     } else {
       // append-only growth — fold just the new tail onto the current state.
       this.replayRange(this.lastOffset, st.size);
@@ -360,6 +431,109 @@ export class GraphStore {
     this.lastReplayMs = Date.now() - t0;
     this.lastSize = st.size;
     this.lastMtimeMs = st.mtimeMs;
+    if (this.snapshotEnabled) { this.maybeWriteSnapshot(st.size); }
+  }
+
+  // ── materialised snapshot (Tier 2, item 3) ─────────────────────────────────
+
+  /**
+   * Cold-start load: if a valid snapshot covers a prefix of the current log, adopt
+   * it and tail-replay only the uncovered bytes; otherwise full-replay. The
+   * snapshot is a DISPOSABLE cache — a missing / stale / corrupt one simply falls
+   * back to full replay, and the JSONL is never touched.
+   */
+  private loadFromScratch(size: number): void {
+    if (this.snapshotEnabled && this.tryLoadSnapshot(size)) {
+      this.replayRange(this.lastOffset, size); // fold the tail beyond the snapshot
+      return;
+    }
+    this.clear();
+    this.replayRange(0, size);
+  }
+
+  /** sha256 of the first min(4096, covers) bytes of the log — the cheap rewrite guard. */
+  private headSig(covers: number): string {
+    const n = Math.min(4096, covers);
+    const fd = fs.openSync(this.file, 'r');
+    try {
+      const b = Buffer.allocUnsafe(n);
+      let read = 0;
+      while (read < n) { const k = fs.readSync(fd, b, read, n - read, read); if (k <= 0) { break; } read += k; }
+      return crypto.createHash('sha256').update(b.subarray(0, read)).digest('hex');
+    } finally { fs.closeSync(fd); }
+  }
+
+  /**
+   * Adopt the on-disk snapshot iff it is a valid prefix of the current log:
+   * `coversBytes` in (0, size] AND the head-signature still matches (guards against
+   * a rewritten/truncated log whose prefix changed). Rebuilds the derived indexes
+   * from the resident node/edge set rather than trusting serialized indexes.
+   */
+  private tryLoadSnapshot(size: number): boolean {
+    try {
+      if (!fs.existsSync(this.snapshotFile)) { return false; }
+      const snap = JSON.parse(fs.readFileSync(this.snapshotFile, 'utf8')) as {
+        coversBytes?: unknown; headSig?: unknown; nodes?: unknown; edges?: unknown;
+      };
+      const covers = Number(snap.coversBytes);
+      if (!Number.isFinite(covers) || covers <= 0 || covers > size) { return false; }
+      if (!Array.isArray(snap.nodes) || !Array.isArray(snap.edges)) { return false; }
+      if (typeof snap.headSig !== 'string' || this.headSig(covers) !== snap.headSig) { return false; }
+      // valid → adopt. Populate the maps and rebuild adjacency + entity indexes.
+      this.clear();
+      for (const n of snap.nodes as GraphNode[]) { this.nodes.set(n.id, n); this.indexEntity(n); }
+      for (const e of snap.edges as GraphEdge[]) { this.edges.set(e.id, e); this.indexEdge(e); }
+      this.appliedOps = this.nodes.size + this.edges.size;
+      this.mutationSeq++;
+      this.idfCache = null;
+      this.lastOffset = covers;
+      this.snapshotCoversBytes = covers;
+      this.opsSinceSnapshot = 0;
+      return true;
+    } catch { return false; }
+  }
+
+  /** Regenerate the snapshot when the uncovered tail grew past the byte/op threshold. */
+  private maybeWriteSnapshot(size: number): void {
+    const uncoveredBytes = size - this.snapshotCoversBytes;
+    if (uncoveredBytes >= SNAPSHOT_TAIL_BYTES || this.opsSinceSnapshot >= SNAPSHOT_TAIL_OPS) {
+      this.writeSnapshot();
+    }
+  }
+
+  /**
+   * Write the snapshot atomically (temp file + rename) so a partial write is never
+   * visible and concurrent multi-agent regenerations can't corrupt it — the loser
+   * of a rename race simply leaves a consistent, self-describing file behind. Snaps
+   * only the byte prefix we've fully applied (`lastOffset`), so a torn final line is
+   * never captured.
+   */
+  private writeSnapshot(): boolean {
+    const covers = this.lastOffset;
+    if (covers <= 0) { return false; }
+    try {
+      this.ensureDir();
+      const snap = {
+        coversBytes: covers,
+        generatedAt: new Date().toISOString(),
+        generatedBy: this.identity.agentId,
+        headSig: this.headSig(covers),
+        nodes: [...this.nodes.values()],
+        edges: [...this.edges.values()],
+      };
+      const tmp = `${this.snapshotFile}.${process.pid}.${shortId()}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(snap));
+      fs.renameSync(tmp, this.snapshotFile);
+      this.snapshotCoversBytes = covers;
+      this.opsSinceSnapshot = 0;
+      return true;
+    } catch { return false; }
+  }
+
+  /** Force a snapshot now (test hook / explicit checkpoint). No-op when snapshots are disabled. */
+  materializeSnapshot(): boolean {
+    this.reloadIfChanged();
+    return this.snapshotEnabled ? this.writeSnapshot() : false;
   }
 
   /** Read bytes [start,end), apply every COMPLETE line, and advance lastOffset past them. */
@@ -397,6 +571,7 @@ export class GraphStore {
 
   private apply(op: LogOp): void {
     this.appliedOps++;
+    this.opsSinceSnapshot++;
     this.mutationSeq++; // invalidates the IDF cache (same signal reload rides)
     if (op.op === 'node') {
       const { op: _o, ...node } = op;
@@ -468,6 +643,15 @@ export class GraphStore {
   // ── writes ───────────────────────────────────────────────────────────────
 
   addNode(input: AddNodeInput): { node: GraphNode; created: boolean } {
+    return this.addNodeInternal(input, { scaffold: true });
+  }
+
+  /**
+   * The write path. `scaffold:true` (the public {@link addNode}) additionally runs
+   * the deterministic parent_of auto-scaffold (item 1); the scaffold's own entity
+   * writes pass `scaffold:false` so they never recurse.
+   */
+  private addNodeInternal(input: AddNodeInput, opts: { scaffold: boolean }): { node: GraphNode; created: boolean } {
     this.reloadIfChanged();
     const type = String(input.type || '').toLowerCase().trim() as GraphNodeType;
     if (!NODE_TYPES.includes(type)) {
@@ -520,7 +704,68 @@ export class GraphStore {
       updatedAt: now,
     };
     this.append({ op: 'node', ...node });
+    if (opts.scaffold) { this.scaffold(node); }
     return { node, created: !existing };
+  }
+
+  // ── parent_of auto-scaffold from source paths / area tags (Tier 2, item 1) ──
+
+  /**
+   * Deterministically fill the parent_of tree from a fact's provenance — NO LLM.
+   * A `file:line` source on a claim/artifact/decision/note upserts `entity` nodes
+   * for the file and its ancestor dirs and links a `dir → file → fact` spine; a
+   * `props.area` tag upserts an area entity and parents the fact under it. Every
+   * derived node/edge carries this run's provenance and a `props.autoScaffold=true`
+   * marker, and is idempotent (deterministic ids + edge dedup) so re-adds and
+   * concurrent writers converge instead of duplicating.
+   */
+  private scaffold(node: GraphNode): void {
+    try {
+      if (SCAFFOLD_SOURCE_TYPES.has(node.type) && node.source) { this.scaffoldFromSource(node); }
+      const area = node.props?.area;
+      if (typeof area === 'string' && area.trim()) { this.scaffoldFromArea(node, area.trim()); }
+    } catch { /* scaffolding is best-effort — it must never fail the primary write */ }
+  }
+
+  private scaffoldFromSource(node: GraphNode): void {
+    const segs = parseSourcePath(node.source);
+    if (!segs || !segs.length) { return; }
+    let prevId: string | null = null;
+    for (let i = 0; i < segs.length; i++) {
+      const p = segs[i];
+      const isFile = i === segs.length - 1;
+      const id = `entity:path:${p}`;
+      this.addNodeInternal(
+        { type: 'entity', name: p, id, props: { autoScaffold: true, kind: isFile ? 'file' : 'dir', path: p } },
+        { scaffold: false },
+      );
+      if (prevId) { this.linkParentOf(prevId, id, node.source); }
+      prevId = id;
+    }
+    if (prevId) { this.linkParentOf(prevId, node.id, node.source); }
+  }
+
+  private scaffoldFromArea(node: GraphNode, area: string): void {
+    const id = `entity:area:${slug(area)}`;
+    this.addNodeInternal(
+      { type: 'entity', name: area, id, props: { autoScaffold: true, kind: 'area', area } },
+      { scaffold: false },
+    );
+    this.linkParentOf(id, node.id);
+  }
+
+  /** Is there already an edge of `type` from→to? (idempotency for scaffold/rollup edges). */
+  private hasEdge(type: string, from: string, to: string): boolean {
+    for (const e of this.adjacency.get(from) || []) {
+      if (e.type === type && e.from === from && e.to === to) { return true; }
+    }
+    return false;
+  }
+
+  /** Add a parent_of edge (marked autoScaffold) unless it already exists. */
+  private linkParentOf(from: string, to: string, source?: string): void {
+    if (from === to || this.hasEdge('parent_of', from, to)) { return; }
+    this.addEdge({ type: 'parent_of', from, to, source, props: { autoScaffold: true } });
   }
 
   /** Deterministic id for a new node: entities dedupe by canonical key (+ aliases), others are fresh. */
@@ -901,7 +1146,36 @@ export class GraphStore {
       if (contradictions.length >= topK) { break; }
     }
 
-    return { hubs, questions: freshest('question'), decisions: freshest('decision'), contradictions };
+    const pinned = this.pinnedNodes().slice(0, topK).map((n) => this.mapEntry(n));
+    return { pinned, hubs, questions: freshest('question'), decisions: freshest('decision'), contradictions };
+  }
+
+  // ── pinned "core" tier (Tier 2, item 4) ────────────────────────────────────
+
+  /** A node is pinned by `props.pinned===true` or by the reserved `props.area==='core'`. */
+  private isPinnedNode(n: GraphNode): boolean {
+    const p = (n.props || {}) as { pinned?: unknown; area?: unknown };
+    return p.pinned === true || p.area === 'core';
+  }
+
+  /** Live pinned nodes (project invariants) — always prepended within budget. */
+  pinnedNodes(): GraphNode[] {
+    this.reloadIfChanged();
+    return [...this.nodes.values()]
+      .filter((n) => !n.supersededBy && this.isPinnedNode(n))
+      .sort((a, b) => this.degree(b.id) - this.degree(a.id) || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  }
+
+  /** Set/clear the pin flag on a node (upsert; the node stays otherwise unchanged). */
+  pin(idOrName: string, pinned = true): GraphNode {
+    this.reloadIfChanged();
+    const n = this.getNode(idOrName);
+    if (!n) { throw new GraphInvariantError(`${pinned ? 'pin' : 'unpin'}: node not found: ${idOrName}`); }
+    const { node } = this.addNodeInternal(
+      { type: n.type, name: n.name, id: n.id, props: { ...(n.props || {}), pinned } },
+      { scaffold: false },
+    );
+    return node;
   }
 
   // ── reasoning-based best-first retrieval (Tier 1, item 4) ──────────────────
@@ -974,12 +1248,196 @@ export class GraphStore {
     return { intent, terms, budget, hops, rows: out };
   }
 
+  // ── navigable table-of-contents (Tier 2, item 2) ───────────────────────────
+
+  private parentOfChildIds(id: string): string[] {
+    const out: string[] = [];
+    for (const e of this.adjacency.get(id) || []) {
+      if (e.type === 'parent_of' && e.from === id) { out.push(e.to); }
+    }
+    return out;
+  }
+  private hasParentOfParent(id: string): boolean {
+    return (this.adjacency.get(id) || []).some((e) => e.type === 'parent_of' && e.to === id);
+  }
+  private hasParentOfChild(id: string): boolean {
+    return (this.adjacency.get(id) || []).some((e) => e.type === 'parent_of' && e.from === id);
+  }
+
+  /** Connected components of `pool` over the given (undirected) edge types. */
+  private components(pool: GraphNode[], edgeTypes: string[]): GraphNode[][] {
+    const idset = new Set(pool.map((n) => n.id));
+    const parent = new Map<string, string>();
+    const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x) as string) as string); x = parent.get(x) as string; } return x; };
+    for (const n of pool) { parent.set(n.id, n.id); }
+    const allow = new Set(edgeTypes);
+    for (const e of this.edges.values()) {
+      if (!allow.has(e.type) || !idset.has(e.from) || !idset.has(e.to)) { continue; }
+      const ra = find(e.from), rb = find(e.to);
+      if (ra !== rb) { parent.set(ra, rb); }
+    }
+    const groups = new Map<string, GraphNode[]>();
+    for (const n of pool) { const r = find(n.id); const g = groups.get(r); if (g) { g.push(n); } else { groups.set(r, [n]); } }
+    return [...groups.values()];
+  }
+
+  /**
+   * Depth-bounded, summarized hierarchy (PageIndex-style "text-stripped overview →
+   * drill"). The spine is `parent_of` (roots = entities with no incoming parent_of);
+   * where that spine is sparse the uncovered remainder falls back to deterministic
+   * clustering (by `props.area`, else connected components over relates_to/
+   * depends_on). Each level shows the top `maxChildren` by degree and collapses the
+   * rest to `+K more`. Summaries reuse {@link effectiveSummary}. Pass `root` to
+   * expand one branch.
+   */
+  toc(opts?: { root?: string; depth?: number; focusType?: string; maxChildren?: number }): TocResult {
+    this.reloadIfChanged();
+    const depth = Math.max(1, Math.min(6, opts?.depth ?? 2));
+    const maxChildren = Math.max(1, Math.min(50, opts?.maxChildren ?? 8));
+    const focus = opts?.focusType ? String(opts.focusType).toLowerCase() : undefined;
+
+    const build = (n: GraphNode, d: number, seen: Set<string>): TocNode => {
+      seen.add(n.id);
+      let kids = this.parentOfChildIds(n.id)
+        .map((id) => this.nodes.get(id))
+        .filter((c): c is GraphNode => !!c && !c.supersededBy && !seen.has(c.id));
+      if (focus) { kids = kids.filter((c) => c.type === focus); }
+      kids.sort((a, b) => this.degree(b.id) - this.degree(a.id) || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      const childCount = kids.length;
+      const cap = d > 1 ? maxChildren : 0;
+      const shown = kids.slice(0, cap);
+      const children = shown.map((c) => build(c, d - 1, seen));
+      const es = this.effectiveSummary(n);
+      const more = childCount - shown.length;
+      return { id: n.id, type: n.type, name: n.name, summary: es?.text, synthesized: es?.synthesized, childCount, children, moreChildren: more > 0 ? more : undefined };
+    };
+
+    if (opts?.root) {
+      const r = this.getNode(opts.root);
+      return r ? { roots: [build(r, depth, new Set())] } : { roots: [] };
+    }
+
+    const seen = new Set<string>();
+    const live = [...this.nodes.values()].filter((n) => !n.supersededBy);
+    const spineRoots = live
+      .filter((n) => this.hasParentOfChild(n.id) && !this.hasParentOfParent(n.id))
+      .sort((a, b) => this.degree(b.id) - this.degree(a.id) || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    const roots: TocNode[] = spineRoots.map((r) => build(r, depth, seen));
+
+    // Fall back to clustering for significant nodes the spine didn't cover.
+    const synthCluster = (id: string, label: string, members: GraphNode[]): TocNode => {
+      const sorted = [...members].sort((a, b) => this.degree(b.id) - this.degree(a.id));
+      const shown = sorted.slice(0, maxChildren);
+      const children = shown.map((m) => build(m, 1, seen));
+      const more = members.length - shown.length;
+      return { id, type: 'cluster', name: label, summary: `${members.length} node(s)`, childCount: members.length, children, moreChildren: more > 0 ? more : undefined };
+    };
+    const remaining = live.filter((n) => !seen.has(n.id) && this.degree(n.id) > 0);
+    const clusterRoots: TocNode[] = [];
+    if (remaining.length) {
+      const byArea = new Map<string, GraphNode[]>();
+      const rest: GraphNode[] = [];
+      for (const n of remaining) {
+        const area = typeof n.props?.area === 'string' ? (n.props.area as string) : undefined;
+        if (area) { const g = byArea.get(area); if (g) { g.push(n); } else { byArea.set(area, [n]); } }
+        else { rest.push(n); }
+      }
+      for (const [area, members] of byArea) { clusterRoots.push(synthCluster(`cluster:area:${slug(area)}`, `area: ${area}`, members)); }
+      for (const comp of this.components(rest, ['relates_to', 'depends_on'])) {
+        if (comp.length === 1) { continue; } // a lone node with only foreign edges — not a cluster
+        const rep = [...comp].sort((a, b) => this.degree(b.id) - this.degree(a.id))[0];
+        clusterRoots.push(synthCluster(`cluster:${rep.id}`, `cluster: ${rep.name}`, comp));
+      }
+      clusterRoots.sort((a, b) => b.childCount - a.childCount);
+    }
+
+    return { roots: [...roots, ...clusterRoots], clustered: roots.length === 0 && clusterRoots.length > 0 };
+  }
+
+  // ── hierarchical rollup / summary nodes (Tier 2, item 5) ────────────────────
+
+  /** Deterministic id for a cluster's rollup node, so concurrent rollups upsert not duplicate. */
+  private rollupId(center: GraphNode): string {
+    const key = center.id.startsWith('entity:') ? center.id.slice('entity:'.length) : center.id.replace(/[^a-z0-9]+/gi, '-');
+    return `summary:${key || 'x'}`;
+  }
+
+  /** parent_of descendants of a node (transitive), excluding itself. */
+  private descendants(id: string): string[] {
+    const out = new Set<string>();
+    const stack = [id];
+    while (stack.length) {
+      const cur = stack.pop() as string;
+      for (const cid of this.parentOfChildIds(cur)) {
+        if (cid !== id && !out.has(cid)) { out.add(cid); stack.push(cid); }
+      }
+    }
+    return [...out];
+  }
+
+  private rollupFromMembers(memberIds: string[]): string {
+    const counts = new Map<string, number>();
+    for (const mid of memberIds) { const n = this.nodes.get(mid); if (n) { counts.set(n.type, (counts.get(n.type) || 0) + 1); } }
+    const countStr = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c} ${t}`).join(', ');
+    const top = memberIds.map((id) => this.nodes.get(id)).filter((n): n is GraphNode => !!n)
+      .sort((a, b) => this.degree(b.id) - this.degree(a.id)).slice(0, 3).map((n) => n.name);
+    return `${memberIds.length} member(s): ${countStr}${top.length ? ` · top: ${top.join(', ')}` : ''}`;
+  }
+
+  /** The rollup/summary node for a cluster centre, if one has been created. */
+  rollupNodeFor(idOrName: string): GraphNode | undefined {
+    this.reloadIfChanged();
+    const c = this.getNode(idOrName);
+    if (!c) { return undefined; }
+    return this.nodes.get(this.rollupId(c));
+  }
+
+  /**
+   * Create or upsert a hierarchical rollup for a cluster (item 5). The cluster is a
+   * centre entity's `parent_of` descendants, or — absent a spine — its N-hop
+   * neighbourhood. The rollup is a `note` with `props.rollup=true` and a
+   * DETERMINISTIC id (`summary:<centre-key>`) so concurrent rollups of the same
+   * cluster upsert rather than duplicate; it links `derived_from → each member`
+   * (members stay fully addressable in `props.members`) and hangs under the centre
+   * via `parent_of` so it's discoverable in the TOC. Summary text is agent-supplied
+   * or the deterministic Tier-1 rollup (no LLM on the default path).
+   */
+  rollup(opts: { idOrName?: string; hops?: number; summary?: string }): { node: GraphNode; members: string[]; created: boolean } {
+    this.reloadIfChanged();
+    const center = opts.idOrName ? this.getNode(opts.idOrName) : undefined;
+    if (!center) { throw new GraphInvariantError(`graph_rollup: centre node not found: ${opts.idOrName ?? ''}`); }
+    const id = this.rollupId(center);
+    let members = this.descendants(center.id);
+    if (!members.length) {
+      const hops = Math.max(1, Math.min(3, opts.hops ?? 1));
+      const res = this.neighbors({ idOrName: center.id, hops, limit: 500 });
+      members = (res ? res.nodes : []).map((n) => n.id).filter((mid) => mid !== center.id);
+    }
+    members = members.filter((mid) => mid !== id && !mid.startsWith('summary:'));
+    const summaryText = (opts.summary && opts.summary.trim())
+      ? opts.summary.trim()
+      : (this.rollupSummary(center.id) || this.rollupFromMembers(members));
+    const { node, created } = this.addNodeInternal({
+      type: 'note', id, name: `Rollup: ${center.name}`,
+      summary: summaryText,
+      props: { rollup: true, of: center.id, members },
+    }, { scaffold: false });
+    this.linkParentOf(center.id, id);
+    for (const m of members) {
+      if (m === id || !this.nodes.has(m)) { continue; }
+      if (!this.hasEdge('derived_from', id, m)) { this.addEdge({ type: 'derived_from', from: id, to: m }); }
+    }
+    return { node, members, created };
+  }
+
   stats(): {
     nodeCount: number; edgeCount: number;
     nodesByType: Record<string, number>; edgesByType: Record<string, number>;
     superseded: number; isolated: number; contradictions: number; openQuestions: number;
     // Tier 1 summary telemetry (item 3)
     unsummarized: number; staleSummaries: number;
+    // Tier 2 structure telemetry (items 1 + 4)
+    spinelessHubs: number; pinned: number;
     // Tier 0 telemetry (item 8)
     fileBytes: number; totalOps: number; deadWeight: number; deadWeightRatio: number;
     lastReplayMs: number; estTokens: number; parseFailures: number; tornFinalLine: boolean;
@@ -994,7 +1452,7 @@ export class GraphStore {
     }
     // Types that benefit most from a summary (item 3).
     const SUMMARY_TYPES = new Set<GraphNodeType>(['entity', 'decision', 'question', 'artifact', 'agent_run']);
-    let isolated = 0, unsummarized = 0, staleSummaries = 0;
+    let isolated = 0, unsummarized = 0, staleSummaries = 0, spinelessHubs = 0, pinned = 0;
     for (const n of this.nodes.values()) {
       nodesByType[n.type] = (nodesByType[n.type] || 0) + 1;
       if (n.supersededBy) { superseded++; }
@@ -1003,6 +1461,10 @@ export class GraphStore {
       const hasSummary = !!(n.summary && n.summary.trim());
       if (!n.supersededBy && SUMMARY_TYPES.has(n.type) && !hasSummary) { unsummarized++; }
       if (hasSummary && this.summaryStale(n)) { staleSummaries++; }
+      if (!n.supersededBy && this.isPinnedNode(n)) { pinned++; }
+      // A hub with children (degree≥3) but NO parent_of spine — nudge to scaffold the tree (item 1).
+      if (!n.supersededBy && n.type === 'entity' && this.degree(n.id) >= 3
+          && !this.hasParentOfChild(n.id) && !this.hasParentOfParent(n.id)) { spinelessHubs++; }
       estTokens += estimateTokens(`${n.name}${n.summary ?? ''}${n.body ?? ''}`);
     }
     const contradictions = edgesByType['contradicts'] || 0;
@@ -1012,6 +1474,7 @@ export class GraphStore {
       nodeCount: this.nodes.size, edgeCount: this.edges.size,
       nodesByType, edgesByType, superseded, isolated, contradictions, openQuestions,
       unsummarized, staleSummaries,
+      spinelessHubs, pinned,
       fileBytes: this.lastSize < 0 ? 0 : this.lastSize,
       totalOps: this.appliedOps,
       deadWeight,

@@ -13,14 +13,17 @@ agent** in the workspace — what one agent learns, the swarm can read.
 
 | Tool | Use it to |
 |---|---|
-| `graph_map` | **Cold start — call this FIRST when you have no id/name in hand.** Ranks the graph's connectivity **hubs** by degree and bundles the **open questions**, **freshest decisions**, and **live contradictions**, each with a one-line summary. The "where do I start" entry point; then expand a hub with `graph_neighbors` or dig an intent with `graph_search`. |
+| `graph_map` | **Cold start — call this FIRST when you have no id/name in hand.** Prepends the **pinned "core" tier** (project invariants), then ranks the graph's connectivity **hubs** by degree and bundles the **open questions**, **freshest decisions**, and **live contradictions**, each with a one-line summary. The "where do I start" entry point; then walk the tree with `graph_toc`, expand a hub with `graph_neighbors`, or dig an intent with `graph_search`. |
+| `graph_toc` | **Navigable table-of-contents** — a depth-bounded, summarized hierarchy (the PageIndex text-stripped-overview → drill pattern). The spine is `parent_of` (roots = entities with no incoming `parent_of`, auto-built from `file:line` sources — see below); where the spine is sparse it falls back to deterministic clustering (by `props.area`, else connected components). Each level shows the top nodes by degree and collapses the rest to `+K more`. Pass `root=<id>` to drill one branch. |
 | `graph_search` | **Reasoning-based, best-first, citable retrieval** (vectorless — *you* are the reasoner). Give it an `intent`; it seeds a relevance-ranked query, then best-first expands a relevance-priority frontier (preferring strong provenance edges), and returns a ranked bundle of ≤`node_budget` nodes. Each row cites `[id]` with a one-line WHY — matched terms + the edge-path from its seed — plus contradiction/inference flags. Read the ~12 summaries and reason over them (the optional LLM-rerank is *your* job). |
-| `graph_neighbors` | **At task start** — resolve an entity/node by id or name and expand 1–3 hops to recall what's already known *before* acting. This is context construction, not a dump. Results are ranked (center → hop-proximity → recency) and filled to a `token_budget` (default 1500); anything over budget is reported as `…N more nodes / M edges omitted`, never silently dropped. Contradictions and unverified inferences are flagged inline. |
-| `graph_query` | Search nodes by type and/or text — now **relevance-ranked** (vectorless TF·IDF over name/summary/aliases/body, lifted by recency + connectivity). A multi-word intent uses OR-semantics, so a near-miss no longer returns empty and the most *relevant* node outranks the merely most *recent*; exact-substring matches are always included. `mode:'recent'` restores pure recency. Long bodies are truncated *explicitly* with `…(+K chars — full via graph_query id=…)`. |
-| `graph_add_node` | Record a typed fact and get its id. **SHOULD pass a one-line `summary`** on substantial nodes (see below). |
+| `graph_neighbors` | **At task start** — resolve an entity/node by id or name and expand 1–3 hops to recall what's already known *before* acting. This is context construction, not a dump. Results are ranked (center → **pinned core** → hop-proximity → recency) and filled to a `token_budget` (default 1500); over budget it **degrades in tiers** — body→name-only, then a branch collapses to its rollup summary — and reports `…N more nodes / M edges omitted`, never silently dropped. Pinned nodes are always prepended. `summarize:true` returns a branch's rollup summary node (see `graph_rollup`) instead of expanding it. Contradictions and unverified inferences are flagged inline. |
+| `graph_query` | Search nodes by type and/or text — **relevance-ranked** (vectorless TF·IDF over name/summary/aliases/body, lifted by recency + connectivity). A multi-word intent uses OR-semantics, so a near-miss no longer returns empty and the most *relevant* node outranks the merely most *recent*; exact-substring matches are always included. `mode:'recent'` restores pure recency. Long bodies are truncated *explicitly* with `…(+K chars — full via graph_query id=…)`. |
+| `graph_add_node` | Record a typed fact and get its id. **SHOULD pass a one-line `summary`** on substantial nodes (see below). Pass `pinned:true` to add it to the core tier; a `file:line` source auto-scaffolds the `parent_of` tree; a `props.area` tag groups it under an area. |
 | `graph_add_edge` | Link two nodes with a typed, sourced relationship (validated against the edge ontology below). |
+| `graph_rollup` | **Hierarchical summary node** for a cluster (a centre entity's `parent_of` descendants, else its N-hop neighbourhood). Creates/upserts a deterministic-id node (`summary:<centre-key>`, a `note` with `props.rollup=true`) linked `derived_from → each member` — members stay fully addressable in `props.members`. Pass your own `summary`, or omit for a deterministic no-LLM rollup. Then `graph_neighbors summarize=true` returns it instead of expanding the branch. Re-running upserts the same node (concurrent-safe). |
+| `graph_pin` | Pin/unpin a node as project **core** (invariants / working agreement). Pinned nodes are ALWAYS prepended within budget by `graph_map` and `graph_neighbors`. |
 | `graph_supersede` | Version a fact that changed (old node stays addressable). |
-| `graph_stats` | Health + telemetry — gaps, isolated nodes, contradictions, open questions, **summary coverage (unsummarized / stale)**, log size / dead-weight ratio, replay time, estimated tokens, and any corrupt log lines. |
+| `graph_stats` | Health + telemetry — gaps, isolated nodes, contradictions, open questions, **summary coverage (unsummarized / stale)**, **pinned count**, **spineless hubs** (children but no `parent_of` spine), log size / dead-weight ratio, replay time, estimated tokens, and any corrupt log lines. |
 
 ### Summaries — the navigation enabler
 
@@ -32,6 +35,31 @@ render. Interior/hub nodes *without* an authored summary get a **deterministic
 structural rollup** (child type counts + top child names by degree — no LLM call).
 A summary goes **stale** when its node is superseded or gains children afterwards;
 `graph_stats` surfaces `unsummarized` and `staleSummaries` so the swarm can top them up.
+
+### Structure & scale (the tree, the core tier, the cache)
+
+**`parent_of` auto-scaffold — the tree fills itself.** When you add a `claim` / `artifact`
+/ `decision` / `note` with a `file:line`-style `source` (e.g. `src/auth/token.ts:42`), the
+graph **deterministically** (no LLM) upserts `entity` nodes for the file and its ancestor
+dirs and links a `dir → file → fact` `parent_of` spine. Derived nodes/edges carry your run's
+provenance and `props.autoScaffold=true`, and are idempotent (deterministic ids + edge dedup),
+so many agents and re-adds converge instead of duplicating. This is what makes `graph_toc`
+navigable — so **cite a `file:line` source** whenever a fact has one.
+
+**`props.area` convention.** Tag a node with `props.area:"<tag>"` to group it under an
+auto-created area entity (`entity:area:<tag>`) — a second, orthogonal spine for facts that
+aren't file-anchored, and a clustering hint `graph_toc` uses when the `parent_of` spine is
+sparse. The reserved **`props.area:"core"`** (or `pinned:true`, or `graph_pin`) marks a node
+as a **pinned core invariant**: `graph_map` and `graph_neighbors` always prepend it within
+budget. Pin a *few* nodes (the working agreement / project invariants), not many.
+
+**Snapshot cache (cold-start perf).** A materialized `.autodev/graph/graph.snapshot.json`
+(`{coversBytes, generatedAt, generatedBy, headSig, nodes, edges}`) lets a fresh store load a
+prefix and tail-replay only the uncovered bytes instead of full-replaying the whole log. It is
+a **disposable cache** — the JSONL stays the sole source of truth, and a missing / stale /
+corrupt snapshot silently falls back to full replay. It regenerates opportunistically (temp
+file + atomic `rename`) once the uncovered tail exceeds ~256 KB / 2000 ops; the JSONL is never
+rewritten. You don't manage it — it just makes reload cheap on large graphs.
 
 ### Schema
 

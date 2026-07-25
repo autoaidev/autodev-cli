@@ -10,7 +10,7 @@
  *    edges are surfaced inline so a silently-conflicting fact can't slip past.
  */
 
-import type { GraphNode, GraphEdge, GraphMap, SearchResult } from './graphStore';
+import type { GraphNode, GraphEdge, GraphMap, SearchResult, TocResult, TocNode } from './graphStore';
 
 /** Max body chars shown inline before an explicit truncation pointer. */
 export const BODY_CAP = 200;
@@ -83,6 +83,9 @@ function fmtMapEntry(e: GraphMap['hubs'][number]): string {
  */
 export function renderMap(m: GraphMap): string {
   const sections: string[] = [];
+  if (m.pinned && m.pinned.length) {
+    sections.push(`PINNED · core (${m.pinned.length} — always shown):\n${m.pinned.map(fmtMapEntry).join('\n')}`);
+  }
   sections.push(`HUBS (by connectivity, ${m.hubs.length}):\n${m.hubs.map(fmtMapEntry).join('\n') || '(none — graph is sparse or unlinked)'}`);
   if (m.questions.length) { sections.push(`OPEN QUESTIONS (${m.questions.length}):\n${m.questions.map(fmtMapEntry).join('\n')}`); }
   if (m.decisions.length) { sections.push(`RECENT DECISIONS (${m.decisions.length}):\n${m.decisions.map(fmtMapEntry).join('\n')}`); }
@@ -130,44 +133,134 @@ export interface NeighborsResult {
 /** ~4 chars per token. */
 function estTokens(s: string): number { return Math.ceil(s.length / 4); }
 
+/** Effective (authored or synthesized) summary of a node, for the full-detail line. */
+export type EffSummary = { text: string; synthesized: boolean } | undefined;
+
+export interface RenderNeighborsOpts {
+  tokenBudget?: number;
+  conflictsFor: (id: string) => Conflict[];
+  /** Pinned "core" nodes (item 4) — always prepended within budget, even off-neighbourhood. */
+  pinned?: GraphNode[];
+  /** Effective summary provider so a full line can show the authored/synthesized gist. */
+  effectiveSummaryFor?: (n: GraphNode) => EffSummary;
+  /** Deterministic branch rollup (item 5) — used to collapse a branch that won't fit. */
+  rollupFor?: (id: string) => string | undefined;
+}
+
+/** A node line stripped to name-only (drops body/summary) — the first degradation tier. */
+function nameOnlyLine(n: GraphNode, conflicts: Conflict[]): string {
+  return fmtNode({ id: n.id, type: n.type, name: n.name, source: n.source, version: n.version, inference: n.inference, supersededBy: n.supersededBy }, conflicts);
+}
+
 /**
- * Render a bounded neighbourhood: rank nodes center → hop-proximity → recency,
- * fill to `tokenBudget`, then include only edges between shown nodes. Whatever
- * doesn't fit is reported EXPLICITLY as `…N more nodes / M edges omitted`.
+ * Render a bounded neighbourhood (Tier 2, item 4). Order: center → pinned core →
+ * neighbours ranked by hop-proximity then recency. Fill to `tokenBudget`; when a
+ * node won't fit, DEGRADE in tiers rather than silently drop — (a) body→name-only,
+ * (b) substitute a branch's rollup summary for its members, (c) explicit
+ * `…N more omitted`. Center + pinned nodes ALWAYS appear (degraded if need be).
  */
-export function renderNeighbors(
-  res: NeighborsResult,
-  opts: { tokenBudget?: number; conflictsFor: (id: string) => Conflict[] },
-): string {
+export function renderNeighbors(res: NeighborsResult, opts: RenderNeighborsOpts): string {
   const budget = Math.max(200, opts.tokenBudget ?? DEFAULT_TOKEN_BUDGET);
-  const ranked = [...res.nodes].sort((x, y) => {
-    if (x.id === res.center.id) { return -1; }
-    if (y.id === res.center.id) { return 1; }
-    const dx = res.dist[x.id] ?? 99, dy = res.dist[y.id] ?? 99;
-    if (dx !== dy) { return dx - dy; }
-    return (y.updatedAt || '').localeCompare(x.updatedAt || '');
-  });
+  const centerId = res.center.id;
+  const pinned = (opts.pinned || []).filter((n) => n.id !== centerId);
+  const pinnedIds = new Set(pinned.map((n) => n.id));
+  const ranked = [...res.nodes]
+    .filter((n) => n.id !== centerId && !pinnedIds.has(n.id))
+    .sort((x, y) => {
+      const dx = res.dist[x.id] ?? 99, dy = res.dist[y.id] ?? 99;
+      if (dx !== dy) { return dx - dy; }
+      return (y.updatedAt || '').localeCompare(x.updatedAt || '');
+    });
+  const order = [res.center, ...pinned, ...ranked];
+
+  // parent_of children within the candidate set — for branch rollup substitution (b).
+  const candIds = new Set(order.map((n) => n.id));
+  const childrenInSet = new Map<string, string[]>();
+  for (const e of res.edges) {
+    if (e.type === 'parent_of' && candIds.has(e.from) && candIds.has(e.to)) {
+      const arr = childrenInSet.get(e.from); if (arr) { arr.push(e.to); } else { childrenInSet.set(e.from, [e.to]); }
+    }
+  }
+
+  const fullLine = (n: GraphNode): string => {
+    const es = opts.effectiveSummaryFor?.(n);
+    return fmtNode(n, opts.conflictsFor(n.id), es ? { summary: es.synthesized ? es.text : undefined, synthesized: es.synthesized } : undefined);
+  };
 
   const nodeLines: string[] = [];
   const shownIds = new Set<string>();
-  let used = 0;
-  for (const n of ranked) {
-    const line = fmtNode(n, opts.conflictsFor(n.id));
-    const cost = estTokens(line);
-    if (nodeLines.length && used + cost > budget) { break; } // always keep the center
-    nodeLines.push(line); shownIds.add(n.id); used += cost;
+  const collapsedChildren = new Set<string>();
+  let used = 0, degraded = 0, collapsed = 0;
+
+  for (const n of order) {
+    if (collapsedChildren.has(n.id)) { continue; } // represented by a parent's rollup line
+    const must = n.id === centerId || pinnedIds.has(n.id);
+    const full = fullLine(n);
+    const fullCost = estTokens(full);
+    if (!nodeLines.length || used + fullCost <= budget) {
+      nodeLines.push(full); shownIds.add(n.id); used += fullCost; continue;
+    }
+    // (b) collapse a real branch to its rollup summary
+    const kids = childrenInSet.get(n.id);
+    const roll = kids && kids.length >= 2 ? opts.rollupFor?.(n.id) : undefined;
+    if (roll) {
+      const line = `- [${n.id}] ${n.type} "${n.name}" ≡~ ${roll.replace(/\s+/g, ' ').trim().slice(0, BODY_CAP)} (branch collapsed: token_budget)`;
+      if (used + estTokens(line) <= budget) {
+        nodeLines.push(line); shownIds.add(n.id); used += estTokens(line); collapsed++;
+        for (const k of kids as string[]) { if (!shownIds.has(k)) { collapsedChildren.add(k); } }
+        continue;
+      }
+    }
+    // (a) name-only
+    const name = `${nameOnlyLine(n, opts.conflictsFor(n.id))} (name-only: token_budget)`;
+    if (must || used + estTokens(name) <= budget) {
+      nodeLines.push(name); shownIds.add(n.id); used += estTokens(name); degraded++;
+      continue;
+    }
+    // (c) omitted — counted below.
   }
 
   const shownEdges = res.edges.filter((e) => shownIds.has(e.from) && shownIds.has(e.to));
   const edgeLines = shownEdges.map((e) => `- (${e.from}) -${e.type}-> (${e.to})${e.source ? ` [src=${e.source}]` : ''}`);
-  const omittedNodes = res.nodes.length - shownIds.size;
+  const shownFromRes = res.nodes.filter((n) => shownIds.has(n.id)).length;
+  const collapsedFromRes = res.nodes.filter((n) => collapsedChildren.has(n.id)).length;
+  const omittedNodes = Math.max(0, res.nodes.length - shownFromRes - collapsedFromRes);
   const omittedEdges = res.edges.length - shownEdges.length;
 
   let out = `Context around [${res.center.id}] "${res.center.name}":\n`
-    + `NODES (${shownIds.size}/${res.nodes.length}):\n${nodeLines.join('\n')}\n`
+    + `NODES (${shownIds.size} shown${pinned.length ? `, ${pinned.filter((p) => shownIds.has(p.id)).length} pinned` : ''}):\n${nodeLines.join('\n')}\n`
     + `EDGES (${shownEdges.length}/${res.edges.length}):\n${edgeLines.join('\n') || '(none)'}`;
-  if (omittedNodes > 0 || omittedEdges > 0) {
-    out += `\n…${omittedNodes} more nodes / ${omittedEdges} edges omitted (token_budget); expand with graph_neighbors id=… or raise token_budget`;
-  }
+  const notes: string[] = [];
+  if (omittedNodes > 0 || omittedEdges > 0) { notes.push(`…${omittedNodes} more nodes / ${omittedEdges} edges omitted (token_budget)`); }
+  if (collapsed > 0) { notes.push(`${collapsed} branch(es) collapsed to a rollup summary`); }
+  if (degraded > 0) { notes.push(`${degraded} shown name-only`); }
+  if (notes.length) { out += `\n${notes.join('; ')}; expand with graph_neighbors id=… or raise token_budget`; }
   return out;
+}
+
+/** Render one TOC node (and its subtree) as an indented outline with drill hints. */
+function renderTocNode(n: TocNode, indent: number, lines: string[]): void {
+  const pad = '  '.repeat(indent);
+  const sum = n.summary ? ` ${n.synthesized ? '≡~' : '≡'} ${n.summary.replace(/\s+/g, ' ').trim().slice(0, BODY_CAP)}` : '';
+  const cc = n.childCount ? ` · ${n.childCount} child${n.childCount === 1 ? '' : 'ren'}` : '';
+  lines.push(`${pad}- [${n.id}] ${n.type} "${n.name}"${cc}${sum}`);
+  for (const c of n.children) { renderTocNode(c, indent + 1, lines); }
+  if (n.moreChildren) { lines.push(`${'  '.repeat(indent + 1)}… +${n.moreChildren} more (drill: graph_toc root=${n.id})`); }
+}
+
+/**
+ * Render a navigable table-of-contents (Tier 2, item 2) as an indented outline —
+ * the PageIndex-style text-stripped overview. Each line carries `[id]` to drill a
+ * branch (`graph_toc root=<id>`) and its one-line summary; over-cap children
+ * collapse to `+K more`.
+ */
+export function renderToc(res: TocResult): string {
+  if (!res.roots.length) {
+    return 'graph_toc — empty (no parent_of spine or clusters yet). Add facts with a file:line source to auto-build the tree, or graph_rollup a cluster.';
+  }
+  const lines: string[] = [];
+  for (const r of res.roots) { renderTocNode(r, 0, lines); }
+  return `Project graph TOC${res.clustered ? ' (clustered — sparse parent_of spine)' : ''}:\n`
+    + `${lines.join('\n')}\n`
+    + 'Drill a branch: graph_toc root=<id>. Build the tree with file:line sources or graph_rollup.';
 }

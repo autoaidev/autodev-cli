@@ -23,6 +23,7 @@ import { buildNotificationEvent } from '../core/liveNarration';
 import { extractClaudeUsage, type ClaudeUsagePayload } from '../core/claudeUsage';
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
+import { fmtNode, renderNeighbors } from '../graphRender';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -289,13 +290,15 @@ export function mcpOperateCommand(program: Command): void {
         },
         {
           name: 'graph_neighbors',
-          description: "Build task context FROM the graph (not a dump): resolve a node/entity by id or name, expand 1-3 hops over allowed edge types, and return a small, citable subgraph. Call this at the START of a task to recall what the swarm already knows before acting.",
+          description: "Build task context FROM the graph (not a dump): resolve a node/entity by id or name, expand 1-3 hops over allowed edge types, and return a small, citable subgraph ranked by hop-proximity and recency, filled to a token budget (never silently clipped). Contradictions and unverified inferences are surfaced inline. Call this at the START of a task to recall what the swarm already knows before acting.",
           inputSchema: { type: 'object', properties: {
             id: { type: 'string', description: 'Center node id (or use name).' },
             name: { type: 'string', description: 'Center node by name/alias (resolved to the node).' },
             hops: { type: 'integer', description: 'Expansion depth 1-3 (default 1).' },
             edge_types: { type: 'array', description: 'Restrict traversal to these edge types.', items: { type: 'string' } },
-            limit: { type: 'integer', description: 'Max edges to return (default 40).' },
+            limit: { type: 'integer', description: 'Max edges to traverse (default 40).' },
+            token_budget: { type: 'integer', description: 'Approx token budget for the rendered subgraph (default 1500). Nodes are ranked center→proximity→recency and filled to budget; the rest are reported as "…N more … omitted", never silently dropped.' },
+            include_conflicts: { type: 'boolean', description: 'Always traverse contradicts edges so conflicting claims stay visible even under an edge_types filter (default true).' },
           }, required: [] as string[] },
         },
         {
@@ -316,16 +319,6 @@ export function mcpOperateCommand(program: Command): void {
       ];
       const graphToolNames = new Set(GRAPH_TOOLS.map((t) => t.name));
 
-      // Serialize a node/edge compactly for the model — stable ids for citation.
-      const fmtNode = (n: { id: string; type: string; name: string; source?: string; version?: string; inference?: boolean; supersededBy?: string; body?: string }): string => {
-        const tags: string[] = [];
-        if (n.source) { tags.push(`src=${n.source}`); }
-        if (n.version) { tags.push(`v=${n.version}`); }
-        if (n.inference) { tags.push('inference'); }
-        if (n.supersededBy) { tags.push(`superseded→${n.supersededBy}`); }
-        const body = n.body ? ` — ${n.body.replace(/\s+/g, ' ').slice(0, 160)}` : '';
-        return `- [${n.id}] ${n.type} "${n.name}"${tags.length ? ' (' + tags.join(', ') + ')' : ''}${body}`;
-      };
       const handleGraphTool = (name: string, a: Record<string, unknown>): string => {
         try {
           if (name === 'graph_add_node') {
@@ -355,17 +348,20 @@ export function mcpOperateCommand(program: Command): void {
               id: a.id ? String(a.id) : undefined, includeSuperseded: a.include_superseded === true,
               limit: a.limit ? Number(a.limit) : undefined,
             });
-            return rows.length ? `${rows.length} node(s):\n${rows.map(fmtNode).join('\n')}` : 'No matching nodes. Add facts with graph_add_node.';
+            return rows.length ? `${rows.length} node(s):\n${rows.map((n) => fmtNode(n, graph.contradictionsFor(n.id))).join('\n')}` : 'No matching nodes. Add facts with graph_add_node.';
           }
           if (name === 'graph_neighbors') {
             const res = graph.neighbors({
               idOrName: String(a.id ?? a.name ?? ''), hops: a.hops ? Number(a.hops) : undefined,
               edgeTypes: Array.isArray(a.edge_types) ? (a.edge_types as unknown[]).map(String) : undefined,
               limit: a.limit ? Number(a.limit) : undefined,
+              includeConflicts: a.include_conflicts !== false,
             });
             if (!res) { return `No node matches "${String(a.id ?? a.name ?? '')}". Try graph_query first.`; }
-            const edgeLines = res.edges.map((e) => `- (${e.from}) -${e.type}-> (${e.to})${e.source ? ` [src=${e.source}]` : ''}`);
-            return `Context around [${res.center.id}] "${res.center.name}":\nNODES (${res.nodes.length}):\n${res.nodes.map(fmtNode).join('\n')}\nEDGES (${res.edges.length}):\n${edgeLines.join('\n') || '(none)'}`;
+            return renderNeighbors(res, {
+              tokenBudget: a.token_budget ? Number(a.token_budget) : undefined,
+              conflictsFor: (id) => graph.contradictionsFor(id),
+            });
           }
           if (name === 'graph_supersede') {
             const { oldId, node } = graph.supersede(String(a.old_id ?? ''), {
@@ -379,7 +375,17 @@ export function mcpOperateCommand(program: Command): void {
           if (name === 'graph_stats') {
             const s = graph.stats();
             const byType = (m: Record<string, number>): string => Object.entries(m).map(([k, v]) => `${k}:${v}`).join(', ') || '(none)';
-            return `Project graph @ ${graph.path}\nnodes=${s.nodeCount} (${byType(s.nodesByType)})\nedges=${s.edgeCount} (${byType(s.edgesByType)})\nsuperseded=${s.superseded} · isolated=${s.isolated} · contradictions=${s.contradictions} · openQuestions=${s.openQuestions}`;
+            const kb = (s.fileBytes / 1024).toFixed(1);
+            const dwPct = (s.deadWeightRatio * 100).toFixed(0);
+            const health: string[] = [];
+            if (s.parseFailures > 0) { health.push(`⚠ ${s.parseFailures} corrupt log line(s)`); }
+            if (s.tornFinalLine) { health.push('torn final line (pending write)'); }
+            return `Project graph @ ${graph.path}\n`
+              + `nodes=${s.nodeCount} (${byType(s.nodesByType)})\n`
+              + `edges=${s.edgeCount} (${byType(s.edgesByType)})\n`
+              + `superseded=${s.superseded} · isolated=${s.isolated} · contradictions=${s.contradictions} · openQuestions=${s.openQuestions}\n`
+              + `log: ${s.totalOps} ops → ${s.nodeCount + s.edgeCount} live (deadWeight=${s.deadWeight}, ${dwPct}%) · ${kb} KB · ~${s.estTokens} tokens · lastReplay=${s.lastReplayMs}ms`
+              + (health.length ? `\nhealth: ${health.join(' · ')}` : '');
           }
           return `unknown graph tool: ${name}`;
         } catch (e) {

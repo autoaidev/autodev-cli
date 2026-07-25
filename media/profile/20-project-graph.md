@@ -13,23 +13,31 @@ agent** in the workspace — what one agent learns, the swarm can read.
 
 | Tool | Use it to |
 |---|---|
-| `graph_neighbors` | **At task start** — resolve an entity/node by id or name and expand 1–3 hops to recall what's already known *before* acting. This is context construction, not a dump. |
-| `graph_query` | Search nodes by type and/or text; returns ids to expand or link. |
+| `graph_neighbors` | **At task start** — resolve an entity/node by id or name and expand 1–3 hops to recall what's already known *before* acting. This is context construction, not a dump. Results are ranked (center → hop-proximity → recency) and filled to a `token_budget` (default 1500); anything over budget is reported as `…N more nodes / M edges omitted`, never silently dropped. Contradictions and unverified inferences are flagged inline. |
+| `graph_query` | Search nodes by type and/or text; returns ids to expand or link. Long bodies are truncated *explicitly* with `…(+K chars — full via graph_query id=…)`. |
 | `graph_add_node` | Record a typed fact and get its id. |
-| `graph_add_edge` | Link two nodes with a typed, sourced relationship. |
+| `graph_add_edge` | Link two nodes with a typed, sourced relationship (validated against the edge ontology below). |
 | `graph_supersede` | Version a fact that changed (old node stays addressable). |
-| `graph_stats` | Health check — gaps, isolated nodes, contradictions, open questions. |
+| `graph_stats` | Health + telemetry — gaps, isolated nodes, contradictions, open questions, log size / dead-weight ratio, replay time, estimated tokens, and any corrupt log lines. |
 
 ### Schema
 
 **Node types:** `entity` · `claim` · `source` · `artifact` · `agent_run` ·
 `evaluation` · `task` · `commit` · `metric` · `note` · `question` · `decision`.
 Entities dedupe by name (idempotent — re-adding merges aliases), so resolve real
-things (services, files, people, modules) as entities.
+things (services, files, people, modules) as entities. Dedup is by a **canonical
+key** (a sorted token-set), so `UsageService`, `usage-service` and `usage service`
+all resolve to **one** entity id — spelling/casing/word-order no longer forks it.
 
 **Edge types:** `mentions` · `supports` · `contradicts` · `derived_from` ·
 `produced` · `evaluates` · `revises` · `supersedes` · `depends_on` · `parent_of` ·
 `resolved_to` · `relates_to`.
+
+**Edge ontology (validated on write).** Obvious type mismatches are rejected with a
+message listing what the relation expects: `produced: agent_run→artifact` ·
+`evaluates: evaluation→{artifact,agent_run}` · `supports`/`contradicts: *→claim` ·
+`resolved_to: *→entity`. The rest (`derived_from`, `parent_of`, `depends_on`,
+`mentions`, `relates_to`, `revises`, `supersedes`) accept `*→*`.
 
 ### Invariants (enforced on write — a rejected write tells you what to add)
 

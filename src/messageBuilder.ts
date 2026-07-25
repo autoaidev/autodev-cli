@@ -194,6 +194,41 @@ export function firstTurnSystemReminder(root: string): string {
   ].join('\n');
 }
 
+/**
+ * Re-read-on-update reminder for SOUL.md (the agent's identity/persona anchor).
+ *
+ * The office can edit an agent's SOUL.md live (via the mcp-operate file browser, or
+ * a persona change on connect). This fires a `<system-reminder>` on ANY turn whose
+ * SOUL.md mtime advanced past the last one we recorded — so an identity edit made
+ * mid-session is actually adopted, not ignored until the next fresh session.
+ *
+ * State is a tiny `.autodev/.soul-seen` marker (last-seen mtime). The FIRST time we
+ * see a SOUL.md (no marker yet) we only record it and stay silent — the first-turn
+ * reminder already tells the agent to read SOUL.md, and connect-time persona writes
+ * must not trigger a spurious "it changed" on turn 1. Best-effort; never throws.
+ */
+export function soulUpdatedReminder(root: string): string {
+  try {
+    const soulPath = path.join(root, 'SOUL.md');
+    if (!fs.existsSync(soulPath)) { return ''; }
+    const mtime = Math.floor(fs.statSync(soulPath).mtimeMs);
+    const marker = path.join(root, '.autodev', '.soul-seen');
+    let last = 0;
+    try { last = parseInt(fs.readFileSync(marker, 'utf8').trim(), 10) || 0; } catch { last = 0; }
+    if (mtime !== last) {
+      try { fs.mkdirSync(path.dirname(marker), { recursive: true }); fs.writeFileSync(marker, String(mtime), 'utf8'); } catch { /* best effort */ }
+    }
+    // No prior marker → first observation this session: record, stay silent.
+    if (last === 0 || mtime <= last) { return ''; }
+    return [
+      '<system-reminder>',
+      'Your `SOUL.md` was just UPDATED (edited from the office). Re-read `SOUL.md` now and adopt the',
+      'updated identity/persona/communication-history for this turn and all following turns.',
+      '</system-reminder>',
+    ].join('\n');
+  } catch { return ''; }
+}
+
 /** Returns the .autodev/messages directory, creating it if needed. */
 function messagesDir(root: string): string {
   const dir = path.join(root, MESSAGES_DIR);
@@ -409,6 +444,10 @@ export function buildMessage(
     const reminder = firstTurnSystemReminder(root);
     if (reminder) { parts.push(reminder); }
   }
+  // On ANY turn, if SOUL.md changed since we last saw it (e.g. the office edited the
+  // agent's identity live), tell the agent to re-read it — not just on turn 1.
+  const soulUpd = soulUpdatedReminder(root);
+  if (soulUpd) { parts.push(soulUpd); }
   parts.push(taskMessage);
   if (includeProfile && finalProfileBody.trim()) {
     parts.push(`# Project Instructions (AUTODEV.md)\n\n${finalProfileBody.trim()}`);

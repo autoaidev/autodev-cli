@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AutodevSettings } from './core/settingsLoader';
+import { tallyJournal } from './journal';
 
 // ---------------------------------------------------------------------------
 // Periodic Action Manager — "every N tasks" triggers
@@ -34,6 +35,48 @@ export interface PeriodicActionDef {
   type?: 'prompt' | 'compact' | 'pruneTodo';
   /** Prompt text sent to the agent (only used when type === 'prompt'). */
   prompt: string;
+  /**
+   * Optional deterministic pre-pass run by the EXTENSION (not the model) just
+   * before a `type:'prompt'` action is dispatched. It may:
+   *   - maintain files deterministically (dedupe an index, etc.), and/or
+   *   - return a compact digest string that is PREPENDED to `prompt`.
+   * Returning '' changes nothing — the prompt is sent exactly as before. This is
+   * how we lift the mechanical file-scan/index work off the model without
+   * altering the model-facing distillation instructions. Must never throw
+   * (callers still guard), and must be a no-op when there's nothing to do so
+   * low-activity agents keep byte-identical behavior.
+   */
+  preprocess?: (root: string) => string;
+}
+
+/**
+ * Deterministically de-duplicate the .autodev/MEMORY.md index. Removes repeated
+ * index lines (same target path) while preserving order and any header/prose.
+ * Returns a short note if it changed anything, else '' (no prompt change).
+ */
+export function dedupeMemoryIndex(root: string): string {
+  try {
+    const file = path.join(root, '.autodev', 'MEMORY.md');
+    if (!fs.existsSync(file)) { return ''; }
+    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+    const seen = new Set<string>();
+    let removed = 0;
+    const out: string[] = [];
+    for (const ln of lines) {
+      const m = ln.match(/\]\(([^)]+)\)/); // markdown link target
+      if (ln.trim().startsWith('-') && m) {
+        const key = m[1].trim();
+        if (seen.has(key)) { removed++; continue; }
+        seen.add(key);
+      }
+      out.push(ln);
+    }
+    if (removed > 0) {
+      fs.writeFileSync(file, out.join('\n'), 'utf8');
+      return `Memory index maintenance (deterministic): removed ${removed} duplicate index line(s) from .autodev/MEMORY.md.`;
+    }
+    return '';
+  } catch { return ''; }
 }
 
 export const PERIODIC_ACTIONS: PeriodicActionDef[] = [
@@ -75,6 +118,9 @@ export const PERIODIC_ACTIONS: PeriodicActionDef[] = [
     label: 'Update memory',
     settingKey: 'memoryEveryNTasks',
     icon: '🧠',
+    // Deterministic pre-pass: the extension maintains/dedupes the MEMORY.md index
+    // (mechanical work) so the model only does the durable-fact distillation below.
+    preprocess: dedupeMemoryIndex,
     prompt: `Before continuing to the next task, consolidate what you have learned from recent tasks into the dated memory file system.
 
 For each new durable fact (architectural discovery, decision, convention, gotcha, runbook, or bug fix) from recent work:
@@ -121,6 +167,13 @@ Do NOT store credentials in memory files — use Memory MCP for credentials. The
     settingKey: 'journalLearnEveryNTasks',
     icon: '🔬',
     type: 'prompt' as const,
+    // Deterministic pre-pass: tally keep/discard/partial from the now machine-readable
+    // journal rows and hand the model a compact digest instead of "scan every file".
+    // Returns '' (no prompt change) when there are no journal rows yet.
+    preprocess: (root: string): string => {
+      const t = tallyJournal(root);
+      return t ? t.digest : '';
+    },
     prompt: `You are performing an autonomous research journal review. Follow these steps exactly:
 
 1. Read .autodev/JOURNAL.md index. Open all journal files in .autodev/journals/ that do not yet have a '## Auto-learn' marker at the bottom.

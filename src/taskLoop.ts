@@ -9,6 +9,8 @@ import { buildPrompt } from './prompt';
 import { writeMessageFile } from './messageBuilder';
 import { WebhookClient, WebhookEvent, sendDiscordBotMessage } from './webhook';
 import { loadSettingsForRoot, AutodevSettings } from './core/settingsLoader';
+import { loadControlSpec, isGateActive, runVerify, isMechanicalFailure, matchesAnyGlob, ControlSpec } from './core/controlSpec';
+import { appendJournalRow } from './journal';
 import { IFileWatcher, IDisposable } from './core/adapters';
 import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession, setClaudeSessionName } from './dispatcher';
 import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/opencodeCliProvider';
@@ -212,10 +214,59 @@ export class TaskLoopRunner {
   private _profileSentCounter = 0;
   /** Manages all "every N tasks" periodic action counters. */
   private readonly _periodicMgr = new PeriodicActionManager();
+  // ── autoresearch verify_and_keep gate (opt-in via .autodev/CONTROL.md) ──
+  // ALL of these are inert unless a CONTROL.md ships a `verify` command. With no
+  // spec (_controlSpec null / gate inactive) every path below is skipped and the
+  // loop behaves byte-for-byte as it does today.
+  /** Parsed .autodev/CONTROL.md, or null when absent (=> today's behavior). */
+  private _controlSpec: ControlSpec | null = null;
+  /** taskKey → git HEAD sha captured before the task's FIRST dispatch (revert target). */
+  private _preTaskCommit = new Map<string, string>();
+  /** taskKey → mechanical auto-fix passes already spent on this task. */
+  private _verifyMech = new Map<string, number>();
+  /** A verify failure hint to fold into the NEXT dispatch of the matching task. */
+  private _pendingFixHint: { key: string; text: string } | null = null;
 
   get state(): LoopState { return this._state; }
   get currentTask(): string | undefined { return this._currentTask; }
   get resumeAt(): Date | undefined { return this._resumeAt; }
+
+  // ── git primitives for the verify_and_keep gate ───────────────────────────
+  // Only ever called on gate-active paths (CONTROL.md present). All swallow
+  // errors so a non-git or dirty-index workspace never crashes the loop.
+  private _git(root: string, args: string): string {
+    try {
+      return execSync(`git ${args}`, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch { return ''; }
+  }
+  /** Current HEAD sha, or '' if not a git repo / no commits. */
+  private _gitHead(root: string): string { return this._git(root, 'rev-parse HEAD'); }
+  /** Hard-reset the working tree back to a previous commit (discard the task's work). */
+  private _gitResetHard(root: string, sha: string): void {
+    if (sha) { this._git(root, `reset --hard ${sha}`); }
+  }
+  /** Stage everything and commit; a no-op commit (nothing changed) is swallowed. */
+  private _gitCommitAll(root: string, message: string): void {
+    this._git(root, 'add -A');
+    const safe = message.replace(/"/g, "'").split('\n')[0].slice(0, 200);
+    this._git(root, `commit -m "${safe}"`);
+  }
+  /** Files changed since `sha` (tracked diff + untracked), repo-relative. */
+  private _gitChangedFiles(root: string, sha: string): string[] {
+    const diff = this._git(root, `diff --name-only ${sha}`);
+    const untracked = this._git(root, 'ls-files --others --exclude-standard');
+    const set = new Set<string>();
+    for (const f of (diff + '\n' + untracked).split(/\r?\n/)) { if (f.trim()) { set.add(f.trim()); } }
+    return [...set];
+  }
+  /** Compact "+A/-D" line-delta since `sha` for the journal ΔC column. */
+  private _gitDeltaComplexity(root: string, sha: string): string {
+    const stat = this._git(root, `diff --shortstat ${sha}`);
+    const ins = stat.match(/(\d+) insertion/);
+    const del = stat.match(/(\d+) deletion/);
+    if (!ins && !del) { return '-'; }
+    return `+${ins ? ins[1] : 0}/-${del ? del[1] : 0}`;
+  }
 
   /** Manually trigger a /compact on the current session for the given provider/root. */
   async compact(root: string, provider: ProviderId): Promise<void> {
@@ -318,6 +369,15 @@ export class TaskLoopRunner {
     this._profileSentCounter = 0;
     this._periodicMgr.resetAndPersist(callbacks.workspaceRoot);
     this._hookLineSeen.clear();
+    // Load the opt-in control spec. Absent file ⇒ null ⇒ verify_and_keep gate,
+    // pre-task snapshots, and revert logic all stay dormant (today's behavior).
+    this._controlSpec = callbacks.workspaceRoot ? loadControlSpec(callbacks.workspaceRoot) : null;
+    this._preTaskCommit.clear();
+    this._verifyMech.clear();
+    this._pendingFixHint = null;
+    if (isGateActive(this._controlSpec)) {
+      callbacks.log(`🧪 verify_and_keep gate ENABLED — verify: ${this._controlSpec!.verify.join(' && ')} (max_fix_rounds=${this._controlSpec!.max_fix_rounds})`);
+    }
     this._setState('running');
 
     const settings = loadSettingsForRoot(callbacks.workspaceRoot);
@@ -1411,9 +1471,30 @@ export class TaskLoopRunner {
         this._blockedTasks.delete(taskKey);
         const attempts = (this._taskAttempts.get(taskKey) ?? 0) + 1;
         this._taskAttempts.set(taskKey, attempts);
-        const maxAttempts = settings.maxTaskAttempts ?? 3;
+        // With the verify gate active, the attempt ceiling becomes the fix-round
+        // budget (initial dispatch + max_fix_rounds + mechanical headroom). Without
+        // a CONTROL.md this is EXACTLY settings.maxTaskAttempts ?? 3 as before.
+        const maxAttempts = isGateActive(this._controlSpec)
+          ? 1 + this._controlSpec.max_fix_rounds + this._controlSpec.max_mechanical_fixes
+          : (settings.maxTaskAttempts ?? 3);
         if (attempts > maxAttempts) {
           this._taskAttempts.delete(taskKey);
+          // Verify gate exhaustion: revert the task's work to its pre-task commit
+          // and journal a discard BEFORE moving on, so no red change is kept.
+          if (isGateActive(this._controlSpec) && this._workspaceRoot) {
+            const pre = this._preTaskCommit.get(taskKey);
+            if (pre) {
+              this._gitResetHard(this._workspaceRoot, pre);
+              this._cb?.log(`↩️ verify gate: fix rounds exhausted — reverted to ${pre.slice(0, 7)} and discarded: ${task.text}`);
+            }
+            appendJournalRow(this._workspaceRoot, {
+              task: discordLabel(task.text), status: 'discard',
+              outcome: 'verify never green', notes: `exhausted ${maxAttempts} attempt(s)`,
+            });
+            this._preTaskCommit.delete(taskKey);
+            this._verifyMech.delete(taskKey);
+            this._pendingFixHint = null;
+          }
           this._cb?.log(`⚠️ Task not marked done after ${maxAttempts} attempt(s) — force-marking complete: ${task.text}`);
           this._notifyDiscord(`⚠️ Task force-marked done after ${maxAttempts} failed attempt(s):\n${task.text}`);
           await todoWriter.markDone(todoPath, task).catch(() => {});
@@ -1441,8 +1522,27 @@ export class TaskLoopRunner {
       this._profileSentCounter++;
 
       // Build prompt (needed even when not sending, for messageFile path)
-      const { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile);
+      let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile);
       const remaining = countRemaining(parseTodo(todoPath));
+
+      // ── verify_and_keep: pre-task snapshot + fold in any fix hint ──────────
+      // Both are no-ops unless a CONTROL.md ships a verify command.
+      if (isGateActive(this._controlSpec) && this._workspaceRoot && !watchingInProgress) {
+        const gateKey = task.id ?? task.text;
+        // Snapshot the commit to revert to — only on the FIRST dispatch of a task.
+        if (!this._preTaskCommit.has(gateKey)) {
+          const head = this._gitHead(this._workspaceRoot);
+          if (head) { this._preTaskCommit.set(gateKey, head); }
+        }
+        // A prior red verify left a fix hint for this task — fold it into the prompt
+        // so the retried dispatch sees the failure and what to fix.
+        if (this._pendingFixHint && this._pendingFixHint.key === gateKey) {
+          const combined = `${prompt}\n\n---\n${this._pendingFixHint.text}`;
+          try { messageFile = writeMessageFile(this._workspaceRoot, combined); } catch { /* keep original */ }
+          prompt = combined;
+          this._pendingFixHint = null;
+        }
+      }
 
       if (!watchingInProgress) {
         this._cb?.log(`▶ Task [${this._iterations}]: ${task.text}`);
@@ -1640,6 +1740,88 @@ export class TaskLoopRunner {
           this._cb?.log(`Session ID captured for ${activeProvider}`);
         }
 
+        // ── verify_and_keep gate (autoresearch) ────────────────────────────
+        // OPT-IN + NON-BREAKING: this entire block is skipped unless a
+        // .autodev/CONTROL.md ships a `verify` command (isGateActive === false
+        // otherwise). When skipped, control drops straight into the UNCHANGED
+        // completion path below — byte-for-byte today's behavior.
+        {
+          const spec = this._controlSpec;
+          if (isGateActive(spec) && this._workspaceRoot) {
+            const root = this._workspaceRoot;
+            const gateKey = task.id ?? task.text;
+            const preCommit = this._preTaskCommit.get(gateKey);
+            const elapsedSec = Math.round((Date.now() - taskStartTime) / 1000);
+
+            const discardAndMoveOn = (reason: string, outcome: string): void => {
+              if (preCommit) { this._gitResetHard(root, preCommit); }
+              appendJournalRow(root, { task: discordLabel(task.text), status: 'discard', outcome, notes: reason });
+              this._preTaskCommit.delete(gateKey);
+              this._verifyMech.delete(gateKey);
+              this._pendingFixHint = null;
+              this._taskAttempts.delete(gateKey);
+            };
+
+            // (a) budget kill — only when budget_seconds is set.
+            if (spec.budget_seconds != null && elapsedSec > spec.budget_seconds) {
+              this._cb?.log(`⏱️ verify gate: task over budget (${elapsedSec}s > ${spec.budget_seconds}s) — discard+revert`);
+              this._notifyDiscord(`⏱️ Task over budget (${elapsedSec}s) — reverted & discarded:\n${discordLabel(task.text)}`);
+              discardAndMoveOn(`budget ${spec.budget_seconds}s exceeded`, 'over budget');
+              await todoWriter.markDone(todoPath, task).catch(() => {}); // move on; code already reverted
+              this._completedCount++;
+              continue;
+            }
+
+            // (b) protected_files guard — only when protected_files is set.
+            if (preCommit && spec.protected_files.length) {
+              const changed = this._gitChangedFiles(root, preCommit);
+              const hit = changed.find(f => matchesAnyGlob(f, spec.protected_files));
+              if (hit) {
+                this._cb?.log(`🛡️ verify gate: task touched protected file '${hit}' — discard+revert`);
+                this._notifyDiscord(`🛡️ Reverted: task edited protected file \`${hit}\`:\n${discordLabel(task.text)}`);
+                discardAndMoveOn(`touched protected file ${hit}`, 'protected file edited');
+                await todoWriter.markDone(todoPath, task).catch(() => {});
+                this._completedCount++;
+                continue;
+              }
+            }
+
+            // (c) run verify. GREEN → advance branch + keep. RED → re-dispatch a fix.
+            const timeoutMs = spec.budget_seconds != null ? spec.budget_seconds * 1000 : 15 * 60_000;
+            this._cb?.log(`🧪 verify: ${spec.verify.join(' && ')}`);
+            const vr = runVerify(spec.verify, root, timeoutMs);
+            if (vr.ok) {
+              const deltaC = preCommit ? this._gitDeltaComplexity(root, preCommit) : '-';
+              this._gitCommitAll(root, `autodev: ${discordLabel(task.text)}`);
+              appendJournalRow(root, { task: discordLabel(task.text), status: 'keep', outcome: 'verify green', deltaComplexity: deltaC });
+              this._preTaskCommit.delete(gateKey);
+              this._verifyMech.delete(gateKey);
+              this._cb?.log('✅ verify GREEN — kept');
+              // fall through to the unchanged completion path.
+            } else {
+              // RED — leave a fix hint and re-dispatch the SAME task. The top-of-loop
+              // attempt ceiling (raised to the fix budget while the gate is active)
+              // bounds retries and performs the final revert+discard on exhaustion.
+              const mechUsed = this._verifyMech.get(gateKey) ?? 0;
+              const mechanical = isMechanicalFailure(vr.output);
+              let tier = 'fix';
+              if (mechanical && mechUsed < spec.max_mechanical_fixes) {
+                this._verifyMech.set(gateKey, mechUsed + 1);
+                tier = 'mechanical-fix';
+              }
+              const errTail = vr.output.length > 2000 ? '…' + vr.output.slice(-2000) : vr.output;
+              this._pendingFixHint = {
+                key: gateKey,
+                text: `⚠️ AUTOMATED VERIFY FAILED (exit ${vr.code}${vr.timedOut ? ', TIMED OUT' : ''}). Your change is NOT accepted until \`${spec.verify.join(' && ')}\` passes. Fix the failure shown below${tier === 'mechanical-fix' ? ' (this looks mechanical — a type/import/syntax error)' : ''}, then re-complete the SAME task.\n\n\`\`\`\n${errTail}\n\`\`\``,
+              };
+              await todoWriter.resetToTodo(todoPath, task).catch(() => {});
+              this._cb?.log(`❌ verify RED (exit ${vr.code}) — re-dispatching ${tier}: ${task.text}`);
+              this._notifyDiscord(`❌ Verify failed — retrying (${tier}):\n${discordLabel(task.text)}`);
+              continue;
+            }
+          }
+        }
+
         const duration = Math.round((Date.now() - taskStartTime) / 1000);
         this._completedCount++;
         this._autoCompactCounter++;
@@ -1647,6 +1829,8 @@ export class TaskLoopRunner {
         this._periodicMgr.increment(this._iterations, this._workspaceRoot);
         this._compactedTaskLines.delete(task.line); // allow compact again if task re-appears
         this._taskAttempts.delete(task.id ?? task.text); // task done — reset attempt counter
+        this._preTaskCommit.delete(task.id ?? task.text); // gate bookkeeping (no-op without CONTROL.md)
+        this._verifyMech.delete(task.id ?? task.text);
         const afterTasks = parseTodo(todoPath);
         const afterRemaining = countRemaining(afterTasks);
         const totalKnown = this._iterations + afterRemaining;
@@ -1809,8 +1993,18 @@ export class TaskLoopRunner {
                 }
               }
             } else {
-              const msgFile = writeMessageFile(this._workspaceRoot!, action.prompt);
-              await this._cb!.sendToAi(action.prompt, action.id, false, msgFile);
+              // Deterministic pre-pass (if any): the extension does the mechanical
+              // file-scan/index-maintenance and returns a compact digest that is
+              // PREPENDED to the model prompt. Empty digest ⇒ prompt unchanged
+              // (byte-identical to before for low-activity agents).
+              let digest = '';
+              if (action.preprocess && this._workspaceRoot) {
+                try { digest = action.preprocess(this._workspaceRoot) || ''; }
+                catch (ppErr) { this._cb?.log(`⚠️ Periodic pre-pass '${action.id}' failed (non-fatal): ${ppErr instanceof Error ? ppErr.message : String(ppErr)}`); }
+              }
+              const finalPrompt = digest ? `${digest}\n\n${action.prompt}` : action.prompt;
+              const msgFile = writeMessageFile(this._workspaceRoot!, finalPrompt);
+              await this._cb!.sendToAi(finalPrompt, action.id, false, msgFile);
             }
           } catch (paErr) {
             const pm = paErr instanceof Error ? paErr.message : String(paErr);

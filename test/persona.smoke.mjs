@@ -115,4 +115,26 @@ function ok(cond, msg) {
   ok(afterClear.includes('kept row'), '(d) other content preserved after clear');
 }
 
+// (e) User custom data preservation — rich hand-written SOUL.md must survive
+// persona apply / swap / remove UNTOUCHED; only the delimited block is written.
+{
+  const rootU = fs.mkdtempSync(path.join(os.tmpdir(), 'soul-user-'));
+  const soulU = path.join(rootU, 'SOUL.md');
+  const USER = '# SOUL.md\n\n## My Identity\nName: Nova\nEmail: nova@team.dev\n\n## Communication History\n- hand-written note the user must keep\n\n## Custom Section\nsecret personal data\n';
+  fs.writeFileSync(soulU, USER);
+  const intactU = () => {
+    const s = fs.readFileSync(soulU, 'utf8');
+    return s.includes('Name: Nova') && s.includes('nova@team.dev')
+      && s.includes('hand-written note the user must keep') && s.includes('secret personal data');
+  };
+  applyPersonaToSoul(rootU, { id: 'designer', label: 'Designer', prompt: 'design-obsessed' });
+  ok(intactU(), '(e) user data intact after persona apply');
+  ok(countBlocks(fs.readFileSync(soulU, 'utf8')) === 1, '(e) exactly one block after apply');
+  applyPersonaToSoul(rootU, { id: 'architect', label: 'Architect', prompt: 'systems architect' });
+  ok(intactU() && countBlocks(fs.readFileSync(soulU, 'utf8')) === 1, '(e) user data intact + one block after swap');
+  applyPersonaToSoul(rootU, { id: 'general', label: 'General', prompt: '' });
+  ok(intactU() && !fs.readFileSync(soulU, 'utf8').includes('autodev:persona:begin'), '(e) user data intact after general removes block');
+  fs.rmSync(rootU, { recursive: true, force: true });
+}
+
 console.log(`\npersona.smoke: ${passed} assertions passed`);

@@ -27,6 +27,10 @@ function addSanitizedAutodev(root: string, archive: Archive): void {
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) { walk(abs, rel); continue; }
       if (!e.isFile()) { continue; }
+      // Skip the disposable graph snapshot cache — it is fully regenerable from
+      // graph.jsonl (the source of truth, which IS backed up) and just bloats the
+      // archive. The restored store full-replays graph.jsonl and re-snapshots later.
+      if (rel === 'graph/graph.snapshot.json') { continue; }
       if (rel === 'settings.json') {
         archive.addBuffer(`${archiveBase}/settings.json`, sanitizeSettings(abs));
       } else {

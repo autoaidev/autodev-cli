@@ -42,11 +42,15 @@ function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void
   // control spec, the loop tools) — so the block stays one line even as sections
   // grow, and a small-context model loads just the index, then only what it needs.
   const markerRe = /<!-- autodev:profile-ref:begin -->[\s\S]*?<!-- autodev:profile-ref:end -->/;
+  // SOUL.md (identity anchor) is referenced DIRECTLY here — ahead of program.md —
+  // so the agent loads who it is first; program.md is the master protocol index and
+  // also links SOUL.md. Identity must not be buried one hop behind the index.
   const block = [
     AGENT_REF_BEGIN,
+    `file://./SOUL.md`,
     `file://./${AGENT_PROFILE_FILE.replace(/\\/g, '/')}`,
     `<think>`,
-    `IMPORTANT: Read program.md before proceeding. It is the master index — it describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
+    `IMPORTANT: Read SOUL.md FIRST — it is your identity anchor (your name, any assigned persona, and your communication history). Then read program.md, the master index that describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
     `</think>`,
     AGENT_REF_END,
   ].join('\n');

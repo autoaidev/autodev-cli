@@ -230,9 +230,16 @@ export function mcpOperateCommand(program: Command): void {
       // bridge-synthesized (handled locally, never proxied to the office) so they
       // reach every provider uniformly — like wait_for_events / ask_user.
       const graphRunId = `run-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${crypto.randomBytes(2).toString('hex')}`;
+      // agent_id provenance on every graph write. Prefer the office agent slug so
+      // writes are attributed to the actual agent, not the workspace folder. When
+      // the workspace is bound the slug is known synchronously (settings.webhookSlug);
+      // for a raw --key/--url sidecar it's resolved from `whoami` a moment later
+      // (resolveSlug() updates this object, which GraphStore reads at write time).
+      // Falls back to the workspace dir name when neither is available — works both ways.
       const graphIdentity = {
         agentId: String(
-          (settings as { agentName?: string; characterName?: string; name?: string }).agentName
+          (settings.webhookSlug || '').trim()
+          || (settings as { agentName?: string; characterName?: string; name?: string }).agentName
           || (settings as { characterName?: string }).characterName
           || (settings as { name?: string }).name
           || path.basename(cwd) || 'agent',
@@ -565,8 +572,17 @@ export function mcpOperateCommand(program: Command): void {
           } catch { /* whoami failed — skip presence, bridge still works */ }
         }
         presenceSlug = slug || null;
+        // Attribute graph writes to the resolved office agent slug (whoami/binding)
+        // once we know it — GraphStore reads graphIdentity.agentId at write time, so
+        // updating it here upgrades provenance from the workspace-dir fallback.
+        if (slug) { graphIdentity.agentId = slug; }
         return presenceSlug;
       };
+
+      // Resolve the office agent slug early so graph writes are attributed to the
+      // agent even when no presence socket opens (raw --key sidecar or --no-socket).
+      // Skipped when the binding already gave us a slug synchronously above.
+      if (!(settings.webhookSlug || '').trim()) { void resolveSlug().catch(() => { /* whoami optional */ }); }
 
       const buildSocket = (slug: string): OfficeSocket => new OfficeSocket(wsUrl, key, slug, {
           log: (l) => process.stderr.write(l + '\n'),

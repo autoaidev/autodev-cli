@@ -321,6 +321,18 @@ export class TaskLoopRunner {
     this._setState('running');
 
     const settings = loadSettingsForRoot(callbacks.workspaceRoot);
+    // Honor the runtime `-p <provider>` flag when reporting presence. The SDK
+    // resolves the EFFECTIVE provider (explicit `-p` option → settings.json →
+    // 'claude-tui' default) and exposes it via getActiveProvider(), but
+    // loadSettingsForRoot reads DISK only — so settings.provider can be stale or
+    // absent relative to the provider actually used to spawn the agent. Merge the
+    // effective provider back in so the agent_online meta (both `provider` and
+    // resolveConfiguredModel(settings)'s per-provider model lookup) reflects what
+    // is really running. Without this, `start -p opencode-cli` on a workspace
+    // whose settings.json says (or defaults to) claude reports provider 'claude'
+    // with the wrong/empty model.
+    const effectiveProvider = callbacks.getActiveProvider?.();
+    if (effectiveProvider) settings.provider = effectiveProvider;
     const root = callbacks.workspaceRoot;
     if (!root) {
       callbacks.log('No workspace folder open');

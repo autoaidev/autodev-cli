@@ -58,7 +58,12 @@ const SKIP_EVENTS = new Set([
   'message.part.delta',
   'message.part.removed',
   'message.part.updated', // replaced by session.next.text.ended (simpler, same data)
-  'message.updated',      // role-tracking no longer needed
+  // NB: 'message.updated' is intentionally NOT skipped — it's the ONLY v1/legacy
+  // bus event that carries per-turn token usage (info.tokens) to the file plugin.
+  // opencode-cli's plugin 'event' hook receives the v1 bus, which does NOT emit
+  // the v2 session.next.step.ended event the token snapshot used to rely on. It's
+  // handled explicitly below (assistant-completed → StepEnded) and never falls to
+  // the generic catch-all, so it stays non-noisy.
   'message.removed',
   'session.diff',
   // Explicit named hooks — don't double-log
@@ -150,6 +155,11 @@ function extractSessionId(input: any): string | null {
 // session.next.text.ended fires once per step with the complete generated text.
 // Multi-step sessions accumulate across steps and flush as AgentMessage on session.idle.
 const sessionText = new Map<string, string>();
+
+// Assistant message IDs we've already emitted a token snapshot for. message.updated
+// fires repeatedly as the assistant message streams AND a few times after it
+// completes; dedupe on messageID so we ship exactly one StepEnded per turn.
+const emittedUsage = new Set<string>();
 
 export const AutodevHooksPlugin = async () => ({
   // -------------------------------------------------------------------------
@@ -269,6 +279,36 @@ export const AutodevHooksPlugin = async () => ({
     const props     = evt?.properties ?? {};
     const sessionId = props?.sessionID ?? props?.id ?? null;
     const errMsg    = props?.error?.message ?? null;
+
+    // --- message.updated: per-turn token usage (v1/legacy bus — the ONLY token
+    // source the opencode-cli file plugin actually receives). The assistant
+    // Message carries { tokens: { input, output, reasoning, cache }, cost,
+    // modelID, finish }. Emit ONE StepEnded per completed assistant turn (deduped
+    // by message id) in the same shape the server's HookEventNormalizer::
+    // extractUsage consumes, so tokens/context populate the office progress bar.
+    if (t === 'message.updated') {
+      const info = props?.info ?? null;
+      const mid  = info?.id ?? null;
+      // Only assistant messages carry usage; wait for completion so tokens are
+      // final, and only emit once per message id.
+      if (info?.role === 'assistant' && info?.tokens && info?.time?.completed && mid && !emittedUsage.has(mid)) {
+        const tk = info.tokens;
+        const hasTokens = (tk.input || tk.output || tk.reasoning) ? true : false;
+        if (hasTokens) {
+          emittedUsage.add(mid);
+          if (emittedUsage.size > 500) { emittedUsage.clear(); emittedUsage.add(mid); }
+          appendEvent({
+            hook_event_name: 'StepEnded',
+            provider:        'opencode',
+            session_id:      info?.sessionID ?? sessionId,
+            message:         info?.finish ?? null,
+            tokens:          tk,
+            cost:            info?.cost ?? null,
+          });
+        }
+      }
+      return; // never fall through to the generic catch-all
+    }
 
     // --- session.next.text.ended: accumulate assistant response text per session ---
     // Fires once per step with the complete generated text. Flushed on session.idle.

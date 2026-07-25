@@ -73,7 +73,7 @@ function minimalSoulHeader(): string {
     '# SOUL.md',
     '',
     'Your persistent identity anchor. Read this first, before everything.',
-    'Identity lives here (never in program.md) and persists across rebuilds.',
+    'Identity lives here (never in PROGRAM.md) and persists across rebuilds.',
     '',
     '## My Identity',
     '',
@@ -85,7 +85,7 @@ function minimalSoulHeader(): string {
 /**
  * Apply a resolved persona to the workspace's persistent identity file
  * (`<root>/SOUL.md`), per the project rule that identity/persona lives in
- * SOUL.md and NOT in the regenerated program.md.
+ * SOUL.md and NOT in the regenerated PROGRAM.md.
  *
  * Behaviour:
  *  - Non-empty persona → insert/replace an IDEMPOTENT block delimited by the
@@ -278,7 +278,7 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
   ensureHooksInstalled(cwd);
   // Apply the resolved persona (chosen in the pixel-office create-agent dialog)
   // to the agent's persistent identity file (SOUL.md) — identity/persona lives
-  // there, never in the regenerated program.md. Best-effort: never fatal.
+  // there, never in the regenerated PROGRAM.md. Best-effort: never fatal.
   try {
     if (applyPersonaToSoul(cwd, d.persona) && d.persona?.prompt?.trim()) {
       log.gray(`  persona:  ${d.persona.label ?? d.persona.id} → SOUL.md`);

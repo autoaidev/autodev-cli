@@ -14,11 +14,14 @@ import { loadSettingsForRoot } from './core/settingsLoader';
 /** Agent profile instructions written for each task run */
 // The single master reference. AGENTS.md / CLAUDE.md point ONLY here; this file
 // (autoresearch-style "program") describes every other reference — the profile
-// sections, the control spec, and the auto-mode loop tools.
-export const AGENT_PROFILE_FILE = '.autodev/program.md';
-// Legacy name we now migrate away from (older workspaces have this + a block that
-// listed all section files); rebuildProfile removes it so only program.md remains.
-const LEGACY_PROFILE_FILE = '.autodev/AGENT_PROFILE.md';
+// sections, the control spec, and the auto-mode loop tools. Uppercase to match the
+// other agent docs (AGENTS.md / CLAUDE.md / SOUL.md).
+export const AGENT_PROFILE_FILE = '.autodev/PROGRAM.md';
+// Older profile-index names we migrate away from so only PROGRAM.md remains:
+// AGENT_PROFILE.md (the original flat index) and program.md (the lowercase interim
+// name). rebuildProfile removes any that exist — with a realpath guard so a
+// case-insensitive FS (where program.md IS PROGRAM.md) never deletes the live file.
+const LEGACY_PROFILE_FILES = ['.autodev/AGENT_PROFILE.md', '.autodev/program.md'];
 
 /** Directory where per-task message files are stored */
 export const MESSAGES_DIR = '.autodev/messages';
@@ -50,7 +53,7 @@ function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void
     `file://./SOUL.md`,
     `file://./${AGENT_PROFILE_FILE.replace(/\\/g, '/')}`,
     `<think>`,
-    `IMPORTANT: Read SOUL.md FIRST — it is your identity anchor (your name, any assigned persona, and your communication history). Then read program.md, the master index that describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
+    `IMPORTANT: Read SOUL.md FIRST — it is your identity anchor (your name, any assigned persona, and your communication history). Then read PROGRAM.md, the master index that describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
     `</think>`,
     AGENT_REF_END,
   ].join('\n');
@@ -70,12 +73,19 @@ function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void
     fs.writeFileSync(filePath, content, 'utf8');
   }
 
-  // Migrate away from the old flat index: remove the stale AGENT_PROFILE.md so
-  // program.md is the sole master reference (best-effort; ignore if absent).
-  try {
-    const legacy = path.join(root, LEGACY_PROFILE_FILE);
-    if (fs.existsSync(legacy)) { fs.rmSync(legacy); }
-  } catch { /* best effort */ }
+  // Migrate away from older index names so only PROGRAM.md remains. Guard with a
+  // realpath compare so on a case-insensitive FS (program.md === PROGRAM.md) we
+  // never delete the file we just wrote. Best-effort; ignore if absent.
+  let currentReal: string | null = null;
+  try { currentReal = fs.realpathSync(path.join(root, AGENT_PROFILE_FILE)); } catch { currentReal = null; }
+  for (const legacy of LEGACY_PROFILE_FILES) {
+    try {
+      const p = path.join(root, legacy);
+      if (!fs.existsSync(p)) { continue; }
+      if (currentReal && fs.realpathSync(p) === currentReal) { continue; } // same file
+      fs.rmSync(p);
+    } catch { /* best effort */ }
+  }
 }
 
 const COPILOT_INSTRUCTIONS_FILE = '.github/copilot-instructions.md';
@@ -175,10 +185,10 @@ export function firstTurnSystemReminder(root: string): string {
   if (!fs.existsSync(programPath)) { return ''; }
   return [
     '<system-reminder>',
-    'Before doing anything else, read `.autodev/program.md` first — it is the master',
+    'Before doing anything else, read `.autodev/PROGRAM.md` first — it is the master',
     'index of your protocols, tools, and references (load the linked sections on demand).',
     'Your identity and any assigned persona (name, role, e.g. a design persona) live in',
-    '`SOUL.md`, your persistent identity anchor — read it too. program.md is regenerated',
+    '`SOUL.md`, your persistent identity anchor — read it too. PROGRAM.md is regenerated',
     'on every rebuild, so identity is never stored there; SOUL.md persists across rebuilds.',
     '</system-reminder>',
   ].join('\n');

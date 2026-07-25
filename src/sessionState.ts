@@ -22,10 +22,10 @@ export const SESSION_OUT_FILE = '.autodev/TEMP_SESSION_OUT.txt';
 /** .autodev/TEMP_PROMPT.md — prompt written for CLI providers (legacy) */
 export const PROMPT_FILE = '.autodev/TEMP_PROMPT.md';
 
-/** .autodev/program.md — the master profile index, (re)written per task run.
+/** .autodev/PROGRAM.md — the master profile index, (re)written per task run.
  *  MUST match messageBuilder.AGENT_PROFILE_FILE — dispatcher reads THIS constant to
  *  load the profile into the prompt; if they diverge it reads a deleted file (ENOENT). */
-export const AGENT_PROFILE_FILE = '.autodev/program.md';
+export const AGENT_PROFILE_FILE = '.autodev/PROGRAM.md';
 
 // ---------------------------------------------------------------------------
 // Per-message output files

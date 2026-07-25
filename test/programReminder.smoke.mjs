@@ -36,17 +36,17 @@ console.log('programReminder smoke');
 // ── R1b: existence gate — absent program.md ⇒ empty reminder. ──
 ok('firstTurnSystemReminder: absent program.md → no reminder', () => {
   const d = tmpRoot();
-  // No .autodev/program.md present.
+  // No .autodev/PROGRAM.md present.
   assert.strictEqual(firstTurnSystemReminder(d), '', 'expected empty string when program.md missing');
 });
 
 // ── R1a: existence gate — present program.md ⇒ reminder names both files. ──
 ok('firstTurnSystemReminder: present program.md → names program.md + SOUL.md', () => {
   const d = tmpRoot();
-  fs.writeFileSync(path.join(d, '.autodev', 'program.md'), '# index\n');
+  fs.writeFileSync(path.join(d, '.autodev', 'PROGRAM.md'), '# index\n');
   const r = firstTurnSystemReminder(d);
   assert.match(r, /<system-reminder>/);
-  assert.match(r, /program\.md/, 'reminder must reference program.md');
+  assert.match(r, /PROGRAM\.md/, 'reminder must reference PROGRAM.md');
   assert.match(r, /SOUL\.md/, 'reminder must reference SOUL.md');
 });
 
@@ -55,10 +55,10 @@ ok('buildMessage: first turn injects the reminder ahead of the task', () => {
   const d = tmpRoot();
   const { prompt } = buildMessage(task, d, d, true);
   assert.ok(prompt.includes('<system-reminder>'), 'first-turn prompt should contain the reminder');
-  assert.match(prompt, /program\.md/);
+  assert.match(prompt, /PROGRAM\.md/);
   assert.match(prompt, /SOUL\.md/);
   // buildMessage writes program.md itself, so the gate is satisfied.
-  assert.ok(fs.existsSync(path.join(d, '.autodev', 'program.md')), 'program.md should be written');
+  assert.ok(fs.existsSync(path.join(d, '.autodev', 'PROGRAM.md')), 'program.md should be written');
   // Reminder must come before the task-begin marker.
   assert.ok(
     prompt.indexOf('<system-reminder>') < prompt.indexOf('NEXT TASK TO BEGIN'),
@@ -83,9 +83,9 @@ ok('rebuildProfile: pre-existing SOUL.md is never clobbered', () => {
   rebuildProfile(d);
 
   // program.md was (re)generated…
-  assert.ok(fs.existsSync(path.join(d, '.autodev', 'program.md')), 'program.md should exist after rebuild');
+  assert.ok(fs.existsSync(path.join(d, '.autodev', 'PROGRAM.md')), 'program.md should exist after rebuild');
   // …and it references SOUL.md as the identity anchor.
-  const program = fs.readFileSync(path.join(d, '.autodev', 'program.md'), 'utf8');
+  const program = fs.readFileSync(path.join(d, '.autodev', 'PROGRAM.md'), 'utf8');
   assert.match(program, /file:\/\/\.\/SOUL\.md/, 'program.md must reference SOUL.md');
   // …but SOUL.md itself is byte-for-byte unchanged.
   assert.strictEqual(fs.readFileSync(soulPath, 'utf8'), soulBody, 'SOUL.md must be unchanged by rebuild');

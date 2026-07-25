@@ -44,7 +44,7 @@ rebuildProfile(SRC);
   const has = p => entries.some(x => x.endsWith(p));
   ok(has('.autodev/graph/graph.jsonl'), 'graph.jsonl captured');
   ok(!has('.autodev/graph/graph.snapshot.json'), 'disposable snapshot EXCLUDED');
-  ok(has('.autodev/program.md'), 'program.md captured');
+  ok(has('.autodev/PROGRAM.md'), 'PROGRAM.md captured');
   ok(has('.autodev/CONTROL.md'), 'CONTROL.md captured');
   ok(has('.autodev/journals/JOURNAL-2026-07-25-x.md'), 'journals captured');
   ok(has('.autodev/memories/MEMORY-x.md'), 'memories captured');

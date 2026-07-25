@@ -224,7 +224,7 @@ function deploySectionFile(section: ProfileSection, root: string): string | null
 // ---------------------------------------------------------------------------
 
 /**
- * Assemble program.md as a compact **index**:
+ * Assemble PROGRAM.md as a compact **index**:
  * - Each enabled section shows its key rules inline (immediate context).
  * - A `@.autodev/profile/<file>` line lets agents load the full section on demand.
  * - Full section files are copied to `<root>/.autodev/profile/` so the `@`
@@ -244,7 +244,7 @@ export function assembleProfileBody(
   const orderedSections = PROFILE_SECTIONS.filter(s => ids.includes(s.id));
 
   const header = [
-    '# AutoDev — program.md',
+    '# AutoDev — PROGRAM.md',
     '',
     '> **Master index.** AGENTS.md / CLAUDE.md reference only this file; this file',
     '> describes and links every AutoDev reference. Each section below shows its key',
@@ -263,8 +263,8 @@ export function assembleProfileBody(
     const refPath = deploySectionFile(section, root);
     if (refPath) { sectionPaths.push(refPath); }
     const rulesLines = section.keyRules.map(r => `- ${r}`).join('\n');
-    // The `file://` ref is what makes program.md self-contained now that the
-    // AGENTS.md block lists only program.md: the full section loads on demand.
+    // The `file://` ref is what makes PROGRAM.md self-contained now that the
+    // AGENTS.md block lists only PROGRAM.md: the full section loads on demand.
     const refLine = refPath ? `file://./${refPath.replace(/\\/g, '/')}` : '';
     // Hash over key rules + ref so the marker changes if either is updated
     const hash = md5(rulesLines + (refPath ?? ''));
@@ -296,7 +296,7 @@ export function assembleProfileBody(
     body += '\n';
   }
 
-  // Runtime references: the control spec + the auto-mode loop tools. program.md
+  // Runtime references: the control spec + the auto-mode loop tools. PROGRAM.md
   // "describes all other references", so these belong here alongside the sections.
   body += [
     '',

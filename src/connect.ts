@@ -19,6 +19,18 @@ import { ConfigManager } from './configManager';
 //    URL that returns the credentials JSON. Fetch, parse, save.
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolved persona chosen in the pixel-office create-agent dialog. The office
+ * returns it under `data.persona` in the credentials / setup / store payloads.
+ * `id === 'general'` (or an empty `prompt`) means "neutral" — no persona text to
+ * apply.
+ */
+export interface AgentPersona {
+  id: string;
+  label: string;
+  prompt: string;
+}
+
 interface SetupResponse {
   success: boolean;
   data?: {
@@ -29,8 +41,119 @@ interface SetupResponse {
     wsUrl?: string;
     serverBaseUrl?: string;
     officeId?: number;
+    persona?: AgentPersona;
   };
   error?: string;
+}
+
+// Idempotent markers for the persona block inside SOUL.md. The persona section
+// is rewritten between these on every connect; everything outside them (the
+// agent's own name, communication history, …) is preserved untouched.
+const PERSONA_BEGIN = '<!-- autodev:persona:begin -->';
+const PERSONA_END   = '<!-- autodev:persona:end -->';
+
+/** Build the marked persona block (markers included) for a non-empty persona. */
+function renderPersonaBlock(persona: AgentPersona): string {
+  const label = (persona.label || persona.id || 'Persona').trim();
+  const prompt = persona.prompt.trim();
+  return [
+    PERSONA_BEGIN,
+    '## Persona',
+    '',
+    `**${label}**`,
+    '',
+    prompt,
+    PERSONA_END,
+  ].join('\n');
+}
+
+/** Minimal valid SOUL.md skeleton (identity anchor) used when none exists yet. */
+function minimalSoulHeader(): string {
+  return [
+    '# SOUL.md',
+    '',
+    'Your persistent identity anchor. Read this first, before everything.',
+    'Identity lives here (never in program.md) and persists across rebuilds.',
+    '',
+    '## My Identity',
+    '',
+    '- Name: _(unset — fill this in)_',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Apply a resolved persona to the workspace's persistent identity file
+ * (`<root>/SOUL.md`), per the project rule that identity/persona lives in
+ * SOUL.md and NOT in the regenerated program.md.
+ *
+ * Behaviour:
+ *  - Non-empty persona → insert/replace an IDEMPOTENT block delimited by the
+ *    persona markers, containing a `## Persona` heading with the label + prompt.
+ *    Re-connecting with the same persona leaves exactly one, unchanged block;
+ *    connecting with a different persona replaces the block in place.
+ *  - `general` / empty-prompt persona → inject nothing, and REMOVE any prior
+ *    persona block (so switching back to neutral clears the identity).
+ *  - Missing SOUL.md → create it with a minimal identity header + the block.
+ *  - Best-effort: any failure is swallowed (returns false) so it never breaks
+ *    connect.
+ *
+ * @returns true if SOUL.md was written/changed, false otherwise.
+ */
+export function applyPersonaToSoul(root: string, persona?: AgentPersona | null): boolean {
+  try {
+    if (!persona || typeof persona !== 'object') { return false; }
+    const hasPrompt = typeof persona.prompt === 'string' && persona.prompt.trim().length > 0;
+    const isGeneral = !hasPrompt || persona.id === 'general';
+
+    const soulPath = path.join(root, 'SOUL.md');
+    const exists = fs.existsSync(soulPath);
+    const blockRe = new RegExp(
+      `\\n*${escapeRegExp(PERSONA_BEGIN)}[\\s\\S]*?${escapeRegExp(PERSONA_END)}\\n*`,
+    );
+
+    // Neutral / general persona: strip any existing block, otherwise no-op.
+    if (isGeneral) {
+      if (!exists) { return false; }
+      const cur = fs.readFileSync(soulPath, 'utf8');
+      if (!blockRe.test(cur)) { return false; }
+      const next = cur.replace(blockRe, '\n').replace(/\n{3,}/g, '\n\n');
+      fs.writeFileSync(soulPath, next.endsWith('\n') ? next : next + '\n', 'utf8');
+      return true;
+    }
+
+    const block = renderPersonaBlock(persona);
+
+    if (!exists) {
+      const content = `${minimalSoulHeader()}\n${block}\n`;
+      const dir = path.dirname(soulPath);
+      if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+      fs.writeFileSync(soulPath, content, 'utf8');
+      return true;
+    }
+
+    const cur = fs.readFileSync(soulPath, 'utf8');
+    let next: string;
+    if (blockRe.test(cur)) {
+      // Replace the existing block in place (idempotent for same persona).
+      next = cur.replace(blockRe, `\n\n${block}\n`);
+    } else {
+      // Append the block, preserving everything the agent already wrote.
+      next = `${cur.replace(/\n+$/, '')}\n\n${block}\n`;
+    }
+    next = next.replace(/\n{3,}/g, '\n\n');
+    if (!next.endsWith('\n')) { next += '\n'; }
+    if (next === cur) { return false; }
+    fs.writeFileSync(soulPath, next, 'utf8');
+    return true;
+  } catch {
+    // Best-effort: a SOUL.md write failure must never break connect.
+    return false;
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function configWritePath(cwd: string): string {
@@ -153,6 +276,14 @@ export async function applySetupUrl(cwd: string, setupUrl: string): Promise<void
 
   saveSettings(cwd, settings);
   ensureHooksInstalled(cwd);
+  // Apply the resolved persona (chosen in the pixel-office create-agent dialog)
+  // to the agent's persistent identity file (SOUL.md) — identity/persona lives
+  // there, never in the regenerated program.md. Best-effort: never fatal.
+  try {
+    if (applyPersonaToSoul(cwd, d.persona) && d.persona?.prompt?.trim()) {
+      log.gray(`  persona:  ${d.persona.label ?? d.persona.id} → SOUL.md`);
+    }
+  } catch { /* non-fatal */ }
   // Write the office (pixel-office) MCP server into the provider configs NOW, as
   // part of binding — not lazily on the first loop start. Settings were just
   // saved, so serverApiKey + serverBaseUrl are present and the pixel-office entry

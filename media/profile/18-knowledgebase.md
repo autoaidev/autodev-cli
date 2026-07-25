@@ -1,13 +1,10 @@
 ## 0.8 Knowledge Base — `.autodev/knowledgebase/KB-NNN-kebab-title.md`
 
-**Evergreen reference material** — architectural decisions, domain rules, patterns, integration quirks, gotchas. Outlive any individual task. Written when insight is confirmed, never when "there's time later."
+Evergreen reference (architectural decisions, domain rules, patterns, integration quirks, gotchas) that outlives any task — written the moment an insight is confirmed, not "later".
+**Create when:** an architectural decision is made · a pattern applies in 2+ places · an integration quirk is confirmed · a recurring question is definitively answered · a JOURNAL `keep` yields a transferable insight · a TROUBLESHOOTING entry generalises to a class of problem.
+**Name:** `KB-{NUMBER}-{kebab-title}.md` (sequential; `0` for local).
+**Sections:** Status · Created/Updated · Summary (≤3 sentences) · Context · Detail · Examples · Caveats · References · Change History.
 
-**Create when:** Architectural decision made · pattern applies in 2+ places · integration quirk confirmed · recurring question definitively answered · JOURNAL.md `keep` produces transferable insight · TROUBLESHOOTING.md entry generalises to class of problem.
+**Rules:** update Detail in place + append Change History as knowledge evolves; superseded → `Status: Deprecated` + `Superseded by:` link; cross-reference bidirectionally with issues; one concept per entry; self-contained; never delete.
 
-**Naming:** `KB-{NUMBER}-{kebab-case-title}.md` Sequential number (check existing). Use `0` for local. Example: `KB-001-auth-token-refresh-flow.md`
-
-**Sections:** Status · Created/Updated · Summary (≤3 sentences) · Context · Detail · Examples · Caveats · References · Change History (append-only).
-
-**Rules:** Update Detail in place + append Change History when knowledge evolves. Superseded entry → `Status: Deprecated` + `Superseded by:` link. Cross-ref bidirectionally with issues. Never delete. One concept per entry. Self-contained.
-
-**Complete skeleton, all sections, update rules:** skill `kb-reference`
+Full skeleton + update rules: skill `kb-reference`.

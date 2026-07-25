@@ -154,6 +154,32 @@ export function parseFrontmatter(content: string): { meta: ProfileMeta; body: st
 
 
 
+/**
+ * First-turn system reminder pointing the agent at the master protocol index
+ * (`.autodev/program.md`) and its persistent identity anchor (`SOUL.md`).
+ *
+ * Gated on existence: returns '' when `.autodev/program.md` is absent (e.g. the
+ * user deleted it) so we never emit a broken pointer. This is belt-and-suspenders
+ * on top of the passive AGENTS.md / CLAUDE.md reference — it is meant to be
+ * injected only on the FIRST turn of a session/loop (see buildMessage's
+ * `includeProfile` gate), not repeated every turn.
+ *
+ * Exported so smoke tests can prove the existence gate directly.
+ */
+export function firstTurnSystemReminder(root: string): string {
+  const programPath = path.join(root, AGENT_PROFILE_FILE);
+  if (!fs.existsSync(programPath)) { return ''; }
+  return [
+    '<system-reminder>',
+    'Before doing anything else, read `.autodev/program.md` first — it is the master',
+    'index of your protocols, tools, and references (load the linked sections on demand).',
+    'Your identity and any assigned persona (name, role, e.g. a design persona) live in',
+    '`SOUL.md`, your persistent identity anchor — read it too. program.md is regenerated',
+    'on every rebuild, so identity is never stored there; SOUL.md persists across rebuilds.',
+    '</system-reminder>',
+  ].join('\n');
+}
+
 /** Returns the .autodev/messages directory, creating it if needed. */
 function messagesDir(root: string): string {
   const dir = path.join(root, MESSAGES_DIR);
@@ -361,6 +387,14 @@ export function buildMessage(
   // Task message FIRST so the agent sees what to do immediately,
   // then the full protocol/profile follows as context.
   const parts: string[] = [];
+  // On the first turn of the session (same signal as includeProfile), prepend a
+  // short system reminder pointing at program.md (protocol index) + SOUL.md
+  // (identity anchor). Gated on program.md actually existing so a deleted file
+  // never produces a broken pointer. Once per session/loop start — not every turn.
+  if (includeProfile) {
+    const reminder = firstTurnSystemReminder(root);
+    if (reminder) { parts.push(reminder); }
+  }
   parts.push(taskMessage);
   if (includeProfile && finalProfileBody.trim()) {
     parts.push(`# Project Instructions (AUTODEV.md)\n\n${finalProfileBody.trim()}`);

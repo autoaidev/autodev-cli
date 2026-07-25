@@ -20,6 +20,7 @@ import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, provide
 import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 import { buildNotificationEvent } from '../core/liveNarration';
+import { extractClaudeUsage, type ClaudeUsagePayload } from '../core/claudeUsage';
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
 
@@ -779,6 +780,13 @@ export function mcpOperateCommand(program: Command): void {
         let transcriptPath: string | null = null;
         let transcriptOffset = 0;
         const seenAsst = new Set<string>();   // assistant-entry uuids already forwarded
+        // Latest token/context snapshot seen in the transcript (from the last
+        // assistant message that carried a `message.usage` block). Attached to the
+        // narration frame so the office progress bar shows context% + tokens for
+        // Claude — which fires no token-bearing hook. Persists across ticks so a
+        // text message lacking its own usage still ships the most recent figures.
+        let lastUsage: ClaudeUsagePayload | null = null;
+        let lastModel: string | null = null;
         const forwardAssistant = (text: string): void => {
           // Redact secrets from the assistant prose BEFORE it leaves the machine
           // — this bubble is stored + rendered in the office chat.
@@ -786,6 +794,11 @@ export function mcpOperateCommand(program: Command): void {
           if (!msg || !socket) { return; }
           const ev = buildNotificationEvent(settings.provider || 'claude', cwd, msg.length > 1800 ? msg.slice(0, 1800) + '…' : msg) as Record<string, unknown>;
           ev._session_name = sessionNameForHooks;
+          // Additive usage + model signal (never breaks the existing frame): the
+          // server's HookEventNormalizer reads data.usage → Agent.usage and
+          // data.model → Agent.model. Values only; no token counts are logged.
+          if (lastUsage) { ev.usage = lastUsage; }
+          if (lastModel) { ev.model = lastModel; }
           socket.sendFrame({ type: 'hook_event', data: ev });
           markWorking();   // producing assistant text is activity → keep 'working'
         };
@@ -804,11 +817,17 @@ export function mcpOperateCommand(program: Command): void {
               const t = line.trim();
               if (!t) { continue; }
               try {
-                const d = JSON.parse(t) as { type?: string; uuid?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+                const d = JSON.parse(t) as { type?: string; uuid?: string; message?: { content?: Array<{ type?: string; text?: string }>; usage?: unknown; model?: unknown } };
                 if (d.type !== 'assistant' || !Array.isArray(d.message?.content)) { continue; }
                 const uuid = d.uuid || '';
                 if (uuid && seenAsst.has(uuid)) { continue; }
                 if (uuid) { seenAsst.add(uuid); if (seenAsst.size > 500) { seenAsst.delete(seenAsst.values().next().value as string); } }
+                // Capture the running token/context snapshot from this message's
+                // usage block, if present. Guarded — many messages omit it; keep the
+                // last one that HAS usage so the next narration frame ships it.
+                const model = typeof d.message!.model === 'string' ? (d.message!.model as string) : undefined;
+                const usage = extractClaudeUsage(d.message!.usage, model);
+                if (usage) { lastUsage = usage; if (model) { lastModel = model; } }
                 const text = d.message!.content!.filter((p) => p.type === 'text' && p.text).map((p) => p.text as string).join('\n');
                 if (text.trim()) { forwardAssistant(text); }
               } catch { /* skip non-JSON / partial lines */ }

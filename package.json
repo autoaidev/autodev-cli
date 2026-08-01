@@ -33,19 +33,19 @@
     "test": "node test/smoke.mjs && node test/liveNarration.smoke.mjs && node test/liveNarration.edge.smoke.mjs && node test/normalizer.parity.smoke.mjs && node test/providerConfig.smoke.mjs && node test/mcpOnlyOperator.smoke.mjs && node test/opencodeEventFilter.smoke.mjs && node test/copilotMcpIsolation.smoke.mjs && node test/grokSpawnError.smoke.mjs && node test/initTemplate.smoke.mjs && node test/settingsAliases.smoke.mjs && node test/setupWritesOfficeMcp.smoke.mjs && node test/claudePermissions.smoke.mjs && node test/presenceGuard.smoke.mjs && node test/cliExitHardFail.smoke.mjs && node test/redactSecrets.smoke.mjs && node test/claudeUsage.smoke.mjs && node test/graphStore.smoke.mjs && node test/programReminder.smoke.mjs && node test/agentBackup.smoke.mjs && node test/persona.smoke.mjs && node test/soulUpdate.smoke.mjs && node test/sessionsGlobal.smoke.mjs && node test/resumeSessionLoopDefault.smoke.mjs && node test/secureFilePerms.smoke.mjs"
   },
   "dependencies": {
-    "commander": "^12.1.0",
-    "node-pty": "^1.1.0",
     "@opencode-ai/sdk": "^1.14.41",
     "@raylin01/claude-client": "^0.3.3",
-    "adm-zip": "^0.5.17",
+    "adm-zip": "^0.6.0",
+    "commander": "^12.1.0",
     "imapflow": "^1.0.171",
-    "mailparser": "^3.7.1"
+    "mailparser": "^3.7.1",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
     "@types/adm-zip": "^0.5.7",
-    "@types/mailparser": "^3.4.6"
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   },
   "exports": {
     ".": "./out/cli.js",

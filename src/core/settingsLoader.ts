@@ -343,6 +343,21 @@ export function settingsWritePath(root: string): string {
   return path.join(root, '.autodev', 'settings.json');
 }
 
+/**
+ * True when `key` is EXPLICITLY present in the workspace's raw settings file —
+ * i.e. the user (or a spawn flow) actually wrote it, as opposed to it falling
+ * back to SETTINGS_DEFAULTS after the `{...defaults, ...raw}` merge. Lets callers
+ * tell an explicit `false` apart from a defaulted `false` (e.g. resumeSession).
+ */
+export function hasExplicitSetting(root: string, key: keyof AutodevSettings): boolean {
+  try {
+    const file = settingsReadPath(root);
+    if (!fs.existsSync(file)) { return false; }
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(raw, key);
+  } catch { return false; }
+}
+
 /** Path that should be used for reads — canonical if present, else legacy. */
 export function settingsReadPath(root: string): string {
   const canonical = path.join(root, '.autodev', 'settings.json');

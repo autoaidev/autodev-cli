@@ -8,7 +8,7 @@ import { todoWriter } from './todoWriteManager';
 import { buildPrompt } from './prompt';
 import { writeMessageFile } from './messageBuilder';
 import { WebhookClient, WebhookEvent, sendDiscordBotMessage } from './webhook';
-import { loadSettingsForRoot, AutodevSettings } from './core/settingsLoader';
+import { loadSettingsForRoot, AutodevSettings, hasExplicitSetting, settingsWritePath } from './core/settingsLoader';
 import { loadControlSpec, isGateActive, runVerify, isMechanicalFailure, matchesAnyGlob, ControlSpec } from './core/controlSpec';
 import { appendJournalRow } from './journal';
 import { IFileWatcher, IDisposable } from './core/adapters';
@@ -398,6 +398,29 @@ export class TaskLoopRunner {
       callbacks.log('No workspace folder open');
       this._setState('idle');
       return;
+    }
+
+    // Loop agents default to resumeSession=true. A continuous loop wants ONE
+    // evolving session; running with resume off makes every turn start a fresh
+    // provider session. For opencode especially that means a brand-new row in the
+    // shared opencode.db each turn — an autonomous loop silently accumulated
+    // 55k+ throwaway sessions (660 MB) this way. resumeSession defaults to false
+    // (fine for one-shot `send`), so here — at loop start only — we flip it to
+    // true UNLESS the user set it explicitly (an explicit `false` is honored, so
+    // a deliberately-stateless loop still works). Persisted so the per-turn
+    // dispatcher reload (loadSettingsForRoot reads disk) sees it. grok-cli/grok-tui
+    // keep their own forced statelessness/resume in the dispatcher regardless.
+    if (!hasExplicitSetting(root, 'resumeSession')) {
+      settings.resumeSession = true;
+      try {
+        const file = settingsWritePath(root);
+        const onDisk = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+        if (onDisk.resumeSession !== true) {
+          onDisk.resumeSession = true;
+          fs.writeFileSync(file, JSON.stringify(onDisk, null, 2) + '\n', 'utf8');
+          callbacks.log('🔁 Loop mode: defaulting resumeSession=true (one evolving session; set it false in settings to run stateless).');
+        }
+      } catch { /* non-fatal: in-memory default still applies for this run */ }
     }
 
     this._settings = settings;

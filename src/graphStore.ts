@@ -344,6 +344,12 @@ export class GraphStore {
   private opsSinceSnapshot = 0;
   private nodes = new Map<string, GraphNode>();
   private edges = new Map<string, GraphEdge>();
+  // Monotonic insertion ordinal per node (last write wins). Used ONLY as a
+  // deterministic recency tiebreaker: two nodes written in the same millisecond
+  // share an updatedAt ISO string, so a pure updatedAt sort is ambiguous and,
+  // with JS's stable sort, silently favors the earlier-inserted node — the wrong
+  // one for mode:'recent'. The later write always has the higher ordinal.
+  private nodeOrdinal = new Map<string, number>();
   /** nodeId → incident edges (both directions). Rebuilt on clear, kept in step in apply(). */
   private adjacency = new Map<string, GraphEdge[]>();
   /** entity canonical-key → entity node id — the dedup + legacy-id resolution index. */
@@ -387,6 +393,7 @@ export class GraphStore {
   private clear(): void {
     this.nodes.clear();
     this.edges.clear();
+    this.nodeOrdinal.clear();
     this.adjacency.clear();
     this.entityIndex.clear();
     this.appliedOps = 0;
@@ -481,7 +488,8 @@ export class GraphStore {
       if (typeof snap.headSig !== 'string' || this.headSig(covers) !== snap.headSig) { return false; }
       // valid → adopt. Populate the maps and rebuild adjacency + entity indexes.
       this.clear();
-      for (const n of snap.nodes as GraphNode[]) { this.nodes.set(n.id, n); this.indexEntity(n); }
+      let ord = 0;
+      for (const n of snap.nodes as GraphNode[]) { this.nodes.set(n.id, n); this.nodeOrdinal.set(n.id, ++ord); this.indexEntity(n); }
       for (const e of snap.edges as GraphEdge[]) { this.edges.set(e.id, e); this.indexEdge(e); }
       this.appliedOps = this.nodes.size + this.edges.size;
       this.mutationSeq++;
@@ -576,6 +584,7 @@ export class GraphStore {
     if (op.op === 'node') {
       const { op: _o, ...node } = op;
       this.nodes.set(node.id, node as GraphNode);
+      this.nodeOrdinal.set(node.id, this.appliedOps); // monotonic: later write = higher
       this.indexEntity(node as GraphNode);
     } else if (op.op === 'edge') {
       const { op: _o, ...edge } = op;
@@ -585,7 +594,7 @@ export class GraphStore {
       this.indexEdge(edge as GraphEdge);
     } else if (op.op === 'supersede') {
       const old = this.nodes.get(op.id);
-      if (old) { old.supersededBy = op.by; old.updatedAt = op.ts; }
+      if (old) { old.supersededBy = op.by; old.updatedAt = op.ts; this.nodeOrdinal.set(op.id, this.appliedOps); }
     }
   }
 
@@ -949,6 +958,10 @@ export class GraphStore {
       if (mode === 'recent' || !textLower) {
         const r = (b.node.updatedAt || '').localeCompare(a.node.updatedAt || '');
         if (r !== 0) { return r; }
+        // Same-millisecond writes share an updatedAt string; break the tie by
+        // insertion ordinal so "recent" is deterministic (later write first).
+        const o = (this.nodeOrdinal.get(b.node.id) ?? 0) - (this.nodeOrdinal.get(a.node.id) ?? 0);
+        if (o !== 0) { return o; }
         return b.score - a.score;
       }
       if (b.score !== a.score) { return b.score - a.score; }

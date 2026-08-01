@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
+import { writeFileSecure } from './core/secureFile';
 import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 
 // ---------------------------------------------------------------------------
@@ -347,7 +348,8 @@ export class ConfigManager {
         const cfg = JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
         if (cfg && typeof cfg.mcpServers === 'object' && cfg.mcpServers) {
           delete cfg.mcpServers;
-          fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+          // .claude provider settings may carry MCP bearer tokens — owner-only.
+          writeFileSecure(p, JSON.stringify(cfg, null, 2) + '\n');
           log?.(`ConfigManager: removed stale mcpServers from .claude/${stale}`);
         }
       } catch { /* ignore */ }
@@ -573,7 +575,8 @@ function _migrateLegacyMcpServers(
     const cfg = JSON.parse(fs.readFileSync(settingsFile, 'utf8')) as Record<string, unknown>;
     if (cfg && 'mcpServers' in cfg) {
       delete (cfg as Record<string, unknown>)['mcpServers'];
-      fs.writeFileSync(settingsFile, JSON.stringify(cfg, null, 2), 'utf8');
+      // settings.json holds serverApiKey + the wsUrl token — write owner-only.
+      writeFileSecure(settingsFile, JSON.stringify(cfg, null, 2));
       log?.('ConfigManager: stripped legacy mcpServers from .autodev/settings.json');
     }
   } catch { /* ignore */ }
@@ -597,7 +600,9 @@ function _mergeJson(
       try { cfg = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>; } catch { }
     }
     mutate(cfg);
-    fs.writeFileSync(filePath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    // These configs (.vscode/mcp.json, opencode.json, copilot global) embed the
+    // pixel-office A2A bearer token in remote-MCP headers — write owner-only.
+    writeFileSecure(filePath, JSON.stringify(cfg, null, 2) + '\n');
     log?.(`ConfigManager: applied ${label}`);
   } catch (err) {
     log?.(`ConfigManager: failed ${label}: ${err}`);
@@ -619,7 +624,9 @@ function _writeJson(
   try {
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-    fs.writeFileSync(filePath, JSON.stringify(build(), null, 2) + '\n', 'utf8');
+    // The per-workspace copilot MCP config embeds the pixel-office A2A bearer
+    // token in remote-MCP headers — write owner-only.
+    writeFileSecure(filePath, JSON.stringify(build(), null, 2) + '\n');
     log?.(`ConfigManager: applied ${label}`);
   } catch (err) {
     log?.(`ConfigManager: failed ${label}: ${err}`);
@@ -694,7 +701,9 @@ function _writeGrokToml(
     }
 
     const out = [preserved, blocks.join('\n\n')].filter(Boolean).join('\n\n').trim() + '\n';
-    fs.writeFileSync(filePath, out, 'utf8');
+    // .grok/config.toml embeds the pixel-office A2A bearer token in the
+    // [mcp_servers.<name>.headers] table — write owner-only.
+    writeFileSecure(filePath, out);
     log?.('ConfigManager: applied Grok project MCP (.grok/config.toml)');
   } catch (err) {
     log?.(`ConfigManager: failed Grok project MCP (.grok/config.toml): ${err}`);

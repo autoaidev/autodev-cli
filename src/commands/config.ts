@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { AutodevSettings, SETTINGS_DEFAULTS, loadSettingsForRoot } from '../core/settingsLoader';
+import { writeFileSecure } from '../core/secureFile';
 
 function configPath(cwd: string): string {
   // Read path: prefer the canonical .autodev/settings.json, fall back to the
@@ -22,7 +23,8 @@ function saveSettings(cwd: string, settings: AutodevSettings): void {
   const file = configWritePath(cwd);
   const dir  = path.dirname(file);
   if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  // settings.json holds serverApiKey + the wsUrl token — write owner-only.
+  writeFileSecure(file, JSON.stringify(settings, null, 2) + '\n');
 }
 
 export function configCommand(program: Command): void {

@@ -896,13 +896,15 @@ export class TaskLoopRunner {
     if (!root) return;
     try {
       const { loadSettingsForRoot: load, settingsWritePath } = require('./core/settingsLoader') as typeof import('./core/settingsLoader');
+      const { writeFileSecure } = require('./core/secureFile') as typeof import('./core/secureFile');
       const current = load(root);
       if (current.exportEnabled === exportEnabled && current.exportDailyBackup === exportDailyBackup && (!agentId || current.agentId === agentId)) return;
       current.exportEnabled     = exportEnabled;
       current.exportDailyBackup = exportDailyBackup;
       if (agentId) current.agentId = agentId;
       fs.mkdirSync(path.join(root, '.autodev'), { recursive: true });
-      fs.writeFileSync(settingsWritePath(root), JSON.stringify(current, null, 2), 'utf8');
+      // settings.json holds serverApiKey + the wsUrl token — write owner-only.
+      writeFileSecure(settingsWritePath(root), JSON.stringify(current, null, 2));
       this._cb?.log(`⚙️ Export config updated: enabled=${exportEnabled}, dailyBackup=${exportDailyBackup}`);
     } catch (err) {
       this._cb?.log(`⚠️ export_config write failed: ${err instanceof Error ? err.message : String(err)}`);

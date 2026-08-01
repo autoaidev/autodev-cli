@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { writeFileSecure } from './secureFile';
 
 // ---------------------------------------------------------------------------
 // projectMcp — read/write user MCP entries to <root>/.mcp.json directly.
@@ -158,7 +159,9 @@ function _writeAll(root: string, entries: McpJsonEntries): void {
   cfg.mcpServers = entries;
   const dir = path.dirname(f);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(f, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  // .mcp.json carries the pixel-office A2A bearer token (remote MCP
+  // Authorization header) — write owner-only.
+  writeFileSecure(f, JSON.stringify(cfg, null, 2) + '\n');
 }
 
 function _isBuiltin(entry: McpJsonEntry): boolean {

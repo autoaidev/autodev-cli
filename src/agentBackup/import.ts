@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AdmZipArchive } from './archive';
+import { writeFileSecure } from '../core/secureFile';
 import { ARCHIVE_PATHS, TOP_FOLDER, IDENTITY_KEYS } from './layout';
 import { SESSION_BACKUP_PROVIDERS } from './sessionProviders';
 import { parseManifest } from './manifest';
@@ -53,7 +54,9 @@ export async function restoreAgentBackup(zipPath: string, destRoot: string): Pro
         : {};
       Object.assign(restored, preservedIdentity);
       fs.mkdirSync(path.dirname(destSettingsPath), { recursive: true });
-      fs.writeFileSync(destSettingsPath, JSON.stringify(restored, null, 2) + '\n', 'utf8');
+      // Restored settings.json carries the preserved serverApiKey/wsUrl identity
+      // — write owner-only.
+      writeFileSecure(destSettingsPath, JSON.stringify(restored, null, 2) + '\n');
     } catch { /* best effort */ }
   }
 

@@ -5,6 +5,7 @@ import * as https from 'https';
 import { URL } from 'url';
 import { log } from './logger';
 import { AutodevSettings, SETTINGS_DEFAULTS, parseWsUrl, loadSettingsForRoot } from './core/settingsLoader';
+import { writeFileSecure } from './core/secureFile';
 import { installHooks, areHooksInstalled } from './hooksManager';
 import { ConfigManager } from './configManager';
 
@@ -164,7 +165,8 @@ function saveSettings(cwd: string, settings: AutodevSettings): void {
   const file = configWritePath(cwd);
   const dir  = path.dirname(file);
   if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  // settings.json holds serverApiKey + the wsUrl token — write owner-only.
+  writeFileSecure(file, JSON.stringify(settings, null, 2) + '\n');
 }
 
 function loadOrDefault(cwd: string): AutodevSettings {

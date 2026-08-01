@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { SETTINGS_DEFAULTS } from '../core/settingsLoader';
+import { writeFileSecure } from '../core/secureFile';
 import { installHooks, areHooksInstalled } from '../hooksManager';
 import {
   IdeId,
@@ -90,7 +91,7 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
         if (opts.git === true)         { cur.gitEnabled = true; }
         if (opts.fileBrowser === true) { cur.enableFileBrowser = true; }
         if (opts.profile)              { cur.profilePath = opts.profile; }
-        fs.writeFileSync(configPath, JSON.stringify(cur, null, 2), 'utf8');
+        writeFileSecure(configPath, JSON.stringify(cur, null, 2));
         log.gray(`Patched ${configPath} with customization toggles`);
       } catch { /* ignore */ }
     }
@@ -117,7 +118,7 @@ export function runInit(workspacePath: string | undefined, opts: InitOpts): void
     if (opts.fileBrowser === true) { settings.enableFileBrowser = true; }
     if (opts.profile)              { settings.profilePath = opts.profile; }
     if (opts.sessionName)          { settings.sessionName = opts.sessionName; }
-    fs.writeFileSync(configPath, JSON.stringify(settings, null, 2), 'utf8');
+    writeFileSecure(configPath, JSON.stringify(settings, null, 2));
     log.success(`Created ${configPath}`);
   }
 

@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { loadSettingsForRoot } from '../core/settingsLoader';
+import { writeFileSecure } from '../core/secureFile';
 import { saveSessionId } from '../sessionState';
 import { ProviderId, PROVIDERS } from '../providers';
 
@@ -23,7 +24,8 @@ export function resumeCommand(program: Command): void {
       settings.resumeSession = true;
       const file = path.join(cwd, '.autodev', 'settings.json');
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+      // settings.json holds serverApiKey + the wsUrl token — write owner-only.
+      writeFileSecure(file, JSON.stringify(settings, null, 2) + '\n');
       saveSessionId(cwd, provider, sessionId);
       log.success(`Will resume ${provider} session ${sessionId} on next start.`);
     });

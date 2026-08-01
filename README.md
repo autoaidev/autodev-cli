@@ -7,8 +7,12 @@ or wire the folder up as an MCP-only operator so a plain chat client becomes a l
 ```bash
 npm install -g autodev-cli
 autodev init .            # scaffold TODO.md + .autodev/settings.json
+# add "[ ] do the thing" checkboxes under the "## Todo" heading in TODO.md
 autodev start .           # run the autonomous loop
 ```
+
+> Provider CLIs (`claude`, `grok`, `opencode`, `copilot`) are **not** bundled —
+> install the one you plan to use separately.
 
 Part of the **AutoDev** suite for running autonomous AI coding agents that appear as
 characters in a live "office":
@@ -108,9 +112,15 @@ autodev start                       # cwd, default provider
 autodev start ~/proj -p copilot-cli
 autodev start . --once              # drain the TODO once, then exit (default: poll forever)
 autodev start . --todo BACKLOG.md   # use a different task file
+autodev start . --force             # bypass the duplicate-loop guard for this workspace
 ```
 
+Flags: `-p, --provider`, `--todo <file>`, `--once`, `--session-name <name>`, `--force`.
 Press **Ctrl+C** to stop gracefully.
+
+> Tasks live under the **`## Todo`** heading in `TODO.md` as `- [ ] task` checkboxes,
+> one per line, run top to bottom. The scaffolded template ships with no example task
+> on purpose — a stray `[ ]` line is a real task the agent would execute first.
 
 ### `autodev connect [path]`
 Bind the workspace to a pixel-office endpoint.
@@ -142,12 +152,15 @@ Flags:
 |------|--------|
 | `--url <url>` | Operator-MCP endpoint (`…/api/office-mcp`). Default: derived from the binding. |
 | `--key <apiKey>` | Character `api_key` (Bearer). Default: the workspace `serverApiKey`. |
+| `--http-port <port>` | Serve MCP over persistent Streamable HTTP on this port instead of stdio (point an opencode `type: remote` MCP at `http://<host>:<port>/mcp`). |
+| `--http-host <host>` | Bind address for `--http-port` (default `127.0.0.1`). |
 | `--no-socket` | Don't open the presence WebSocket — HTTP-only, poll-based presence. |
 | `--file-browser` | Serve the office file-browser panel (read/write workspace files). |
 | `--git` | Serve the office git panel (status/diff/stage/commit/branch). |
 | `--vnc` | Serve office VNC remote-desktop sessions (input + framebuffer). |
 | `--rdp` | Serve office RDP remote-desktop sessions (input + framebuffer). |
-| `--mcp-update` | Honor `mcp_update` frames — sync office-supplied MCP config to disk. |
+| `--mcp-update` | Honor `mcp_update` frames — sync office-supplied MCP config to disk (relaunch to pick up spawn changes). |
+| `--skill-update` | Honor `skill_update` frames — sync office-supplied Claude Code skills to `.claude/skills/<slug>/SKILL.md` (live-reloads, no relaunch). |
 
 Each capability flag also turns on when the bound workspace has the matching setting
 (`enableFileBrowser` / `gitEnabled` / `vncEnabled` / `rdpEnabled` / `mcpUpdateEnabled`); an
@@ -186,10 +199,15 @@ autodev config set provider copilot-cli   # write one key
 autodev config set taskTimeoutMinutes 60
 ```
 
-### `autodev sessions [path]` / `autodev resume <sessionId> [path]`
-List inspectable provider sessions (id, name, last updated) and mark one to resume on the
-next `start`. `-p, --provider` filters to a family (`claude` | `opencode` | `grok`); `--json`
-for machine output.
+### `autodev sessions [path]` / `autodev session-show <id>` / `autodev resume <sessionId> [path]`
+`sessions` lists inspectable provider sessions (id, name, last updated); `resume` marks one to
+resume on the next `start`. `-p, --provider` filters to a family
+(`claude` | `grok` | `opencode` | `copilot`), `--all` spans every workspace on the machine,
+and `--json` emits machine output.
+
+`session-show <id> -p <provider>` prints a normalized transcript for one session
+(`--json` for structured output, `--limit <n>` to cap messages, `--file`/`--cwd` to hint
+transcript resolution for claude/grok).
 
 ### `autodev export [path]` / `autodev import <zip> [dest]`
 Export an agent backup ZIP (workspace state + portable session traces) and restore it
@@ -218,8 +236,9 @@ Each family ships in CLI and TUI/SDK flavors:
 | `opencode-cli`, `opencode-sdk` | OpenCode (`opencode`, `@opencode-ai/sdk`) |
 | `copilot-cli`, `copilot-sdk` | GitHub Copilot (`copilot`) |
 
-Default: `claude-tui`. Set a `fallbackProvider` in settings to switch automatically on a
-rate-limit.
+Default: `claude-tui` for `init` / `start` / the root command; the `up` / `launch` IDE
+shortcuts default to `claude-cli`. Set a `fallbackProvider` in settings to switch
+automatically on a rate-limit.
 
 ---
 
@@ -254,7 +273,7 @@ Common keys:
 | `enableFileBrowser` | `false` | Expose the file-browser tab for this agent |
 | `vncEnabled` / `rdpEnabled` | `false` | Serve VNC / RDP remote-desktop sessions for this agent |
 | `mcpUpdateEnabled` | `false` | Honor office-pushed `mcp_update` frames (sync MCP config to disk) |
-| `resumeSession` | `false` | Resume a prior provider session on next `start` |
+| `resumeSession` | `false`* | Resume a prior provider session on next `start`. *Loop agents default this to `true` (one evolving session) unless you set it explicitly. |
 | `profilePath` | `""` | Path to an `AUTODEV.md` profile |
 | `discordToken` / `discordChannelId` / `discordOwners` | `""` | Discord notifications |
 | `disabledBuiltinMcp` | `[]` | Built-in MCP servers to turn off |
@@ -268,8 +287,11 @@ Per-provider extras include `claudeModel`, `grokModel`, `copilotModel`, `opencod
 ## MCP servers
 
 Project MCP servers live in `<workspace>/.mcp.json` and are fanned out to every provider's
-config (`.mcp.json` for Claude, `opencode.json`, `~/.copilot/mcp-config.json`,
-`.vscode/mcp.json`) on each sync. Built-ins (`memory`, `playwright`, `sequential-thinking`,
+config on each sync: `.mcp.json` for Claude, `opencode.json`, `.vscode/mcp.json`, and a
+**per-workspace** `.autodev/copilot-mcp.json` that Copilot loads via `--additional-mcp-config`
+(the global `~/.copilot/mcp-config.json` is intentionally *not* written — per-agent boxes would
+clobber each other's bearer token; stale entries there are pruned). Built-ins (`memory`,
+`playwright`, `sequential-thinking`,
 `computer-use-mcp`) are added automatically; disable any with
 `disabledBuiltinMcp: ["playwright", …]`.
 
@@ -288,19 +310,27 @@ Entries can be **stdio** or **remote (HTTP/SSE)**:
 `serverApiKey`) a `pixel-office` MCP server is added automatically. Both agent kinds get the
 **same** `autodev mcp-operate` stdio bridge to the operator MCP (`<origin>/api/office-mcp` —
 the full toolkit: `get_tasks`, `start_task`, `complete_task`, `report`, `set_status`,
-`check_messages`, `send_message`, `list_agents`, …). The key is read from
+`check_messages`, `send_message`, `list_agents`, …). The bridge also synthesizes two
+client-side tools on top of that surface — `wait_for_events` (long-poll for office
+steers/messages/tasks) and `ask_user` (put a blocking question to the office). The key is read from
 `.autodev/settings.json`, never written into a provider config; the path is relative (`.`) so
-the entry stays portable. The two kinds differ only in one arg:
+the entry stays portable. Both agent kinds get the **identical** generated entry
+(`autodev mcp-operate .` + capability flags); the presence socket is decided at **runtime**, not
+baked into the config:
 
-- **MCP-only agents** (`mcpOnly: true`) keep the presence socket — the bridge *is* the
-  character's live connection, so office steers/messages arrive via `wait_for_events`.
-- **Loop agents** get `--no-socket` — the `autodev start` loop already holds this slug's WS and
-  delivers steers itself. The slug→connection index is last-wins, so a second socket would
-  steal the slug and swallow the steer. HTTP tools still work fully without it.
+- With **no live loop** owning the slug (a pure MCP-only agent), the bridge keeps its presence
+  socket — it *is* the character's live connection, so office steers/messages arrive via
+  `wait_for_events`.
+- When a **live `autodev start` loop** owns the slug (fresh `.autodev/ws-presence.lock` with a
+  live pid), the bridge stays poll-only — the loop already holds this slug's WS and delivers
+  steers itself, and the last-wins slug→connection index means a second socket would steal the
+  slug and swallow the steer. HTTP tools still work fully without it. A periodic reconcile
+  yields or re-opens the socket as loops appear/die, so it self-heals. (`--no-socket` still
+  exists as a manual override, but is no longer hard-coded into the managed config.)
 
 Enabled interactive capabilities are appended as explicit args to the generated entry
-(`--file-browser`, `--git`, `--vnc`, `--rdp`, `--mcp-update`) so the managed `.mcp.json` is
-self-documenting. Opt out entirely with `disabledBuiltinMcp: ["pixel-office"]`.
+(`--file-browser`, `--git`, `--vnc`, `--rdp`, `--mcp-update`, `--skill-update`) so the managed
+`.mcp.json` is self-documenting. Opt out entirely with `disabledBuiltinMcp: ["pixel-office"]`.
 
 ---
 
@@ -313,9 +343,12 @@ npm run dev       # tsc --watch
 npm test          # runs the smoke-test suite in test/*.mjs
 ```
 
-The test suite is a set of Node smoke tests (`node test/smoke.mjs && …`) covering the
-provider config, live-narration normalizer, MCP-only operator, event filters, and init
-template. No build step is required to run them individually.
+The test suite is a chained set of Node smoke tests (`node test/smoke.mjs && …`) covering the
+provider config, live-narration normalizer, MCP-only operator, event filters, secret
+redaction, init template, and more. Run any one standalone with `node test/<name>.smoke.mjs`.
+
+For a source-tree map (entry points, the loop engine, providers, the office bridge, config,
+and subsystems), see **[docs/architecture.md](docs/architecture.md)**.
 
 ---
 

@@ -115,6 +115,168 @@ function resolveClaudeJsonl(workspacePath: string): string | undefined {
   return listClaudeSessionFiles(workspacePath)[0]?.full;
 }
 
+// ---------------------------------------------------------------------------
+// Global (cross-workspace) discovery + transcript reading
+// ---------------------------------------------------------------------------
+
+/** Decode a `~/.claude/projects` folder name back to a plausible cwd. Lossy
+ *  (dashes in real names collapse), so callers prefer the transcript's own cwd. */
+function decodeClaudeProject(folder: string): string {
+  return '/' + folder.replace(/^-+/, '').replace(/-/g, '/');
+}
+
+/** sessionId → newest display title, from ~/.claude/history.jsonl. */
+function claudeTitleMap(): Map<string, string> {
+  const m = new Map<string, string>();
+  try {
+    const claudeDir = process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+    const histFile = path.join(claudeDir, 'history.jsonl');
+    if (!fs.existsSync(histFile)) { return m; }
+    for (const line of fs.readFileSync(histFile, 'utf8').split('\n')) {
+      if (!line.trim()) { continue; }
+      try { const e = JSON.parse(line); if (e.sessionId && e.display) { m.set(e.sessionId, e.display); } } catch { /* skip */ }
+    }
+  } catch { /* none */ }
+  return m;
+}
+
+/** Peek a transcript head for its real cwd, a first-user title hint, and a
+ *  message-count floor (bounded read so discovery never loads 100s of MB). */
+function peekClaudeTranscript(file: string, size: number): { cwd?: string; firstUser?: string; count: number } {
+  let cwd: string | undefined; let firstUser: string | undefined; let count = 0;
+  const MAX = 256_000;
+  try {
+    let text: string;
+    if (size > MAX) {
+      const fd = fs.openSync(file, 'r');
+      try { const buf = Buffer.alloc(MAX); fs.readSync(fd, buf, 0, MAX, 0); text = buf.toString('utf8'); } finally { fs.closeSync(fd); }
+    } else { text = fs.readFileSync(file, 'utf8'); }
+    for (const line of text.split('\n')) {
+      if (!line.trim()) { continue; }
+      count++;
+      try {
+        const o = JSON.parse(line) as Record<string, unknown>;
+        if (!cwd && typeof o['cwd'] === 'string') { cwd = o['cwd'] as string; }
+        if (!firstUser && o['type'] === 'user') {
+          const t = extractClaudeText((o['message'] as Record<string, unknown> | undefined));
+          if (t) { firstUser = t.slice(0, 80); }
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* unreadable */ }
+  return { cwd, firstUser, count };
+}
+
+export interface ClaudeGlobalSession { id: string; name: string; cwd: string; updated: number; file: string; msgs: number }
+
+/** ALL claude sessions across every ~/.claude/projects folder (newest first).
+ *  Mirrors the app's sessionManager.discover(): skip `agent-` transcripts,
+ *  derive cwd from the transcript's own `cwd` (folder-name decode fallback). */
+export function listAllClaudeSessions(): ClaudeGlobalSession[] {
+  const claudeDir = process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+  const projects = path.join(claudeDir, 'projects');
+  if (!fs.existsSync(projects)) { return []; }
+  const titles = claudeTitleMap();
+  const out: ClaudeGlobalSession[] = [];
+  let folders: string[] = [];
+  try { folders = fs.readdirSync(projects); } catch { return []; }
+  for (const folder of folders) {
+    const dir = path.join(projects, folder);
+    let files: string[] = [];
+    try {
+      if (!fs.statSync(dir).isDirectory()) { continue; }
+      files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    } catch { continue; }
+    for (const f of files) {
+      const file = path.join(dir, f);
+      const id = f.replace(/\.jsonl$/, '');
+      let st: fs.Stats;
+      try { st = fs.statSync(file); } catch { continue; }
+      const peek = peekClaudeTranscript(file, st.size);
+      out.push({
+        id,
+        name: titles.get(id) || peek.firstUser || '(untitled)',
+        cwd: peek.cwd || decodeClaudeProject(folder),
+        updated: st.mtimeMs,
+        file,
+        msgs: peek.count,
+      });
+    }
+  }
+  return out.sort((a, b) => b.updated - a.updated);
+}
+
+export interface TranscriptMsg { role: 'user' | 'assistant' | 'system' | 'tool'; text: string; ts?: number }
+
+/** Pull readable text out of a claude transcript entry's `message` (string or
+ *  array content, rendering tool_use / tool_result blocks compactly). */
+function extractClaudeText(message: Record<string, unknown> | undefined): string {
+  if (!message) { return ''; }
+  const c = message['content'];
+  if (typeof c === 'string') { return c; }
+  if (Array.isArray(c)) {
+    const short = (v: unknown): string => {
+      try { const s = typeof v === 'string' ? v : JSON.stringify(v); return s.length > 200 ? s.slice(0, 200) + '…' : s; } catch { return ''; }
+    };
+    return (c as Array<Record<string, unknown>>).map(b => {
+      if (b['type'] === 'text') { return String(b['text'] ?? ''); }
+      if (b['type'] === 'tool_use') { return `🔧 ${String(b['name'] ?? '')}(${short(b['input'])})`; }
+      if (b['type'] === 'tool_result') { return `↳ ${short(b['content'])}`; }
+      return '';
+    }).filter(Boolean).join('\n');
+  }
+  return '';
+}
+
+/** Locate a claude transcript by session id across all project folders. */
+function findClaudeTranscriptById(id: string): string | undefined {
+  const claudeDir = process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+  const projects = path.join(claudeDir, 'projects');
+  try {
+    for (const folder of fs.readdirSync(projects)) {
+      const file = path.join(projects, folder, `${id}.jsonl`);
+      if (fs.existsSync(file)) { return file; }
+    }
+  } catch { /* none */ }
+  return undefined;
+}
+
+/**
+ * Read a claude session transcript (by id, or an explicit `file`) into a
+ * normalized message array. Reuses the same parse shape the app uses: type
+ * user/assistant/system with tool_use/tool_result rendering. Reads only the
+ * tail of huge transcripts. Returns at most `limit` messages. [] on any miss.
+ */
+export function readClaudeTranscript(id: string, file?: string, limit = 400): TranscriptMsg[] {
+  const p = file && fs.existsSync(file) ? file : findClaudeTranscriptById(id);
+  if (!p) { return []; }
+  let text = '';
+  try {
+    const size = fs.statSync(p).size;
+    const MAX = 2_000_000; // last ~2 MB is plenty for `limit` messages
+    if (size > MAX) {
+      const fd = fs.openSync(p, 'r');
+      try { const buf = Buffer.alloc(MAX); fs.readSync(fd, buf, 0, MAX, size - MAX); text = buf.toString('utf8'); } finally { fs.closeSync(fd); }
+      const nl = text.indexOf('\n');
+      if (nl >= 0) { text = text.slice(nl + 1); } // drop the partial first line
+    } else {
+      text = fs.readFileSync(p, 'utf8');
+    }
+  } catch { return []; }
+  const msgs: TranscriptMsg[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) { continue; }
+    try {
+      const o = JSON.parse(line) as Record<string, unknown>;
+      const ts = o['timestamp'] ? Date.parse(String(o['timestamp'])) : undefined;
+      if (o['type'] === 'user') { const t = extractClaudeText(o['message'] as Record<string, unknown>); if (t) { msgs.push({ role: 'user', text: t, ts }); } }
+      else if (o['type'] === 'assistant') { const t = extractClaudeText(o['message'] as Record<string, unknown>); if (t) { msgs.push({ role: 'assistant', text: t, ts }); } }
+      else if (o['type'] === 'system' && o['content']) { msgs.push({ role: 'system', text: String(o['content']).slice(0, 200), ts }); }
+    } catch { /* skip */ }
+  }
+  return msgs.slice(-limit);
+}
+
 export function getClaudeSessionCursor(workspacePath: string): number {
   const p = resolveClaudeJsonl(workspacePath);
   if (!p) { return 0; }

@@ -6,6 +6,7 @@
 import { listClaudeSessions, getClaudeSessionDisplay } from './providers/claudeCliProvider';
 import { listOpenCodeSessionsDetailed } from './agentBackup/opencodeDb';
 import { listGrokSessions } from './providers/grokSessions';
+import { listCopilotSessions } from './providers/copilotSessions';
 import { loadSettingsForRoot } from './core/settingsLoader';
 import { ProviderId } from './providers';
 
@@ -27,6 +28,7 @@ export function collectSessions(root: string, provider?: ProviderId): SessionInf
   const wantClaude = fam.startsWith('claude') || !provider;
   const wantOpencode = fam.startsWith('opencode') || !provider;
   const wantGrok = fam.startsWith('grok') || !provider;
+  const wantCopilot = fam.startsWith('copilot') || !provider;
 
   if (wantClaude) {
     for (const s of listClaudeSessions(root)) {
@@ -41,6 +43,11 @@ export function collectSessions(root: string, provider?: ProviderId): SessionInf
   if (wantGrok) {
     for (const s of listGrokSessions(root)) {
       out.push({ provider: 'grok', id: s.id, name: s.title || '(untitled)', updated: s.updated });
+    }
+  }
+  if (wantCopilot) {
+    for (const s of listCopilotSessions(root)) {
+      out.push({ provider: 'copilot', id: s.id, name: s.title || '(untitled)', updated: s.updated });
     }
   }
   return out.sort((a, b) => b.updated - a.updated);

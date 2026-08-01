@@ -135,3 +135,73 @@ export function listOpenCodeSessionsDetailed(root: string): Array<{ id: string; 
       .sort((a, b) => b.updated - a.updated);
   } catch { return []; } finally { try { db?.close(); } catch { /* ignore */ } }
 }
+
+/** ALL opencode sessions across every workspace (newest first), carrying each
+ *  row's own `directory` as cwd. Same store as {@link listOpenCodeSessionsDetailed}
+ *  but unfiltered — for global cross-workspace discovery. `updated` is epoch ms. */
+export function listAllOpenCodeSessions(): Array<{ id: string; title: string; updated: number; cwd: string }> {
+  const dbFile = opencodeDbPath();
+  if (!fs.existsSync(dbFile)) { return []; }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let db: any;
+  try {
+    db = openDb(dbFile, true);
+    return (db.prepare('SELECT id, title, directory, time_updated FROM session').all() as Row[])
+      .map(r => ({
+        id: String(r.id),
+        title: String(r.title ?? ''),
+        updated: Number(r.time_updated ?? 0),
+        cwd: String(r.directory ?? ''),
+      }))
+      .sort((a, b) => b.updated - a.updated);
+  } catch { return []; } finally { try { db?.close(); } catch { /* ignore */ } }
+}
+
+export interface TranscriptMsg { role: 'user' | 'assistant' | 'system' | 'tool'; text: string; ts?: number }
+
+/**
+ * Read an opencode session's messages into a normalized array. A message's
+ * role lives in the `message.data` JSON; its rendered text is assembled from
+ * the child `part` rows (part.data = {type:'text'|'tool'|…, text?, …}). Ordered
+ * by creation time; returns at most `limit` messages (the tail). [] on any miss.
+ */
+export function readOpenCodeTranscript(sessionId: string, limit = 400): TranscriptMsg[] {
+  const dbFile = opencodeDbPath();
+  if (!fs.existsSync(dbFile)) { return []; }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let db: any;
+  const trunc = (s: string, max: number): string => (s.length > max ? s.slice(0, max) + '…' : s);
+  try {
+    db = openDb(dbFile, true);
+    const messages = (db.prepare('SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created ASC').all(sessionId) as Row[]);
+    const parts = (db.prepare('SELECT message_id, time_created, data FROM part WHERE session_id = ? ORDER BY time_created ASC').all(sessionId) as Row[]);
+    const partsByMsg = new Map<string, Row[]>();
+    for (const p of parts) {
+      const mid = String(p.message_id);
+      if (!partsByMsg.has(mid)) { partsByMsg.set(mid, []); }
+      partsByMsg.get(mid)!.push(p);
+    }
+    const out: TranscriptMsg[] = [];
+    for (const m of messages) {
+      let role: TranscriptMsg['role'] = 'assistant';
+      try {
+        const md = JSON.parse(String(m.data ?? '{}')) as { role?: string };
+        if (md.role === 'user' || md.role === 'assistant' || md.role === 'system') { role = md.role; }
+      } catch { /* default assistant */ }
+      const ts = Number(m.time_created ?? 0) || undefined;
+      for (const p of partsByMsg.get(String(m.id)) ?? []) {
+        let pd: { type?: string; text?: string; tool?: string; state?: { output?: unknown } };
+        try { pd = JSON.parse(String(p.data ?? '{}')); } catch { continue; }
+        if (pd.type === 'text' && pd.text) {
+          if (pd.text.trim()) { out.push({ role, text: pd.text.trim(), ts }); }
+        } else if (pd.type === 'tool') {
+          const name = pd.tool || 'tool';
+          const output = pd.state?.output;
+          const outTxt = output == null ? '' : (typeof output === 'string' ? output : JSON.stringify(output));
+          out.push({ role: 'tool', text: outTxt.trim() ? `🔧 ${name} ↳ ${trunc(outTxt.trim(), 400)}` : `🔧 ${name}`, ts });
+        }
+      }
+    }
+    return out.slice(-limit);
+  } catch { return []; } finally { try { db?.close(); } catch { /* ignore */ } }
+}

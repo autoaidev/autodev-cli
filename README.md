@@ -14,6 +14,12 @@ autodev start .           # run the autonomous loop
 > Provider CLIs (`claude`, `grok`, `opencode`, `copilot`) are **not** bundled —
 > install the one you plan to use separately.
 
+## Links
+
+- **npm:** <https://www.npmjs.com/package/autodev-cli> — `npm i -g autodev-cli`
+- **Related:** [VS Code extension](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev) · [desktop app](https://autoaidev.com/releases/AutoAIDev-desktop-latest.AppImage) · [Pixel Office](https://app.pixeloffice.org)
+- **Product sites:** [autoaidev.com](https://autoaidev.com) · [pixeloffice.org](https://pixeloffice.org)
+
 Part of the **AutoDev** suite for running autonomous AI coding agents that appear as
 characters in a live "office":
 

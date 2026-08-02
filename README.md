@@ -16,23 +16,26 @@ autodev start .           # run the autonomous loop
 
 ## Links
 
-- **npm:** <https://www.npmjs.com/package/autodev-cli> — `npm i -g autodev-cli`
-- **Related:** [VS Code extension](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev) · [desktop app](https://autoaidev.com/releases/AutoAIDev-desktop-latest.AppImage) · [Pixel Office](https://app.pixeloffice.org)
+- **GitHub:** [autodev-cli](https://github.com/autoaidev/autodev-cli) *(this repo)* · **npm:** <https://www.npmjs.com/package/autodev-cli> — `npm i -g autodev-cli`
+- **Sibling repos:** [pixel-office](https://github.com/peter-mw/pixel-office) · [autodev-app](https://github.com/autoaidev/autodev-app) · [agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)
+- **Related:** [VS Code extension](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev) · [desktop app](https://autoaidev.com/releases/AutoAIDev-desktop-latest.AppImage) · [Pixel Office](https://app.pixeloffice.org) · [Agent VM Deployer](https://deployer.pixeloffice.org)
 - **Product sites:** [autoaidev.com](https://autoaidev.com) · [pixeloffice.org](https://pixeloffice.org)
 
 Part of the **AutoDev** suite for running autonomous AI coding agents that appear as
 characters in a live "office":
 
-- **[pixel-office](../pixel-office)** — the hub/command center (Laravel + Vue + Pixi.js).
-  Live at <https://autodev.code.aioffice.works>. Hosts the office UI, the presence
-  WebSocket, and the MCP endpoints this CLI talks to.
-- **autodev-cli** — *this repo* (`npm i -g autodev-cli`). The agent loop + `autodev` command.
-- **[autodev-app](../autodev-app)** — the desktop app (`npx autodev-app`) that bundles this
-  CLI and drives agents in a GUI.
-- **[autodev-vscode-extension](../autodev-vscode-extension)** — the AutoDev tasks/chat/sessions
-  panels inside VS Code.
-- **[agent-vm-deployer](../agent-vm-deployer)** — spawns agents headlessly on SSH / Docker / K8s.
-  Live at <https://deployer.code.aioffice.works>.
+- **[pixel-office](https://github.com/peter-mw/pixel-office)** — the hub/command center
+  (Laravel + Vue + Pixi.js). Live at <https://app.pixeloffice.org> (landing:
+  <https://pixeloffice.org>). Hosts the office UI, the presence WebSocket, and the MCP
+  endpoints this CLI talks to.
+- **[autodev-cli](https://github.com/autoaidev/autodev-cli)** — *this repo*
+  (`npm i -g autodev-cli`). The agent loop + `autodev` command.
+- **[autodev-app](https://github.com/autoaidev/autodev-app)** — the desktop app
+  (`npx autodev-app`) that bundles this CLI and drives agents in a GUI.
+- **autodev-vscode-extension** — the AutoDev tasks/chat/sessions panels inside VS Code
+  ([Marketplace](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev)).
+- **[agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)** — spawns agents
+  headlessly on SSH / Docker / K8s. Live at <https://deployer.pixeloffice.org>.
 
 ---
 
@@ -82,10 +85,10 @@ Bind the workspace to a pixel-office character (so it shows up as a live agent):
 
 ```bash
 # Signed setup URL from the pixel-office UI (preferred — HMAC-signed, expires ~30 min)
-autodev connect --setup-url='https://autodev.code.aioffice.works/api/cli/setup/<id>?expires=…&signature=…' .
+autodev connect --setup-url='https://app.pixeloffice.org/api/cli/setup/<id>?expires=…&signature=…' .
 
 # …or paste a full WebSocket URL
-autodev connect --url='wss://autodev.code.aioffice.works/ws?token=<api_key>&endpoint=<slug>' .
+autodev connect --url='wss://app.pixeloffice.org/ws?token=<api_key>&endpoint=<slug>' .
 ```
 
 Either form writes `wsUrl`, `serverApiKey`, `webhookSlug`, and `serverBaseUrl` into
@@ -132,7 +135,7 @@ Press **Ctrl+C** to stop gracefully.
 Bind the workspace to a pixel-office endpoint.
 
 ```bash
-autodev connect --setup-url='https://…/api/cli/setup/<id>?…' .
+autodev connect --setup-url='https://app.pixeloffice.org/api/cli/setup/<id>?…' .
 autodev connect --url='wss://host/ws?token=<key>&endpoint=<slug>' .
 autodev connect --url='…' --mcp-only .   # MCP-only agent (no loop) — see below
 ```

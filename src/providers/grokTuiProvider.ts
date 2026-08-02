@@ -333,8 +333,16 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
   // Build the interactive grok command. `exec` replaces the shell so a dead grok
   // collapses the pane/session → cheap liveness signal via has-session. (Pure
   // string work — no shared state — so it stays outside the launch lock.)
+  // Launch grok via `env -u TMUX -u TMUX_PANE TERM=xterm-256color`: although grok
+  // physically runs inside our tmux pane (so we can capture it), inheriting the
+  // pane's TMUX/TMUX_PANE + TERM=screen makes grok take a NESTED-tmux terminal
+  // path — under load its /dev/tty window-size handshake times out after ~11s and
+  // grok exits CLEANLY (exit_group(0)), which we misread as "session died during
+  // startup". Hiding the nesting (proper TERM, no TMUX) makes grok use the normal
+  // terminal path and it stays alive. (strace-confirmed 2026-08-02.)
   const parts = [
-    'exec', shq(GROK_BIN),
+    'exec', 'env', '-u', 'TMUX', '-u', 'TMUX_PANE', 'TERM=xterm-256color',
+    shq(GROK_BIN),
     '--no-alt-screen', '--always-approve',
     '--cwd', shq(root),
   ];

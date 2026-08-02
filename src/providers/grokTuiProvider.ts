@@ -252,7 +252,11 @@ function sleepSyncMs(ms: number): void {
 // GROK_TMUX_LAUNCH_SPACING_MS (0 disables the spacing; the lock still serializes).
 const TMUX_LAUNCH_LOCK  = path.join(os.homedir(), '.grok', '.autodev-tmux-launch.lock');
 const TMUX_LAUNCH_STAMP = path.join(os.homedir(), '.grok', '.autodev-tmux-launch.stamp');
-const TMUX_LAUNCH_SPACING_MS = envNum('GROK_TMUX_LAUNCH_SPACING_MS', 1000);
+// 10s default: 1s only spaced the tmux new-session call, but grok's ~9s startup
+// (where it initializes its session + writes the shared session_search.sqlite
+// index) still overlapped across agents and raced. Holding the slot ~10s lets
+// each grok fully initialize its session before the next one launches.
+const TMUX_LAUNCH_SPACING_MS = envNum('GROK_TMUX_LAUNCH_SPACING_MS', 10000);
 const TMUX_LOCK_STALE_MS = 15000;
 
 /** Acquire the shared launch slot (atomic-create lockfile, steal if stale), then
@@ -321,6 +325,19 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
   try {
     // Kill the one-time project-directory picker before it can block the turn.
     ensureGrokPickerDisabled(log);
+    // Pre-create grok's per-session dir + an empty transcript for a NEW session so
+    // grok doesn't have to mkdir it (and register it in the shared
+    // ~/.grok/sessions/session_search.sqlite index) during startup — that
+    // filesystem/sqlite contention across a burst of concurrent launches is a
+    // suspected cause of the immediate "session died during startup". A resumed
+    // session already has its dir, so skip it there.
+    if (!resume) {
+      try {
+        const sPath = chatHistoryPath(root, sessionId);
+        fs.mkdirSync(path.dirname(sPath), { recursive: true });
+        if (!fs.existsSync(sPath)) { fs.writeFileSync(sPath, '', 'utf8'); }
+      } catch { /* best effort */ }
+    }
     // Fixed geometry so wrapping/relayout never shifts detection rows; manual
     // window-size so a human attaching can't reflow the pane mid-turn.
     tmux(['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', root]);

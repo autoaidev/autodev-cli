@@ -92,6 +92,14 @@ interface TmuxSession {
 }
 const _tmuxSessions = new Map<string, TmuxSession>();
 
+// Per-root set of grok tool_call ids already emitted as PreToolUse, so a re-scan of
+// the transcript can't emit the SAME tool call twice → duplicate rows in the office
+// hook feed (observed ~2.4× per call). PostToolUse is already dedup'd by pending.delete;
+// PreToolUse had no guard. tool_call ids are unique per call, so this is exact. Bounded
+// so an overnight run can't grow it unboundedly; cleared when the session is closed.
+const _emittedToolIds = new Map<string, Set<string>>();
+const EMITTED_TOOL_IDS_CAP = 8000;
+
 // Reap grok on process shutdown. grok runs in a DETACHED tmux session that outlives
 // the loop, so killing the loop (app Stop, `autodev stop`, SIGTERM) would otherwise
 // ORPHAN grok — it keeps running/burning tokens, its stale office presence makes the
@@ -613,16 +621,26 @@ function scanGrokToolEvents(
     const kind = o.type || o.role;
 
     if (kind === 'assistant' && Array.isArray(o.tool_calls)) {
+      const emitted = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
       for (const tc of o.tool_calls) {
         const name = (tc?.name || '').trim();
         if (!name) { continue; }
         if (name.startsWith('mcp__')) { continue; } // office logs MCP tools server-side
+        // Dedup: a re-scan of the transcript would otherwise re-emit this tool call's
+        // PreToolUse → duplicate rows. tool_call ids are unique per call, so an id we
+        // already emitted is a re-scan, not a real second call — skip it.
+        const id = tc?.id;
+        if (id && emitted.has(id)) { continue; }
         const input = _parseToolInput(tc?.arguments);
         // tool_use_id lets the office pair this PreToolUse with its PostToolUse
         // into ONE step card (useToolPairing keys on rawPayload.tool_use_id).
         // Without it, Pre and Post render as two separate cards = duplicates.
-        _emitGrokHook(root, 'PreToolUse', { tool_name: name, tool_input: input, tool_use_id: tc?.id });
-        if (tc?.id) { pending.set(tc.id, { name, input }); }
+        _emitGrokHook(root, 'PreToolUse', { tool_name: name, tool_input: input, tool_use_id: id });
+        if (id) {
+          pending.set(id, { name, input });
+          emitted.add(id);
+          if (emitted.size > EMITTED_TOOL_IDS_CAP) { emitted.clear(); } // bound memory; old ids won't re-scan
+        }
       }
       continue;
     }
@@ -1322,6 +1340,7 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
     if (hasSession(name)) { killSession(name); }
   }
   _busyRoots.delete(root);
+  _emittedToolIds.delete(root);
 }
 
 /** Kill all live grok sessions — called on SDK/extension shutdown. */
@@ -1335,6 +1354,7 @@ export function closeAllGrokTuiSessions(): void {
   }
   _tmuxSessions.clear();
   _busyRoots.clear();
+  _emittedToolIds.clear();
 }
 
 // ---------------------------------------------------------------------------

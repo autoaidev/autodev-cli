@@ -757,95 +757,96 @@ function runGrokTmuxTurn(
   };
 
   void (async () => {
-    let sess: TmuxSession;
-    let justLaunched: boolean;
-    try {
-      const r = ensureSession(root, resolvedSessionId, model, log);
-      sess = r.sess; justLaunched = r.justLaunched;
-    } catch (err) {
-      const msg = (err as Error)?.message ?? String(err);
-      log(`Grok TUI: session launch failed: ${msg}`);
-      try { fs.appendFileSync(stdoutFile, `\n[Grok TUI launch error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
-      finish(1, 'launch-failed');
-      return;
-    }
+    let sess!: TmuxSession;
+    let justLaunched = false;
+    let readOffset = 0;
+    // Poison-resume self-heal. grok-tui always resumes its stored session; if that
+    // resume dies on startup the session is poisoned and resuming it again fails
+    // forever. Rather than emit a hard-failure (which the desktop app flags as
+    // "Crashed" and STOPS the agent, forcing a manual Restart), clear the poisoned
+    // id and relaunch FRESH in place, retrying THIS turn. `sidForLaunch` goes
+    // undefined after a clear so ensureSession mints a new UUID instead of resuming
+    // the poison again. Only after MAX_STARTUP_TRIES do we surface startup-exit.
+    let sidForLaunch = resolvedSessionId;
+    const MAX_STARTUP_TRIES = 3;
+    let startupOk = false;
+    for (let attempt = 1; attempt <= MAX_STARTUP_TRIES; attempt++) {
+      try {
+        const r = ensureSession(root, sidForLaunch, model, log);
+        sess = r.sess; justLaunched = r.justLaunched;
+      } catch (err) {
+        const msg = (err as Error)?.message ?? String(err);
+        log(`Grok TUI: session launch failed: ${msg}`);
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI launch error: ${msg}]\n`, 'utf8'); } catch { /* ignore */ }
+        finish(1, 'launch-failed');
+        return;
+      }
+      // Stream only THIS turn's output: start reading at the current rawLog size.
+      readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return 0; } })();
 
-    // Stream only THIS turn's output: start reading at the current rawLog size.
-    let readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return 0; } })();
+      if (!justLaunched) { startupOk = true; break; } // reused live session — no grace
 
-    if (justLaunched) {
       _emitGrokHook(root, 'SessionStart', { source: 'startup' });
+      let died = false;
+      let reauth = false;
       // Startup grace — grok's splash takes a few seconds before it accepts input.
-      // Scan for the reauth gate while we wait; bail early if the token is dead.
       const deadline = Date.now() + STARTUP_MS;
       while (Date.now() < deadline) {
         await sleep(500);
-        if (!hasSession(sess.name)) {
-          log('Grok TUI: session died during startup — clearing the stored session so the next turn starts fresh (was resuming a poisoned session)');
-          // grok-tui always resumes its persisted session (persistent by design).
-          // If that resumed session dies on startup it is poisoned — resuming it
-          // again would fail forever. Drop the stored id so the next turn mints a
-          // fresh session instead of an infinite startup-exit loop.
-          try { clearSessionId(root, 'grok-tui'); } catch { /* best effort */ }
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup — starting a fresh session next turn]\n`, 'utf8'); } catch { /* ignore */ }
-          finish(1, 'startup-exit');
-          return;
-        }
-        const snap = capturePane(sess.name);
-        if (REAUTH_MARKERS.test(snap)) {
-          log('Grok TUI: reauth required (OAuth gate at startup)');
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
-          finish(1, 'reauth_required');
-          return;
+        if (!hasSession(sess.name)) { died = true; break; }
+        if (REAUTH_MARKERS.test(capturePane(sess.name))) { reauth = true; break; }
+      }
+      if (!died && !reauth) {
+        // Past the grace with a live session — dismiss any welcome/project picker
+        // (Enter through it) or the directory-trust gate (accept with 'y'), until
+        // the ready "❯" prompt is clear. CALIBRATED: a NEW grok session opens on a
+        // picker over the input box; a single fixed Enter races grok's splash, so
+        // poll + press each pass. The trust gate ("Do you trust this directory?")
+        // is normally prevented by ensureGrokDirTrusted; this is the backstop.
+        const PICKER_MARKERS = /project directory|New worktree|Resume session|Changelog|\(current\)|Run Grok Build|[◯○◉●]|Select|↑\/↓/i;
+        const TRUST_MARKERS = /Do you trust|Yes, proceed|posing security risks/i;
+        for (let i = 0; i < 8; i++) {
+          if (!hasSession(sess.name)) { died = true; break; }
+          const snap = capturePane(sess.name);
+          if (REAUTH_MARKERS.test(snap)) { reauth = true; break; }
+          if (TRUST_MARKERS.test(snap)) {
+            // Accept explicitly with 'y' (Enter alone is unreliable depending on
+            // which option is highlighted), then keep polling.
+            log('Grok TUI: accepting grok directory-trust gate (y)');
+            tmux(['send-keys', '-t', sess.name, 'y']);
+            await sleep(1200);
+            continue;
+          }
+          if (!PICKER_MARKERS.test(snap)) { break; } // at the ready prompt
+          tmux(['send-keys', '-t', sess.name, 'Enter']);
+          await sleep(1500);
         }
       }
-      // CALIBRATED: a NEW grok session opens on a picker sitting over the input
-      // box — either the welcome menu (New worktree / Resume session / Changelog /
-      // Quit) or the project chooser ("Run Grok Build in a project directory?"
-      // with radio options, the current dir highlighted). A RESUMED session skips
-      // it. Pressing Enter confirms the highlighted default (current dir / first
-      // item) and proceeds to the ready "❯" prompt. A single fixed Enter races the
-      // picker's render (grok's splash can outlast the grace), so poll and press
-      // Enter each time a picker is still showing, until the prompt is clear.
-      const PICKER_MARKERS = /project directory|New worktree|Resume session|Changelog|\(current\)|Run Grok Build|[◯○◉●]|Select|↑\/↓/i;
-      // grok's "Do you trust the contents of this directory?" gate. ensureGrokDirTrusted
-      // normally prevents it, but keep a backstop: accept with 'y' if it ever shows,
-      // else the loop would paste the turn into the dialog and grok would quit.
-      const TRUST_MARKERS = /Do you trust|Yes, proceed|posing security risks/i;
-      for (let i = 0; i < 8; i++) {
-        if (!hasSession(sess.name)) {
-          log('Grok TUI: session died during startup — clearing the stored session so the next turn starts fresh (was resuming a poisoned session)');
-          // grok-tui always resumes its persisted session (persistent by design).
-          // If that resumed session dies on startup it is poisoned — resuming it
-          // again would fail forever. Drop the stored id so the next turn mints a
-          // fresh session instead of an infinite startup-exit loop.
-          try { clearSessionId(root, 'grok-tui'); } catch { /* best effort */ }
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup — starting a fresh session next turn]\n`, 'utf8'); } catch { /* ignore */ }
-          finish(1, 'startup-exit');
-          return;
-        }
-        const snap = capturePane(sess.name);
-        if (REAUTH_MARKERS.test(snap)) {
-          log('Grok TUI: reauth required (OAuth gate at startup)');
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
-          finish(1, 'reauth_required');
-          return;
-        }
-        if (TRUST_MARKERS.test(snap)) {
-          // Accept the trust gate explicitly with 'y' (Enter alone is unreliable
-          // depending on which option is highlighted), then keep polling.
-          log('Grok TUI: accepting grok directory-trust gate (y)');
-          tmux(['send-keys', '-t', sess.name, 'y']);
-          await sleep(1200);
-          continue;
-        }
-        if (!PICKER_MARKERS.test(snap)) { break; } // at the ready prompt
-        tmux(['send-keys', '-t', sess.name, 'Enter']);
-        await sleep(1500);
+      if (reauth) {
+        log('Grok TUI: reauth required (OAuth gate at startup)');
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
+        finish(1, 'reauth_required');
+        return;
       }
-      // re-read the offset after startup so the splash/menu text isn't streamed
-      // as "turn output".
-      readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
+      if (!died) {
+        // re-read the offset after startup so the splash/menu text isn't streamed
+        // as "turn output".
+        readOffset = (() => { try { return fs.statSync(sess.rawLog).size; } catch { return readOffset; } })();
+        startupOk = true;
+        break;
+      }
+      // Session died during startup — a poisoned resume (or a storm-starved launch).
+      // Clear the stored id, tear down the dead pane, and relaunch FRESH next pass.
+      log(`Grok TUI: session died during startup — ${attempt < MAX_STARTUP_TRIES ? `relaunching fresh (attempt ${attempt + 1}/${MAX_STARTUP_TRIES})` : 'giving up this turn'} (poisoned-resume self-heal)`);
+      try { clearSessionId(root, 'grok-tui'); } catch { /* best effort */ }
+      _tmuxSessions.delete(root);
+      try { tmux(['kill-session', '-t', sess.name]); } catch { /* already gone */ }
+      sidForLaunch = undefined; // force a fresh mint on the retry
+    }
+    if (!startupOk) {
+      try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session kept exiting during startup — a fresh session will be tried next turn]\n`, 'utf8'); } catch { /* ignore */ }
+      finish(1, 'startup-exit');
+      return;
     }
     // NOTE: when the session is REUSED (not justLaunched) we deliberately emit NO
     // SessionStart. The grok process is persistent across turns — one tmux launch

@@ -288,6 +288,36 @@ function releaseTmuxLaunchSlot(): void {
   try { fs.unlinkSync(TMUX_LAUNCH_LOCK); } catch { /* ignore */ }
 }
 
+// grok keeps a SHARED session index at ~/.grok/sessions/session_search.sqlite.
+// In the default rollback journal mode a writer takes an exclusive lock, so when
+// many agents initialize a session at once they block/fail on it and grok dies
+// during startup. Enabling WAL (persistent — stored in the db header, so once is
+// enough) lets concurrent readers/writers proceed without that exclusive-lock
+// stampede. Best-effort via node:sqlite (Node ≥22), falling back to the sqlite3
+// CLI; if neither is available the launch spacing still serializes access.
+let _grokWalEnsured = false;
+function ensureGrokSessionDbWal(log: (m: string) => void): void {
+  if (_grokWalEnsured) return;
+  const db = path.join(os.homedir(), '.grok', 'sessions', 'session_search.sqlite');
+  if (!fs.existsSync(db)) return; // grok hasn't created it yet — retry on a later launch
+  const PRAGMAS = 'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { DatabaseSync } = require('node:sqlite');
+    const d = new DatabaseSync(db);
+    d.exec(PRAGMAS);
+    d.close();
+    _grokWalEnsured = true;
+    log('Grok TUI: enabled WAL on session_search.sqlite');
+    return;
+  } catch { /* node:sqlite unavailable → try the CLI */ }
+  try {
+    child_process.execSync(`sqlite3 ${shq(db)} ${shq(PRAGMAS)}`, { stdio: 'ignore', timeout: 5000 });
+    _grokWalEnsured = true;
+    log('Grok TUI: enabled WAL on session_search.sqlite (sqlite3)');
+  } catch { /* best effort — spacing still serializes */ }
+}
+
 function launchSession(root: string, sessionId: string, resume: boolean, model: string | undefined, log: (m: string) => void): TmuxSession {
   const name = sessionName(root);
   // A stale/dead session for this name must be cleared first.
@@ -323,6 +353,9 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
   // grok ("session died during startup").
   acquireTmuxLaunchSlot(log);
   try {
+    // Put grok's shared session index into WAL so concurrent session inits don't
+    // block on an exclusive rollback-journal lock (a cause of startup crashes).
+    ensureGrokSessionDbWal(log);
     // Kill the one-time project-directory picker before it can block the turn.
     ensureGrokPickerDisabled(log);
     // Pre-create grok's per-session dir + an empty transcript for a NEW session so

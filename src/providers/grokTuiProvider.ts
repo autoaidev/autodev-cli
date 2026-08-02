@@ -234,31 +234,71 @@ const RUNNING_INDICATOR = /ctrl\+c\s*[: ]|waiting for response|\[stop\]|esc to (
 // ---------------------------------------------------------------------------
 
 /** Launch a fresh grok process in a new detached tmux session for this root. */
+/** Block the calling thread for `ms` — launchSession is synchronous, so the
+ *  cross-process launch serialization below needs a synchronous wait. */
+function sleepSyncMs(ms: number): void {
+  if (!(ms > 0)) return;
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch { const end = Date.now() + ms; while (Date.now() < end) { /* spin fallback */ } }
+}
+
+// ── Cross-process grok-tui launch serialization ─────────────────────────────
+// Every office agent runs in its OWN `autodev start` process, so an in-process
+// mutex can't help: when many agents fire a turn at the same instant they all
+// hit `tmux new-session` (and the shared ~/.grok config) simultaneously, the
+// tmux server races on startup, and grok dies during startup ("session died
+// during startup"). A lockfile + a minimum spacing between launches turns that
+// stampede into an orderly ~1-launch-per-second queue. Tunable/disable via
+// GROK_TMUX_LAUNCH_SPACING_MS (0 disables the spacing; the lock still serializes).
+const TMUX_LAUNCH_LOCK  = path.join(os.homedir(), '.grok', '.autodev-tmux-launch.lock');
+const TMUX_LAUNCH_STAMP = path.join(os.homedir(), '.grok', '.autodev-tmux-launch.stamp');
+const TMUX_LAUNCH_SPACING_MS = envNum('GROK_TMUX_LAUNCH_SPACING_MS', 1000);
+const TMUX_LOCK_STALE_MS = 15000;
+
+/** Acquire the shared launch slot (atomic-create lockfile, steal if stale), then
+ *  wait out the minimum spacing since the previous launch. Best-effort: never
+ *  blocks a turn forever. */
+function acquireTmuxLaunchSlot(log: (m: string) => void): void {
+  try { fs.mkdirSync(path.dirname(TMUX_LAUNCH_LOCK), { recursive: true }); } catch { /* ignore */ }
+  const deadline = Date.now() + 45000;
+  for (;;) {
+    try { fs.closeSync(fs.openSync(TMUX_LAUNCH_LOCK, 'wx')); break; } // atomic exclusive create = acquired
+    catch {
+      try {
+        const st = fs.statSync(TMUX_LAUNCH_LOCK);
+        if (Date.now() - st.mtimeMs > TMUX_LOCK_STALE_MS) { try { fs.unlinkSync(TMUX_LAUNCH_LOCK); } catch { /* race */ } continue; }
+      } catch { continue; } // lock vanished mid-check → retry create
+      if (Date.now() > deadline) { log('Grok TUI: tmux-launch lock wait timed out — launching anyway'); return; }
+      sleepSyncMs(120);
+    }
+  }
+  try {
+    const last = Number(fs.readFileSync(TMUX_LAUNCH_STAMP, 'utf8')) || 0;
+    sleepSyncMs(TMUX_LAUNCH_SPACING_MS - (Date.now() - last));
+  } catch { /* no prior stamp */ }
+}
+
+/** Stamp the launch time (for the next launcher's spacing) and release the lock. */
+function releaseTmuxLaunchSlot(): void {
+  try { fs.writeFileSync(TMUX_LAUNCH_STAMP, String(Date.now())); } catch { /* ignore */ }
+  try { fs.unlinkSync(TMUX_LAUNCH_LOCK); } catch { /* ignore */ }
+}
+
 function launchSession(root: string, sessionId: string, resume: boolean, model: string | undefined, log: (m: string) => void): TmuxSession {
   const name = sessionName(root);
   // A stale/dead session for this name must be cleared first.
   if (hasSession(name)) { killSession(name); }
 
-  // Kill the one-time project-directory picker before it can block the turn.
-  ensureGrokPickerDisabled(log);
-
+  // Per-agent pane log (distinct file per root → no cross-agent race).
   const dir = path.join(root, '.autodev', 'grok-tui');
   try { if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); } } catch { /* ignore */ }
   const rawLog = path.join(dir, 'pane.raw');
   // Start each launch with a fresh raw log so readOffset math is simple.
   try { fs.writeFileSync(rawLog, '', 'utf8'); } catch { /* ignore */ }
 
-  // Fixed geometry so wrapping/relayout never shifts detection rows; manual
-  // window-size so a human attaching can't reflow the pane mid-turn.
-  tmux(['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', root]);
-  tmux(['set-option', '-t', name, 'window-size', 'manual']);
-
-  // pipe-pane BEFORE launching grok — it only captures bytes emitted after it
-  // attaches (confirmed). Append mode.
-  tmux(['pipe-pane', '-o', '-t', name, `cat >> ${shq(rawLog)}`]);
-
   // Build the interactive grok command. `exec` replaces the shell so a dead grok
-  // collapses the pane/session → cheap liveness signal via has-session.
+  // collapses the pane/session → cheap liveness signal via has-session. (Pure
+  // string work — no shared state — so it stays outside the launch lock.)
   const parts = [
     'exec', shq(GROK_BIN),
     '--no-alt-screen', '--always-approve',
@@ -272,7 +312,26 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
     // Name a brand-new conversation with our UUID so it is addressable later.
     parts.push('-s', shq(sessionId));
   }
-  tmux(['send-keys', '-t', name, parts.join(' '), 'Enter']);
+
+  // Serialize the race-prone work — the shared ~/.grok config write and the tmux
+  // server interactions — across the per-agent loop processes, spaced ~1s apart,
+  // so a burst of simultaneous turns can't race the tmux server startup and kill
+  // grok ("session died during startup").
+  acquireTmuxLaunchSlot(log);
+  try {
+    // Kill the one-time project-directory picker before it can block the turn.
+    ensureGrokPickerDisabled(log);
+    // Fixed geometry so wrapping/relayout never shifts detection rows; manual
+    // window-size so a human attaching can't reflow the pane mid-turn.
+    tmux(['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', root]);
+    tmux(['set-option', '-t', name, 'window-size', 'manual']);
+    // pipe-pane BEFORE launching grok — it only captures bytes emitted after it
+    // attaches (confirmed). Append mode.
+    tmux(['pipe-pane', '-o', '-t', name, `cat >> ${shq(rawLog)}`]);
+    tmux(['send-keys', '-t', name, parts.join(' '), 'Enter']);
+  } finally {
+    releaseTmuxLaunchSlot();
+  }
 
   const sess: TmuxSession = { name, rawLog, sessionId, readOffset: 0 };
   _tmuxSessions.set(root, sess);

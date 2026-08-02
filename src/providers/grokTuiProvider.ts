@@ -92,6 +92,39 @@ interface TmuxSession {
 }
 const _tmuxSessions = new Map<string, TmuxSession>();
 
+/**
+ * Reap ALL live grok tmux sessions this process launched. grok runs in a DETACHED
+ * tmux session that outlives the loop, so a plain kill of the loop process ORPHANS
+ * grok — it keeps running (burning tokens), its stale office presence makes the
+ * agent look stuck, and orphans accumulate across restarts. Call on shutdown so
+ * stopping/restarting a loop (the app's own child OR an external `autodev start`)
+ * leaves no orphan. killSession is synchronous → safe in an 'exit' handler.
+ */
+export function closeAllGrokTuiSessions(): void {
+  for (const sess of _tmuxSessions.values()) {
+    try { killSession(sess.name); } catch { /* best effort */ }
+  }
+  _tmuxSessions.clear();
+}
+
+// Reap grok on process shutdown. grok's tmux session is detached, so a SIGTERM/
+// SIGINT (how the desktop app and `autodev` stop a loop) would otherwise orphan it.
+// A signal handler suppresses Node's default terminate, so we re-exit after the
+// sync cleanup; the 'exit' hook is a backstop for other exit paths. No other
+// SIGTERM/SIGINT handler exists in the CLI, so taking the signal here is safe.
+let _grokShuttingDown = false;
+function _grokReapOnSignal(sig: NodeJS.Signals): void {
+  if (_grokShuttingDown) { return; }
+  _grokShuttingDown = true;
+  try { closeAllGrokTuiSessions(); } catch { /* best effort */ }
+  process.exit(sig === 'SIGINT' ? 130 : 143);
+}
+try {
+  process.on('SIGTERM', () => _grokReapOnSignal('SIGTERM'));
+  process.on('SIGINT', () => _grokReapOnSignal('SIGINT'));
+  process.on('exit', () => { try { closeAllGrokTuiSessions(); } catch { /* best effort */ } });
+} catch { /* handlers restricted in this env */ }
+
 /** Epoch-ms of the last streamed pane growth per root (activity heartbeat). */
 const _lastActivityMs = new Map<string, number>();
 
@@ -382,6 +415,13 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
         if (!fs.existsSync(sPath)) { fs.writeFileSync(sPath, '', 'utf8'); }
       } catch { /* best effort */ }
     }
+    // Kill any stale session with this name first. launchSession only runs when
+    // there's no live in-process session, so an existing tmux session by this name
+    // is an ORPHAN from a previous loop instance (the tmux session outlives a
+    // killed loop). Without this, `new-session` fails "duplicate session" on
+    // restart, and orphans accumulate. The shutdown handler (closeAllGrokTuiSessions)
+    // normally reaps them, but a SIGKILL'd loop can't run it — so reap here too.
+    try { killSession(name); } catch { /* none to kill */ }
     // Fixed geometry so wrapping/relayout never shifts detection rows; manual
     // window-size so a human attaching can't reflow the pane mid-turn.
     tmux(['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', root]);

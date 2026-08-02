@@ -45,7 +45,7 @@ import * as child_process from 'child_process';
 import { randomUUID } from 'crypto';
 import { eventTypeFor } from '../hookEventNormalizer';
 import { RateLimitDetector } from '../rateLimit';
-import { saveSessionId, getSessionId } from '../sessionState';
+import { saveSessionId, getSessionId, clearSessionId } from '../sessionState';
 import type { ProviderId } from '../providers';
 
 // ---------------------------------------------------------------------------
@@ -626,8 +626,13 @@ function runGrokTmuxTurn(
       while (Date.now() < deadline) {
         await sleep(500);
         if (!hasSession(sess.name)) {
-          log('Grok TUI: session died during startup');
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup]\n`, 'utf8'); } catch { /* ignore */ }
+          log('Grok TUI: session died during startup — clearing the stored session so the next turn starts fresh (was resuming a poisoned session)');
+          // grok-tui always resumes its persisted session (persistent by design).
+          // If that resumed session dies on startup it is poisoned — resuming it
+          // again would fail forever. Drop the stored id so the next turn mints a
+          // fresh session instead of an infinite startup-exit loop.
+          try { clearSessionId(root, 'grok-tui'); } catch { /* best effort */ }
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup — starting a fresh session next turn]\n`, 'utf8'); } catch { /* ignore */ }
           finish(1, 'startup-exit');
           return;
         }
@@ -650,8 +655,13 @@ function runGrokTmuxTurn(
       const PICKER_MARKERS = /project directory|New worktree|Resume session|Changelog|\(current\)|Run Grok Build|[◯○◉●]|Select|↑\/↓/i;
       for (let i = 0; i < 8; i++) {
         if (!hasSession(sess.name)) {
-          log('Grok TUI: session died during startup');
-          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup]\n`, 'utf8'); } catch { /* ignore */ }
+          log('Grok TUI: session died during startup — clearing the stored session so the next turn starts fresh (was resuming a poisoned session)');
+          // grok-tui always resumes its persisted session (persistent by design).
+          // If that resumed session dies on startup it is poisoned — resuming it
+          // again would fail forever. Drop the stored id so the next turn mints a
+          // fresh session instead of an infinite startup-exit loop.
+          try { clearSessionId(root, 'grok-tui'); } catch { /* best effort */ }
+          try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited during startup — starting a fresh session next turn]\n`, 'utf8'); } catch { /* ignore */ }
           finish(1, 'startup-exit');
           return;
         }

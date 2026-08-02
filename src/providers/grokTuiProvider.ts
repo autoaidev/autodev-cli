@@ -366,6 +366,9 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
     ensureGrokSessionDbWal(log);
     // Kill the one-time project-directory picker before it can block the turn.
     ensureGrokPickerDisabled(log);
+    // Trust the workspace dir so grok skips its "Do you trust this directory?"
+    // gate (a first-run-only prompt that otherwise kills the turn — see fn doc).
+    ensureGrokDirTrusted(root, log);
     // Pre-create grok's per-session dir + an empty transcript for a NEW session so
     // grok doesn't have to mkdir it (and register it in the shared
     // ~/.grok/sessions/session_search.sqlite index) during startup — that
@@ -472,6 +475,34 @@ function ensureGrokPickerDisabled(log: (m: string) => void): void {
     fs.writeFileSync(cfg, text, 'utf8');
     log('Grok TUI: disabled grok project-directory picker in config.toml');
   } catch { /* best effort — the poll-loop dismissal is the backstop */ }
+}
+
+/**
+ * Pre-trust the workspace directory in ~/.grok/trusted_folders.toml so grok skips
+ * its "Do you trust the contents of this directory?" startup gate. That gate is
+ * NOT the project picker (ensureGrokPickerDisabled) and is not covered by the
+ * startup picker loop — if it shows, the loop mistakes the blank body for the
+ * ready prompt, pastes the turn into the trust dialog, grok reads it as "not y"
+ * and QUITS (observed as "session-exit" right after "sending turn"). Untrusted
+ * dirs are the ones an agent has never run in before, so this is the durable fix
+ * for the "some agents crash on first launch" class. Idempotent: skip if already
+ * present.
+ */
+function ensureGrokDirTrusted(root: string, log: (m: string) => void): void {
+  try {
+    const tf = path.join(os.homedir(), '.grok', 'trusted_folders.toml');
+    const abs = path.resolve(root);
+    let text = '';
+    try { text = fs.readFileSync(tf, 'utf8'); } catch { /* no file yet */ }
+    // Match the exact folder header so a substring path can't yield a false skip.
+    const header = `[folders."${abs}"]`;
+    if (text.includes(header)) { return; }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const entry = `${text.endsWith('\n') || text === '' ? '' : '\n'}\n${header}\ntrusted = true\ndecided_at = ${nowSec}\n`;
+    fs.mkdirSync(path.dirname(tf), { recursive: true });
+    fs.appendFileSync(tf, entry, 'utf8');
+    log(`Grok TUI: trusted workspace dir in trusted_folders.toml (skips grok's trust gate)`);
+  } catch { /* best effort — the picker loop's trust-prompt handling is the backstop */ }
 }
 
 /** Cap a string field to `max` chars, appending an ellipsis when truncated. */
@@ -777,6 +808,10 @@ function runGrokTmuxTurn(
       // picker's render (grok's splash can outlast the grace), so poll and press
       // Enter each time a picker is still showing, until the prompt is clear.
       const PICKER_MARKERS = /project directory|New worktree|Resume session|Changelog|\(current\)|Run Grok Build|[◯○◉●]|Select|↑\/↓/i;
+      // grok's "Do you trust the contents of this directory?" gate. ensureGrokDirTrusted
+      // normally prevents it, but keep a backstop: accept with 'y' if it ever shows,
+      // else the loop would paste the turn into the dialog and grok would quit.
+      const TRUST_MARKERS = /Do you trust|Yes, proceed|posing security risks/i;
       for (let i = 0; i < 8; i++) {
         if (!hasSession(sess.name)) {
           log('Grok TUI: session died during startup — clearing the stored session so the next turn starts fresh (was resuming a poisoned session)');
@@ -795,6 +830,14 @@ function runGrokTmuxTurn(
           try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
           finish(1, 'reauth_required');
           return;
+        }
+        if (TRUST_MARKERS.test(snap)) {
+          // Accept the trust gate explicitly with 'y' (Enter alone is unreliable
+          // depending on which option is highlighted), then keep polling.
+          log('Grok TUI: accepting grok directory-trust gate (y)');
+          tmux(['send-keys', '-t', sess.name, 'y']);
+          await sleep(1200);
+          continue;
         }
         if (!PICKER_MARKERS.test(snap)) { break; } // at the ready prompt
         tmux(['send-keys', '-t', sess.name, 'Enter']);

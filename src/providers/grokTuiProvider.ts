@@ -92,25 +92,14 @@ interface TmuxSession {
 }
 const _tmuxSessions = new Map<string, TmuxSession>();
 
-/**
- * Reap ALL live grok tmux sessions this process launched. grok runs in a DETACHED
- * tmux session that outlives the loop, so a plain kill of the loop process ORPHANS
- * grok — it keeps running (burning tokens), its stale office presence makes the
- * agent look stuck, and orphans accumulate across restarts. Call on shutdown so
- * stopping/restarting a loop (the app's own child OR an external `autodev start`)
- * leaves no orphan. killSession is synchronous → safe in an 'exit' handler.
- */
-export function closeAllGrokTuiSessions(): void {
-  for (const sess of _tmuxSessions.values()) {
-    try { killSession(sess.name); } catch { /* best effort */ }
-  }
-  _tmuxSessions.clear();
-}
-
-// Reap grok on process shutdown. grok's tmux session is detached, so a SIGTERM/
-// SIGINT (how the desktop app and `autodev` stop a loop) would otherwise orphan it.
-// A signal handler suppresses Node's default terminate, so we re-exit after the
-// sync cleanup; the 'exit' hook is a backstop for other exit paths. No other
+// Reap grok on process shutdown. grok runs in a DETACHED tmux session that outlives
+// the loop, so killing the loop (app Stop, `autodev stop`, SIGTERM) would otherwise
+// ORPHAN grok — it keeps running/burning tokens, its stale office presence makes the
+// agent look stuck ("Stopping…" forever), and orphans accumulate across restarts.
+// closeAllGrokTuiSessions() (defined below, hoisted) reaps every session this process
+// launched; it was previously only wired to SDK/extension shutdown, not the standalone
+// `autodev start` loop. A signal handler suppresses Node's default terminate, so we
+// re-exit after the sync cleanup; 'exit' is a backstop for other exit paths. No other
 // SIGTERM/SIGINT handler exists in the CLI, so taking the signal here is safe.
 let _grokShuttingDown = false;
 function _grokReapOnSignal(sig: NodeJS.Signals): void {

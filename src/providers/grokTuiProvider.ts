@@ -669,7 +669,14 @@ function runGrokTmuxTurn(
   // misread as turn-end (observed a false ~4s finish). The "Worked for" marker is
   // the fast, positive done-signal for the normal case.
   const QUIET_FALLBACK_MS = envNum('AUTODEV_GROK_TUI_QUIET_FALLBACK_MS', 45_000);
-  const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 8_000);
+  // 18s default (was 8s): only paid on a fresh launch, never on a reused live
+  // session. Under a launch storm (many agents starting at once → dozens of MCP
+  // servers spinning up together) grok's startup can exceed 8s; the picker loop
+  // then sees a blank splash, assumes the ready prompt, and pastes the turn into a
+  // not-yet-ready grok, which dies ("session-exit" right after "sending turn").
+  // A longer grace lets grok reach its input prompt before we type. Override with
+  // AUTODEV_GROK_TUI_STARTUP_MS for faster single-agent launches.
+  const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 18_000);
   const NOOUTPUT_MS   = envNum('AUTODEV_GROK_TUI_NOOUTPUT_MS', 25_000);
   const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
   const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 4));

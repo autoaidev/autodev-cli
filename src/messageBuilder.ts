@@ -53,7 +53,7 @@ function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void
     `file://./SOUL.md`,
     `file://./${AGENT_PROFILE_FILE.replace(/\\/g, '/')}`,
     `<think>`,
-    `IMPORTANT: Read SOUL.md FIRST — it is your identity anchor (your name, any assigned persona, and your communication history). Then read PROGRAM.md, the master index that describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
+    `IMPORTANT: Read SOUL.md FIRST — it is your identity anchor (your name, any assigned persona, and your communication history). Then read \`.autodev/PROGRAM.md\`, the master index that describes and links every AutoDev reference (profile sections, control spec, loop tools). Load the referenced files on demand as the task needs them.`,
     `</think>`,
     AGENT_REF_END,
   ].join('\n');

@@ -753,8 +753,10 @@ function runGrokTmuxTurn(
   // then sees a blank splash, assumes the ready prompt, and pastes the turn into a
   // not-yet-ready grok, which dies ("session-exit" right after "sending turn").
   // A longer grace lets grok reach its input prompt before we type. Override with
-  // AUTODEV_GROK_TUI_STARTUP_MS for faster single-agent launches.
-  const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 18_000);
+  // AUTODEV_GROK_TUI_STARTUP_MS for faster single-agent launches. Default 30s: 18s
+  // was still too tight under a many-agents-at-once spawn (the "turn failed (provider
+  // stopped or timed out)" then recover-on-retry pattern), so give grok more headroom.
+  const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 30_000);
   const NOOUTPUT_MS   = envNum('AUTODEV_GROK_TUI_NOOUTPUT_MS', 25_000);
   const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
   const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 4));

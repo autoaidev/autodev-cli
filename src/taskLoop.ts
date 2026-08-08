@@ -1204,8 +1204,25 @@ export class TaskLoopRunner {
       // same payload several times in one second.
       const HOOKS_DEDUPE_WINDOW_MS = 30_000;
 
+      // Single-forwarder election. An `autodev mcp-operate` bridge may run in the
+      // SAME workspace (spawn-office starts a loop AND a persistent operate bridge
+      // per agent) and it also tails this jsonl — so without coordination every
+      // hook reaches the office twice. The loop is the authoritative forwarder: it
+      // stamps a heartbeat lock each tick and the bridge skips its own forwarding
+      // while this lock is fresh + owned by a live pid. Written every tick so that
+      // if the loop dies the bridge takes over within ~a tick.
+      const forwarderLock = path.join(this._workspaceRoot, '.autodev', 'hook-forwarder.lock');
+      const stampForwarderLock = (): void => {
+        try {
+          fs.mkdirSync(path.dirname(forwarderLock), { recursive: true });
+          fs.writeFileSync(forwarderLock, JSON.stringify({ pid: process.pid, ts: Date.now() }), 'utf8');
+        } catch { /* best-effort */ }
+      };
+      stampForwarderLock();
+
       const hooksInterval = setInterval(() => {
         if (this._state !== 'running') { return; }
+        stampForwarderLock();
         try {
           if (!fs.existsSync(hooksJsonl)) { return; }
           const size = fs.statSync(hooksJsonl).size;

@@ -970,12 +970,33 @@ export function mcpOperateCommand(program: Command): void {
           seenAsst.clear();
         };
 
+        // Single-forwarder election. If an `autodev start` loop is running in this
+        // same workspace it is the authoritative hook forwarder (it stamps this
+        // heartbeat lock every ~10s). While that lock is fresh and its pid is alive,
+        // this bridge must NOT also forward — otherwise every hook reaches the office
+        // twice. We keep advancing our read offset so that if the loop later exits we
+        // resume from the current end rather than replaying the whole backlog.
+        const forwarderLock = path.join(cwd, '.autodev', 'hook-forwarder.lock');
+        const loopOwnsForwarding = (): boolean => {
+          try {
+            const raw = fs.readFileSync(forwarderLock, 'utf8');
+            const { pid, ts } = JSON.parse(raw) as { pid?: number; ts?: number };
+            if (!pid || pid === process.pid) { return false; }
+            if (!ts || Date.now() - ts > 30_000) { return false; }   // stale heartbeat
+            try { process.kill(pid, 0); } catch { return false; }     // owner is dead
+            return true;
+          } catch { return false; }   // no lock / unreadable → we forward
+        };
+
         const tick = (): void => {
           if (!socket) { return; }               // wait until the presence socket is up
           try {
             if (!fs.existsSync(hooksJsonl)) { return; }
             const size = fs.statSync(hooksJsonl).size;
             if (size <= offset) { return; }
+            // A live loop owns forwarding — swallow new bytes (advance past them) and
+            // skip forwarding/narration/status so nothing is double-shipped.
+            if (loopOwnsForwarding()) { offset = size; return; }
             const fd = fs.openSync(hooksJsonl, 'r');
             const buf = Buffer.alloc(size - offset);
             fs.readSync(fd, buf, 0, buf.length, offset);

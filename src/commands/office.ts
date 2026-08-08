@@ -1,13 +1,13 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as http from 'http';
-import * as https from 'https';
 import { URL } from 'url';
 import { spawn, ChildProcess } from 'child_process';
 import { Command } from 'commander';
 import { log } from '../logger';
 import { applyWsUrl } from '../connect';
+import { fetchJsonAuth, preflight } from '../core/officeAuth';
+import { DEFAULT_BASE_URL, loadUserConfig } from '../core/userConfig';
 
 // ---------------------------------------------------------------------------
 // `autodev office <slug>` — run a WHOLE office with one command.
@@ -63,41 +63,6 @@ interface CredentialsData {
   apiKey?: string;
 }
 
-/** GET JSON with a `pat_` Bearer token (built-in http/https, no deps). */
-function fetchJsonAuth<T>(url: string, token: string, timeoutMs = 15_000): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let parsed: URL;
-    try { parsed = new URL(url); }
-    catch { reject(new Error(`Invalid URL: ${url}`)); return; }
-    const lib = parsed.protocol === 'http:' ? http : https;
-    const req = lib.request(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': 'autodev-cli',
-      },
-    }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body) as T); }
-          catch (e) { reject(new Error(`Invalid JSON from ${url}: ${(e as Error).message}`)); }
-        } else if (res.statusCode === 401 || res.statusCode === 403) {
-          reject(new Error(`Auth failed (HTTP ${res.statusCode}) — check --token. ${body.slice(0, 200)}`));
-        } else {
-          reject(new Error(`HTTP ${res.statusCode} from ${url}: ${body.slice(0, 300)}`));
-        }
-      });
-    });
-    req.setTimeout(timeoutMs, () => { req.destroy(new Error(`Timed out after ${timeoutMs}ms fetching ${url}`)); });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
 /** Normalise the /agents roster response (data[] | data.agents[] | agents[] | bare array). */
 function normalizeRoster(json: unknown): RosterAgent[] {
   const raw = json as { data?: unknown; agents?: unknown };
@@ -148,10 +113,15 @@ export function officeCommand(program: Command): void {
     .action(async (slug: string, opts: {
       url?: string; token?: string; baseDir?: string; provider?: string; interval: string; watch: boolean;
     }) => {
-      const base = String(opts.url ?? '').replace(/\/+$/, '');
-      const token = String(opts.token ?? '');
-      if (!base) { log.error('Missing office URL. Pass --url=<baseUrl> or set AUTODEV_SERVER_URL.'); process.exit(1); }
-      if (!token) { log.error('Missing token. Pass --token=<pat_…> or set AUTODEV_OFFICE_TOKEN. Mint one via the pixel-office UI (POST /api/auth/tokens).'); process.exit(1); }
+      // Flags (and their env defaults) win; otherwise fall back to the stored
+      // `autodev login` config (~/.autodev/config.json), then the prod default URL.
+      const stored = loadUserConfig();
+      const base = String(opts.url ?? stored.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+      const token = String(opts.token ?? stored.token ?? '');
+      if (!token) {
+        log.error('Not logged in. Run `autodev login` first, or pass --token=<pat_…> (and --url).');
+        process.exit(1);
+      }
 
       const officeSlug = safeSeg(slug);
       const root = opts.baseDir
@@ -179,6 +149,18 @@ export function officeCommand(program: Command): void {
       log.info(`Server    : ${base}`);
       log.info(`Workspaces: ${root}`);
       log.info(watch ? `Watcher   : every ${intervalSec}s (auto-starts new characters)` : 'Watcher   : off');
+      log.plain('');
+
+      // Preflight: confirm the server is reachable and the token is valid before
+      // spawning any loops. Green ✓ on success, red ✗ + non-zero exit otherwise.
+      const pf = await preflight(base, token);
+      if (!pf.ok) {
+        log.error(`✗ ${pf.reason} — run \`autodev login\``);
+        process.exit(1);
+      }
+      const who = pf.who ? `as ${pf.who} ` : '';
+      const nOffices = typeof pf.offices === 'number' ? `· ${pf.offices} office${pf.offices === 1 ? '' : 's'}` : '';
+      log.success(`✓ connected ${who}${nOffices}`.trim());
       log.plain('');
 
       // agentId → running child loop. Presence in this map means "we started it";

@@ -4,6 +4,31 @@
 either run an autonomous loop that works through `TODO.md` with the provider of your choice,
 or wire the folder up as an MCP-only operator so a plain chat client becomes a live office agent.
 
+## Quickstart — run a whole office in one command
+
+Create an office (with its characters) in the [pixel-office](https://app.pixeloffice.org)
+web UI, then:
+
+```bash
+npm i -g autodev-cli
+autodev login             # once: sign in, stores a token in ~/.autodev/config.json
+autodev office <slug>     # runs your WHOLE office — one loop per character
+```
+
+`autodev office <slug>` binds and starts every character, and **auto-starts new
+web agents** as they appear in the office. No `--url`/`--token` needed after
+`autodev login` (flags still override). Press **Ctrl+C** to stop every loop.
+
+- `autodev login` — email + password (mints a `pat_` token), or `--token pat_…`
+  to store a pasted one, or `--url` to point at a different server (default
+  `https://app.pixeloffice.org`). The token is **never printed**.
+- Both `login` and `office` run a **preflight**: a green `✓ connected as <who> · N offices`
+  or a red `✗ <reason> — run \`autodev login\`` (non-zero exit).
+
+---
+
+## Single-workspace loop
+
 ```bash
 npm install -g autodev-cli
 autodev init .            # scaffold TODO.md + .autodev/settings.json
@@ -130,6 +155,34 @@ Press **Ctrl+C** to stop gracefully.
 > Tasks live under the **`## Todo`** heading in `TODO.md` as `- [ ] task` checkboxes,
 > one per line, run top to bottom. The scaffolded template ships with no example task
 > on purpose — a stray `[ ]` line is a real task the agent would execute first.
+
+### `autodev login`
+Authenticate to a pixel-office server once and store a `pat_` token in
+`~/.autodev/config.json` (mode `0600`) so `autodev office` needs no `--url`/`--token`.
+
+```bash
+autodev login                                   # prompts for URL/email/password
+autodev login --email you@co.com --password …   # non-interactive
+autodev login --token pat_xxx                    # store a pasted token
+autodev login --url https://my.office.host       # a different server
+```
+
+Flags: `--url`, `--email`, `--password`, `--token <pat_…>`, `--name <token-name>`.
+The token is never printed; login runs a preflight and refuses to store a token it can't use.
+
+### `autodev office <slug>`
+Run a **whole office**: bind + start a loop for every character and auto-start new
+web agents as they appear. Falls back to the stored `autodev login` config when
+`--url`/`--token` are omitted (flags override).
+
+```bash
+autodev office my-team                 # uses stored login
+autodev office my-team -p claude-cli   # force one provider for every character
+autodev office my-team --no-watch      # don't keep watching for new characters
+```
+
+Flags: `--url`, `--token`, `--base-dir <dir>`, `-p/--provider`, `--interval <sec>`, `--no-watch`.
+Press **Ctrl+C** to stop all loops.
 
 ### `autodev connect [path]`
 Bind the workspace to a pixel-office endpoint.

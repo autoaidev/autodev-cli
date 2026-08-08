@@ -159,7 +159,14 @@ export function officeCommand(program: Command): void {
         : path.join(os.homedir(), '.autodev', 'offices', officeSlug);
       fs.mkdirSync(root, { recursive: true, mode: 0o700 });
 
-      const intervalSec = Math.max(0, parseInt(opts.interval, 10) || 0);
+      // Only an explicit 0 disables the watcher; a malformed value warns and falls
+      // back to the default cadence rather than silently turning polling off.
+      let intervalSec = 15;
+      if (opts.interval !== undefined) {
+        const n = parseInt(opts.interval, 10);
+        if (Number.isNaN(n)) { log.warn(`Invalid --interval '${opts.interval}' — using ${intervalSec}s.`); }
+        else { intervalSec = Math.max(0, n); }
+      }
       const watch = opts.watch && intervalSec > 0;
 
       // Locate the compiled CLI entry so children reliably run THIS build's
@@ -177,73 +184,113 @@ export function officeCommand(program: Command): void {
       // agentId → running child loop. Presence in this map means "we started it";
       // it gates both duplicate spawns and the block-if-already-running check.
       const children = new Map<string, { child: ChildProcess; name: string }>();
+      // Reserved WHILE a character's async bind is in flight (before it lands in
+      // `children`). The watcher's setInterval does not await the prior poll, so a
+      // slow creds fetch could let the next poll see children.has()===false and
+      // spawn a SECOND loop in the same workspace. `starting` is the synchronous
+      // reservation that closes that TOCTOU window.
+      const starting = new Set<string>();
       const notedOnline = new Set<string>();
       let stopping = false;
 
-      const startAgent = async (a: RosterAgent): Promise<void> => {
-        const dir = path.join(root, safeSeg(a.slug));
-        // Sandbox-escape guard: the workspace must stay under root.
-        const resolved = path.resolve(dir);
-        if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-          log.error(`  ${a.name}: refused workspace path outside base dir (${resolved})`);
-          return;
-        }
-        const provider = opts.provider ? toAutodevProvider(opts.provider) : toAutodevProvider(a.provider);
-        try {
-          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-          // Fetch this character's credentials → ready-made wsUrl (token+endpoint).
-          const credsRes = await fetchJsonAuth<{ success?: boolean; data?: CredentialsData; error?: string }>(
-            `${base}/api/offices/${encodeURIComponent(slug)}/agents/${encodeURIComponent(a.id)}/credentials`,
-            token,
-          );
-          const wsUrl = credsRes?.data?.wsUrl;
-          if (!credsRes?.success || !wsUrl) {
-            log.error(`  ${a.name}: no credentials (${credsRes?.error ?? 'missing wsUrl'})`);
-            return;
-          }
-          // Bind the workspace with the EXISTING single-agent machinery: writes
-          // .autodev/settings.json, installs hooks, wires the office MCP server,
-          // grants MCP permissions AND marks the workspace Claude-trusted.
-          applyWsUrl(dir, wsUrl);
-        } catch (err) {
-          log.error(`  ${a.name}: bind failed — ${(err as Error).message}`);
-          return;
-        }
-
-        // Spawn the EXISTING start loop as its own process (blocking singleton).
-        // AUTODEV_EXIT_WITH_PARENT=1 ⇒ the child reaps itself if we die.
-        const child = spawn(process.execPath, [cliJs, 'start', dir, '-p', provider], {
-          env: { ...process.env, AUTODEV_EXIT_WITH_PARENT: '1' },
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        children.set(a.id, { child, name: a.name });
-        log.success(`  ▶ ${a.name} (${provider}) → ${dir}`);
-        pipePrefixed(child.stdout, a.name, (line) => log.plain(line));
-        pipePrefixed(child.stderr, a.name, (line) => log.gray(line));
-        child.on('exit', (code, sig) => {
-          children.delete(a.id);
-          if (!stopping) {
-            log.warn(`  ⏹ ${a.name} loop exited (${sig ?? code}). It will be re-started on the next poll if still offline.`);
-          }
-        });
-        child.on('error', (e) => {
-          children.delete(a.id);
-          log.error(`  ${a.name}: failed to spawn loop — ${e.message}`);
-        });
+      // Never send the agent token to a host the user didn't point us at. Mirrors
+      // the app's safeWsUrl: force the ws host to the trusted --url base, require
+      // wss for any non-local host (no plaintext token off-box). A malicious office
+      // response therefore can't redirect the token-bearing presence socket.
+      const safeWsUrl = (rawWs: string): string | null => {
+        let ws: URL, b: URL;
+        try { ws = new URL(rawWs); b = new URL(base); } catch { return null; }
+        if (ws.protocol !== 'ws:' && ws.protocol !== 'wss:') return null;
+        if (ws.host !== b.host) ws.host = b.host;   // pin to the trusted base host
+        const isLocal = ws.hostname === 'localhost' || ws.hostname === '127.0.0.1' || ws.hostname === '::1';
+        if (ws.protocol === 'ws:' && (!isLocal || b.protocol === 'https:')) ws.protocol = 'wss:';
+        return ws.toString();
       };
 
-      const poll = async (): Promise<void> => {
+      const startAgent = async (a: RosterAgent): Promise<void> => {
+        if (children.has(a.id) || starting.has(a.id)) return; // already running / in flight
+        starting.add(a.id);
+        try {
+          const dir = path.join(root, safeSeg(a.slug));
+          // Sandbox-escape guard: the workspace must stay under root.
+          const resolved = path.resolve(dir);
+          if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+            log.error(`  ${a.name}: refused workspace path outside base dir (${resolved})`);
+            return;
+          }
+          const provider = opts.provider ? toAutodevProvider(opts.provider) : toAutodevProvider(a.provider);
+          try {
+            fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+            // Fetch this character's credentials → ready-made wsUrl (token+endpoint).
+            const credsRes = await fetchJsonAuth<{ success?: boolean; data?: CredentialsData; error?: string }>(
+              `${base}/api/offices/${encodeURIComponent(slug)}/agents/${encodeURIComponent(a.id)}/credentials`,
+              token,
+            );
+            const rawWs = credsRes?.data?.wsUrl;
+            if (!credsRes?.success || !rawWs) {
+              log.error(`  ${a.name}: no credentials (${credsRes?.error ?? 'missing wsUrl'})`);
+              return;
+            }
+            const wsUrl = safeWsUrl(rawWs);
+            if (!wsUrl) {
+              log.error(`  ${a.name}: refused unsafe wsUrl (not ws/wss)`);
+              return;
+            }
+            // Bind the workspace with the EXISTING single-agent machinery: writes
+            // .autodev/settings.json, installs hooks, wires the office MCP server,
+            // grants MCP permissions AND marks the workspace Claude-trusted.
+            applyWsUrl(dir, wsUrl);
+          } catch (err) {
+            log.error(`  ${a.name}: bind failed — ${(err as Error).message}`);
+            return;
+          }
+
+          // Spawn the EXISTING start loop as its own process (blocking singleton).
+          // AUTODEV_EXIT_WITH_PARENT=1 ⇒ the child reaps itself if we die.
+          const child = spawn(process.execPath, [cliJs, 'start', dir, '-p', provider], {
+            env: { ...process.env, AUTODEV_EXIT_WITH_PARENT: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          children.set(a.id, { child, name: a.name });
+          log.success(`  ▶ ${a.name} (${provider}) → ${dir}`);
+          pipePrefixed(child.stdout, a.name, (line) => log.plain(line));
+          pipePrefixed(child.stderr, a.name, (line) => log.gray(line));
+          child.on('exit', (code, sig) => {
+            children.delete(a.id);
+            if (!stopping) {
+              log.warn(`  ⏹ ${a.name} loop exited (${sig ?? code}). It will be re-started on the next poll if still offline.`);
+            }
+          });
+          child.on('error', (e) => {
+            children.delete(a.id);
+            log.error(`  ${a.name}: failed to spawn loop — ${e.message}`);
+          });
+        } finally {
+          // Release the reservation: from here `children` (or its absence on failure)
+          // is the source of truth again.
+          starting.delete(a.id);
+        }
+      };
+
+      const poll = async (initial = false): Promise<void> => {
         if (stopping) { return; }
         let roster: RosterAgent[];
         try {
           const json = await fetchJsonAuth<unknown>(`${base}/api/offices/${encodeURIComponent(slug)}/agents`, token);
           roster = normalizeRoster(json);
         } catch (err) {
-          log.warn(`Roster fetch failed (will retry): ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          // A bad/expired token is permanent — fail loudly on the FIRST fetch rather
+          // than reporting a clean exit (no-watch) or retrying a dead credential forever.
+          if (initial && /HTTP 40[13]|Auth failed|Unauthor|Forbidden/i.test(msg)) {
+            log.error(`${msg}\nCheck --token (or AUTODEV_OFFICE_TOKEN) and --url.`);
+            process.exit(1);
+          }
+          log.warn(`Roster fetch failed (will retry): ${msg}`);
           return;
         }
         for (const a of roster) {
-          if (children.has(a.id)) { continue; }         // we already run it
+          if (children.has(a.id) || starting.has(a.id)) { continue; } // running / in flight
           if (a.isConnected) {                           // online elsewhere — don't flap its WS
             if (!notedOnline.has(a.id)) {
               log.gray(`  • ${a.name} already online elsewhere — skipping.`);
@@ -269,7 +316,7 @@ export function officeCommand(program: Command): void {
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
 
-      await poll();
+      await poll(true);
       if (children.size === 0 && !watch) {
         log.warn('No characters started. Nothing to run.');
         process.exit(0);

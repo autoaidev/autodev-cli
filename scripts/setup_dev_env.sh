@@ -18,7 +18,10 @@
 # browser is provisioned unless a Playwright dependency is detected in package.json.
 #
 # Usage:
-#   bash scripts/setup_dev_env.sh
+#   bash scripts/setup_dev_env.sh [--with-external]
+#
+#   --with-external   after setup, clone + set up the accompanying AutoDev repos
+#                     (pixel-office, autodev-app) into external/ (git-ignored).
 #
 # Env toggles (all optional):
 #   NODE_MAJOR=22     Node major version to install via NodeSource (must be >= 22).
@@ -34,6 +37,19 @@ SKIP_SYSTEM="${SKIP_SYSTEM:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_BROWSER="${SKIP_BROWSER:-0}"
 export DEBIAN_FRONTEND=noninteractive
+
+# --- arg parsing (env toggles above still all work) ------------------------
+WITH_EXTERNAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-external) WITH_EXTERNAL=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--with-external]"
+      echo "  --with-external   after setup, clone + set up the accompanying AutoDev repos into external/"
+      exit 0 ;;
+    *) ;;  # ignore unknown args gracefully
+  esac
+done
 
 # Resolve the repo root (this script lives in <repo>/scripts/).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -103,6 +119,66 @@ maybe_install_browser() {
   fi
 }
 
+# --- optional: clone + set up accompanying AutoDev repos into external/ ----
+# The OTHER product repos that pair with this one. Edit freely (name -> git url).
+declare -A EXTERNAL_REPOS=(
+  [pixel-office]="git@github.com:peter-mw/pixel-office.git"
+  [autodev-app]="git@github.com:autoaidev/autodev-app.git"
+)
+
+setup_external_repos() {
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+  echo ""
+  echo "=================================================="
+  echo " Cloning accompanying repos into external/"
+  echo "=================================================="
+
+  mkdir -p "${root}/external"
+
+  # Ensure external/ is git-ignored (idempotent — add the line at most once).
+  if [ -f "${root}/.gitignore" ] && grep -qxF 'external/' "${root}/.gitignore"; then
+    echo "  .gitignore already ignores external/"
+  else
+    echo 'external/' >> "${root}/.gitignore"
+    echo "  Added 'external/' to .gitignore"
+  fi
+
+  local name url dir found
+  for name in "${!EXTERNAL_REPOS[@]}"; do
+    url="${EXTERNAL_REPOS[$name]}"
+    dir="${root}/external/${name}"
+    echo ""
+    echo "--- ${name} (${url}) ---"
+    if [ -d "${dir}/.git" ]; then
+      echo "  Exists — pulling latest (ff-only)"
+      git -C "${dir}" pull --ff-only || true
+    else
+      echo "  Cloning..."
+      git clone "${url}" "${dir}" || { echo "  ! clone failed for ${name} — skipping"; continue; }
+    fi
+
+    # Run the repo's own setup script if present. Pass SKIP_SYSTEM=1 (avoid redundant
+    # apt installs) and NEVER pass --with-external so this does not recurse.
+    found=""
+    if [ -f "${dir}/scripts/setup_dev_env.sh" ]; then
+      found="setup_dev_env.sh"
+    elif [ -f "${dir}/scripts/install_dev_env.sh" ]; then
+      found="install_dev_env.sh"
+    fi
+    if [ -n "${found}" ]; then
+      echo "  Running scripts/${found} (SKIP_SYSTEM=1)"
+      ( cd "${dir}" && SKIP_SYSTEM=1 bash "scripts/${found}" ) || echo "  ! setup failed for ${name} (continuing)"
+    else
+      echo "  No setup script in ${name}/scripts — skipping setup"
+    fi
+  done
+
+  echo ""
+  echo "  External repos ready under ${root}/external/"
+}
+
 # --- run ------------------------------------------------------------------
 section "autodev-cli dev/CI environment setup"
 info "Repo:        ${REPO_DIR}"
@@ -132,3 +208,7 @@ info "Build out: ${REPO_DIR}/out"
 info ""
 info "Run the test suite with:"
 info "    npm test"
+
+if [ "${WITH_EXTERNAL}" = "1" ]; then
+  setup_external_repos
+fi

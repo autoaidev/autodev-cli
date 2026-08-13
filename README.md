@@ -42,7 +42,7 @@ autodev start .           # run the autonomous loop
 ## Links
 
 - **GitHub:** [autodev-cli](https://github.com/autoaidev/autodev-cli) *(this repo)* · **npm:** <https://www.npmjs.com/package/autodev-cli> — `npm i -g autodev-cli`
-- **Sibling repos:** [pixel-office](https://github.com/autoaidev/pixel-office) · [autodev-app](https://github.com/autoaidev/autodev-app) · [agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)
+- **Sibling repos:** [pixel-office](https://github.com/autoaidev/pixel-office) · [autodev-app](https://github.com/autoaidev/autodev-app) · [agent-vm-deployer](https://github.com/autoaidev/agent-vm-deployer)
 - **Related:** [VS Code extension](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev) · [desktop app](https://autoaidev.com/releases/AutoAIDev-desktop-latest.AppImage) · [Pixel Office](https://app.pixeloffice.org) · [Agent VM Deployer](https://deployer.pixeloffice.org)
 - **Product sites:** [autoaidev.com](https://autoaidev.com) · [pixeloffice.org](https://pixeloffice.org)
 
@@ -59,7 +59,7 @@ characters in a live "office":
   (`npx autodev-app`) that bundles this CLI and drives agents in a GUI.
 - **autodev-vscode-extension** — the AutoDev tasks/chat/sessions panels inside VS Code
   ([Marketplace](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev)).
-- **[agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)** — spawns agents
+- **[agent-vm-deployer](https://github.com/autoaidev/agent-vm-deployer)** — spawns agents
   headlessly on SSH / Docker / K8s. Live at <https://deployer.pixeloffice.org>.
 
 ---

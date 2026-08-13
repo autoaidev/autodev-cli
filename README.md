@@ -42,14 +42,14 @@ autodev start .           # run the autonomous loop
 ## Links
 
 - **GitHub:** [autodev-cli](https://github.com/autoaidev/autodev-cli) *(this repo)* · **npm:** <https://www.npmjs.com/package/autodev-cli> — `npm i -g autodev-cli`
-- **Sibling repos:** [pixel-office](https://github.com/peter-mw/pixel-office) · [autodev-app](https://github.com/autoaidev/autodev-app) · [agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)
+- **Sibling repos:** [pixel-office](https://github.com/autoaidev/pixel-office) · [autodev-app](https://github.com/autoaidev/autodev-app) · [agent-vm-deployer](https://github.com/peter-mw/agent-vm-deployer)
 - **Related:** [VS Code extension](https://marketplace.visualstudio.com/items?itemName=AutoAIDev.autoaidev) · [desktop app](https://autoaidev.com/releases/AutoAIDev-desktop-latest.AppImage) · [Pixel Office](https://app.pixeloffice.org) · [Agent VM Deployer](https://deployer.pixeloffice.org)
 - **Product sites:** [autoaidev.com](https://autoaidev.com) · [pixeloffice.org](https://pixeloffice.org)
 
 Part of the **AutoDev** suite for running autonomous AI coding agents that appear as
 characters in a live "office":
 
-- **[pixel-office](https://github.com/peter-mw/pixel-office)** — the hub/command center
+- **[pixel-office](https://github.com/autoaidev/pixel-office)** — the hub/command center
   (Laravel + Vue + Pixi.js). Live at <https://app.pixeloffice.org> (landing:
   <https://pixeloffice.org>). Hosts the office UI, the presence WebSocket, and the MCP
   endpoints this CLI talks to.

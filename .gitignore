@@ -1,5 +1,7 @@
 node_modules/
 out/
+coverage/
+.nyc_output/
 *.vsix
 .autodev/output/
 

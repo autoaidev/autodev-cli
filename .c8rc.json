@@ -1,0 +1,18 @@
+{
+  "all": true,
+  "reporter": ["text", "html", "lcov"],
+  "reports-dir": "coverage",
+  "include": [
+    "out/**/*.js"
+  ],
+  "exclude": [
+    "node_modules/**",
+    "test/**",
+    "coverage/**",
+    "dist/**",
+    "**/*.d.ts",
+    "**/*.js.map"
+  ],
+  "exclude-after-remap": false,
+  "skip-full": false
+}

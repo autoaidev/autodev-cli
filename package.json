@@ -31,6 +31,8 @@
     "dev": "tsc -p ./ --watch",
     "prepublishOnly": "npm run build",
     "start": "node bin/autodev.js",
+    "test:coverage": "c8 npm test",
+    "coverage:html": "c8 --reporter=html npm test",
     "test": "node test/smoke.mjs && node test/liveNarration.smoke.mjs && node test/liveNarration.edge.smoke.mjs && node test/normalizer.parity.smoke.mjs && node test/providerConfig.smoke.mjs && node test/mcpOnlyOperator.smoke.mjs && node test/opencodeEventFilter.smoke.mjs && node test/copilotMcpIsolation.smoke.mjs && node test/grokSpawnError.smoke.mjs && node test/initTemplate.smoke.mjs && node test/settingsAliases.smoke.mjs && node test/setupWritesOfficeMcp.smoke.mjs && node test/claudePermissions.smoke.mjs && node test/presenceGuard.smoke.mjs && node test/cliExitHardFail.smoke.mjs && node test/redactSecrets.smoke.mjs && node test/claudeUsage.smoke.mjs && node test/graphStore.smoke.mjs && node test/programReminder.smoke.mjs && node test/agentBackup.smoke.mjs && node test/persona.smoke.mjs && node test/soulUpdate.smoke.mjs && node test/sessionsGlobal.smoke.mjs && node test/resumeSessionLoopDefault.smoke.mjs && node test/secureFilePerms.smoke.mjs"
   },
   "dependencies": {
@@ -46,6 +48,7 @@
     "@types/adm-zip": "^0.5.7",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.0.0",
+    "c8": "^12.0.0",
     "typescript": "^5.4.0"
   },
   "exports": {

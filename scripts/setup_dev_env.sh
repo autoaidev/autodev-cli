@@ -122,8 +122,8 @@ maybe_install_browser() {
 # --- optional: clone + set up accompanying AutoDev repos into external/ ----
 # The OTHER product repos that pair with this one. Edit freely (name -> git url).
 declare -A EXTERNAL_REPOS=(
-  [pixel-office]="git@github.com:autoaidev/pixel-office.git"
-  [autodev-app]="git@github.com:autoaidev/autodev-app.git"
+  [pixel-office]="https://github.com/autoaidev/pixel-office.git"
+  [autodev-app]="https://github.com/autoaidev/autodev-app.git"
 )
 
 setup_external_repos() {

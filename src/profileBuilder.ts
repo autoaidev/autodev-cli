@@ -27,6 +27,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00a-proactive-discovery', label: 'Proactive Discovery', file: '00a-proactive-discovery.md',
+    keyRules: [
+      'On startup/join: run the discovery sweep — SOUL (who am I) → list_agents (roster+presence) → living docs+codebase (what is this) → tools/skills/MCP inventory → get_tasks/TODO+check_messages (the work) → graph_map/graph_search + Memory (what is already known).',
+      'When idle or between tasks: PROACTIVELY find work — re-read TODO/get_tasks, explore the codebase, query the graph/memory, coordinate over A2A (send_message/check_messages), surface blockers. Never sit and wait to be spoon-fed context.',
+      'Discover, then judge — recall before acting, read before touching, use the real tool/graph fact instead of guessing; do not act blindly and do not spam teammates.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

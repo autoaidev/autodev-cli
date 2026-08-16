@@ -36,12 +36,14 @@ import { DEFAULT_BASE_URL, loadUserConfig } from '../core/userConfig';
 const VALID_PROVIDERS = new Set([
   'claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk',
   'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui',
+  'dummy',
 ]);
 
 function toAutodevProvider(provider?: string): string {
   const p = String(provider ?? '').trim();
   if (VALID_PROVIDERS.has(p)) { return p; }
   const l = p.toLowerCase();
+  if (l.startsWith('dummy'))    { return 'dummy'; }
   if (l.startsWith('grok'))     { return 'grok-tui'; }
   if (l.startsWith('claude'))   { return 'claude-cli'; }
   if (l.startsWith('opencode')) { return 'opencode-cli'; }

@@ -8,7 +8,7 @@ import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
 import { TODO_TEMPLATE } from './init';
 import { installHooks, areHooksInstalled } from '../hooksManager';
 
-const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui'] as const;
+const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui', 'dummy'] as const;
 
 export function startCommand(program: Command): void {
   program

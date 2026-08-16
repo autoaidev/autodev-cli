@@ -27,8 +27,9 @@ const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
 const expected = {
   'claude-cli': 'cli', 'copilot-cli': 'cli', 'opencode-cli': 'cli', 'grok-cli': 'cli',
   'claude-tui': 'tui', 'grok-tui': 'tui', 'copilot-sdk': 'sdk', 'opencode-sdk': 'sdk',
+  'dummy': 'sdk',
 };
-ok('registry has all 8 providers', () => assert.equal(providerRegistry.ids().length, 8));
+ok('registry has all 9 providers', () => assert.equal(providerRegistry.ids().length, 9));
 for (const [id, kind] of Object.entries(expected)) {
   ok(`registry resolves ${id} (kind=${kind})`, () => {
     const p = providerRegistry.get(id);

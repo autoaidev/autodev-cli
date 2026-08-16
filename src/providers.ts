@@ -2,7 +2,7 @@
 // AI provider definitions — CLI-only providers
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-sdk' | 'opencode-cli' | 'opencode-sdk' | 'grok-cli' | 'grok-tui';
+export type ProviderId = 'claude-cli' | 'claude-tui' | 'copilot-cli' | 'copilot-sdk' | 'opencode-cli' | 'opencode-sdk' | 'grok-cli' | 'grok-tui' | 'dummy';
 
 export interface ProviderConfig {
   label: string;
@@ -50,6 +50,11 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
   },
   'grok-tui': {
     label: 'Grok TUI',
+    extensionId: '',
+    isCli: true,
+  },
+  'dummy': {
+    label: 'Dummy Agent',
     extensionId: '',
     isCli: true,
   },

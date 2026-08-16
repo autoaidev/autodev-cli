@@ -38,15 +38,15 @@ Both modes share the same provider abstraction, config, MCP fan-out, and office 
 
 ## Providers
 
-Eight provider ids across four backends (`claude`, `grok`, `opencode`, `copilot`), each in a
-CLI and a TUI/SDK flavor.
+Nine provider ids across five backends (`claude`, `grok`, `opencode`, `copilot`, `dummy`).
+Each real backend has a CLI and a TUI/SDK flavor; `dummy` is an in-process test agent.
 
 - `src/providers.ts` — the provider id/label list.
-- `src/providers/*` — concrete providers: `claudeCliProvider`, `claudeTuiProvider`,
-  `grokTuiProvider`, `opencodeCliProvider`, `opencodeSdkProvider`, `copilotCliProvider`,
-  `copilotSdkProvider`, plus `grokSessions` / `copilotSessions` transcript readers.
-- `src/core/provider/` — the contract layer: `BaseProvider`, `contract`, `ProviderRegistry`,
-  `implementations`.
+- `src/providers/base/` — shared contract, registry, and service bases (`ProviderEvents`,
+  `ProviderModels`, `ProviderSessions`, `ProviderState`, `ProviderNormalizer`,
+  `ProviderUsage`, `ProviderManager`) plus test factories.
+- `src/providers/{claude,grok,opencode,copilot,dummy}/` — one service folder per family.
+- `src/core/provider/` — thin re-exports of the contract layer.
 
 Provider CLIs are **not** bundled; users install them separately.
 

@@ -35,6 +35,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00b-self-verifiable-work', label: 'Self-Verifiable Work', file: '00b-self-verifiable-work.md',
+    keyRules: [
+      'Never mark [x] / complete_task / say "done" on a vibe — state the objective, rule-based check you ran and its result (tests green, build 0 errors, script exits 0, endpoint 200, file has expected content, diff applied). "Looks right" is not evidence.',
+      'No checker? BUILD one before closing — write a failing test, define measurable acceptance criteria in TODO.md, capture before/after, assert an expected exit-code/HTTP-200/file-exists, or re-run from a clean state.',
+      'High stakes or fuzzy check → get a RELATIVE second verification (adversarial self-review, or a teammate over A2A via send_message/check_messages, or an independent re-run) rather than trusting one self-judgment. Verify with real gates: the project tests/build/lint, the verify_and_keep gate (.autodev/CONTROL.md), read_file back your writes.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

@@ -57,7 +57,7 @@ await okAsync("node's spawn() does NOT throw on an unrunnable binary — it emit
 // ---------------------------------------------------------------------------
 // 2. The provider must handle that event — the whole point of the fix.
 // ---------------------------------------------------------------------------
-const src = fs.readFileSync(path.join(here, '..', 'src', 'providers', 'grokTuiProvider.ts'), 'utf8');
+const src = fs.readFileSync(path.join(here, '..', 'src', 'providers', 'grok', 'tui.ts'), 'utf8');
 
 ok("grokTui registers an async child.on('error') handler", () => {
   assert.ok(/child\.on\('error'/.test(src), "without this, ENOENT escapes and the turn hangs forever");
@@ -98,7 +98,7 @@ ok("SessionStart is gated on the 'spawn' event, not emitted optimistically", () 
 // 4. opencode already did this right — keep it that way (it is the reference).
 // ---------------------------------------------------------------------------
 ok('opencodeCli still handles spawn errors (the reference implementation)', () => {
-  const oc = fs.readFileSync(path.join(here, '..', 'src', 'providers', 'opencodeCliProvider.ts'), 'utf8');
+  const oc = fs.readFileSync(path.join(here, '..', 'src', 'providers', 'opencode', 'cli.ts'), 'utf8');
   assert.ok(/\.on\('error'/.test(oc), 'opencode must keep its async error handling');
 });
 

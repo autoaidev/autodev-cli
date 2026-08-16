@@ -145,9 +145,10 @@ const KIND = {
   'copilot-cli': 'cli', 'copilot-sdk': 'sdk',
   'opencode-cli': 'cli', 'opencode-sdk': 'sdk',
   'grok-cli': 'cli', 'grok-tui': 'tui',
+  'dummy': 'sdk',
 };
 
-ok('registry: ids() covers exactly the 8 PROVIDERS, with consistent label/kind', () => {
+ok('registry: ids() covers exactly the PROVIDERS map, with consistent label/kind', () => {
   const ids = providerRegistry.ids().sort();
   assert.deepStrictEqual(ids, Object.keys(PROVIDERS).sort(), 'registry ids match PROVIDERS map');
   for (const id of ids) {

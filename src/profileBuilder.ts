@@ -43,6 +43,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00c-verifiable-threads', label: 'Self-Verifying Message Threads & Todos', file: '00c-verifiable-threads.md',
+    keyRules: [
+      'Assume every recipient is context-degraded (different session, never saw your reasoning) — write each A2A message (send_message) and each task/TODO.md hand-off so an agent who saw NONE of your run could act AND verify: state the goal, the exact artifact (path/command/ticket id/office slug), and the objective acceptance criterion. No "the file"/"that bug"/"as discussed" — those are context-gap tells.',
+      'Read as a detector: on check_messages/get_tasks look for the tells of a degraded sender (vague referents, missing acceptance criterion, stale refs). If you spot a gap, recover it (check_messages/get_events/agent_profile) or send ONE clarifying send_message BEFORE acting — never act on a degraded instruction and propagate the error downstream.',
+      'Close the loop verifiably: complete_task/status reports the objective result (what changed, where, how checked, pass/fail with command+output) — never a bare "done". A report a fresh reader can verify keeps the thread honest; a vague "done" is the context-gap tell.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

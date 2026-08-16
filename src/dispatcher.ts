@@ -205,5 +205,11 @@ export async function sendPromptToAi(
       log(`${providerCfg.label}: prompt dispatched (session=${resolvedSessionId ?? 'new'})`);
     }
     return;
+  } else {
+    // Defensive fail-loud gate (matches providerRegistry.get()'s throw-on-unknown
+    // style). Today all providers set isCli:true so this is unreachable; a future
+    // isCli:false provider would otherwise silently return with no output and no
+    // error. Surface it loudly instead of a silent no-op.
+    throw new Error(`Provider '${providerId}' has isCli=false but no dispatch path is implemented`);
   }
 }

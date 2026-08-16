@@ -24,8 +24,12 @@ function listWorkspace(root: string): string {
 }
 
 function readFileSafe(root: string, rel: string): string {
+  const base = path.resolve(root);
   const full = path.resolve(root, rel);
-  if (!full.startsWith(path.resolve(root))) { return '(refused path outside workspace)'; }
+  // Guard against traversal AND sibling-prefix escapes (e.g. `<root>-secret`):
+  // require an exact match or a real child under `<base><sep>`, not just a
+  // string prefix of the resolved base.
+  if (full !== base && !full.startsWith(base + path.sep)) { return '(refused path outside workspace)'; }
   try { return fs.readFileSync(full, 'utf8').slice(0, 800); }
   catch { return `(missing ${rel})`; }
 }

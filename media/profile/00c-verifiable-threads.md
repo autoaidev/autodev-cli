@@ -60,7 +60,7 @@ When you finish an assigned task, `complete_task` (and any status `send_message`
 
 - What changed and **where** (files, ids, artifacts).
 - **How it was checked** and the outcome (command + result: "suite green 42/42", "build 0 errors", "GET /health → 200").
-- Pass/fail plainly — if it failed or is blocked, say so with the evidence; do not close a red result as success (§0.0b, §0.7).
+- Pass/fail plainly — if it failed or is blocked, say so with the evidence; do not close a red result as success (§0.0b, §1.5).
 
 A report a fresh reader can independently verify is what keeps the whole thread honest. A bare "done" or "should be working" is itself the context-gap tell — it forces the next agent to re-derive what you already knew, and hides failures behind optimism.
 

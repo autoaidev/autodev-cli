@@ -51,6 +51,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00d-turn-end-retrospective', label: 'Turn-End Honest Retrospective & Next Steps', file: '00d-turn-end-retrospective.md',
+    keyRules: [
+      'End every turn with a CANDID opinion, not spin: what you achieved vs intended and how much is VERIFIED (a check ran) vs merely assumed; what went wrong/shaky/skipped/uncertain, stated plainly; what you\'d do differently plus any HONEST DISAGREEMENT with the approach or task; calibrated confidence. A cheerful "all done ✅" that hides a partial failure or rubber-stamps a bad plan is a failure of this protocol, not politeness.',
+      'Follow the verdict with concrete NEXT STEPS: the specific next actions ordered by priority with real handles (file path, task id, command, office slug), blockers + what/who unblocks them, and what you RECOMMEND even if nobody asked ("if I were you I\'d do X next").',
+      'Always state it in your closing output; if you are an office/loop agent make it durable — set_status with a terse honest state, a brief send_message to the owner/next agent when there is something to act on, and write next-steps into TODO.md (manage_agent_todos) so the thread survives your context reset. Keep it proportional — a tight paragraph or a few bullets, never a wall of text.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

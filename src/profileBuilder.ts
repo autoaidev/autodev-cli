@@ -59,6 +59,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00e-long-horizon-planning', label: 'Long-Horizon Task Planner', file: '00e-long-horizon-planning.md',
+    keyRules: [
+      'Plan the full arc BEFORE executing: decompose the task end-to-end into an ordered set of COMPLETE milestones, each with its own acceptance criterion, up to one explicit "done for the WHOLE task". Resist the first-slice reflex — a rushed start ships a half-task. Order by dependency (blockers first) and spike the unknown/risky parts before committing the plan.',
+      'Define "done" for the whole task, not the first increment: name up front every case/state/path the finished task must cover so "done" can\'t silently shrink to the easy part. Compiles-but-doesn\'t-do-the-job, happy-path-only, or 1-of-N cases is NOT done ([[00b-self-verifiable-work]], graded by [[00d-turn-end-retrospective]]).',
+      'The plan persists across turns — write it + remaining steps into TODO.md (manage_agent_todos / get_tasks) so it survives a context reset; carry and update it each turn, never re-derive from scratch. Prefer a thin end-to-end slice over broad half-built sprawl. Reconcile before closing: no complete_task until every planned step is genuinely [x] and verified; else the task stays open with an honest set_status.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

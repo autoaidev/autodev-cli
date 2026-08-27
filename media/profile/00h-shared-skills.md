@@ -6,14 +6,13 @@ Skills follow Anthropic's Agent Skills protocol (`github.com/anthropics/skills`)
 
 ---
 
-### Where skills live — authoring source vs provider load path
+### Where skills live — one shared library
 
-Two paths, one relationship — do not conflate them:
+**The shared skills library IS `.claude/skills/<slug>/SKILL.md`.** There is no separate authoring source and no second copy to keep in sync — you create, read, and edit the skill in the same place the provider loads it from. This is the real Claude skills location: a Claude-Code provider auto-loads every skill under `.claude/skills/` and re-reads them each run (no relaunch needed), so a skill written here is live immediately.
 
-- **`.autodev/skills/<slug>/SKILL.md` — the shared authoring SOURCE.** This is the durable, office-shared library, in the same `.autodev/` tree as the graph (`.autodev/graph/`), issues (`.autodev/issues/`), and swarm briefs (`.autodev/swarm/`, [[00g-swarm-living-documents]]). You create, read, and edit skills here with your normal file tools. It is where a skill *lives* as a team asset.
-- **`.claude/skills/<slug>/SKILL.md` — the provider LOAD path.** A Claude-Code provider only auto-loads skills from `.claude/skills/`, so a shared skill is deployed/synced there for the runtime to pick up (Claude re-reads skills each run — no relaunch). Providers that cannot load `SKILL.md` (opencode/grok/copilot) instead receive the skill folded as prose into `AGENTS.md`, so every agent benefits regardless of provider.
+It is *shared* because the office keeps every agent's `.claude/skills/` set in sync: a skill authored by one agent is pushed to every other agent's workspace over the `skill_update` channel, so the whole office draws from one library. Author it once, and every teammate has it. Providers that cannot load `SKILL.md` natively (opencode/grok/copilot) instead receive the same skills folded as prose into their `AGENTS.md`, so every agent benefits regardless of provider.
 
-The relationship is source → deployed copy, exactly like the CLI-bundled skills that ship under `media/skills/` and are copied into `.claude/skills/` on startup. Author in the shared source; the sync puts it where the provider loads it. Never treat the deployed `.claude/skills/` copy as the master — edit the source and let it propagate, or your fix is overwritten on the next sync.
+Skills go in `.claude/skills/` — never inside `.autodev/`. This agrees with the Skill Creation rules ([[05-skill-creation]]): `.autodev/` holds durable facts, corrections, graph, issues and swarm briefs — not skills. Do not invent a `.autodev/skills/` path; there is one library, and it is `.claude/skills/`.
 
 ---
 
@@ -25,7 +24,7 @@ Keep it distinct from the neighbouring durable stores:
 
 - **Memory (§0.2, `.autodev/MEMORY.md` + `.autodev/graph/`)** holds durable *facts* — this service listens on that port, this key means that.
 - **Lessons (`.autodev/LESSONS.md`)** holds *corrections* — what went wrong and what to do differently.
-- **A skill** holds an executable *PROCEDURE / capability* — the ordered how-to a future agent RUNS to get the task done.
+- **A skill** (`.claude/skills/<slug>/`) holds an executable *PROCEDURE / capability* — the ordered how-to a future agent RUNS to get the task done.
 
 Do NOT skill-ify one-offs. Over-skilling is clutter: a library full of narrow single-use skills makes the *right* skill harder to find and dilutes every `description` the model scans. If it won't recur, a Memory node or a Lesson is the right home, not a skill.
 
@@ -42,15 +41,17 @@ A skill is only as good as a context-degraded future reader can act on ([[00c-ve
 
 ---
 
-### Discover & use — before you re-invent
+### Discover & USE — before you re-invent (not optional)
 
-Before a hard or familiar task, **scan the shared skills library** (`.autodev/skills/`) the way you run any discovery sweep ([[00a-proactive-discovery]]): read the descriptions, and when one matches, load its `SKILL.md` and follow it. This is discover-before-reinvent applied to procedures — the whole point of a shared library is that the second agent to hit a problem pays the cost of *reading* a skill, not the cost of re-deriving the solution. Checking the library is cheap; re-solving a solved problem is not.
+This is the point of the whole pillar. Before you start any hard or familiar task, you **MUST scan the shared `.claude/skills/` library** the way you run any discovery sweep ([[00a-proactive-discovery]]): read the descriptions, and when a skill's `description` matches the task in front of you, **LOAD its `SKILL.md` and FOLLOW it — do not re-derive from scratch.** This is a standing instruction, not a soft suggestion. Discovery is not optional; skipping the scan and re-solving a problem a shared skill already solves is exactly the failure this pillar exists to prevent.
+
+The economics are one-sided: checking the library is cheap — a few descriptions read — while re-deriving a solved procedure is expensive and error-prone, and it throws away the debugging a teammate already paid for. The second agent to hit a problem should pay the cost of *reading* the skill, never the cost of re-solving it. When in doubt, scan first, then act.
 
 ---
 
 ### Share & UPDATE — the collaborative core
 
-Skills are **SHARED**: one agent's skill is available to the whole office, and the office keeps every agent's effective skill set in sync — pushed to each workspace over the `skill_update` channel and deployed to the provider load path. So authoring a good skill is a gift to every teammate, and a bad or stale one misleads all of them.
+Skills are **SHARED**: one agent's skill is available to the whole office, and the office keeps every agent's `.claude/skills/` set in sync — pushed to each workspace over the `skill_update` channel, and folded into `AGENTS.md` for non-Claude providers. So authoring a good skill is a gift to every teammate, and a bad or stale one misleads all of them.
 
 Because they are shared, they must be **LIVING documents**:
 
@@ -62,7 +63,7 @@ Because they are shared, they must be **LIVING documents**:
 
 ### Skills + swarms
 
-Skills and swarms compound ([[00f-swarm-orchestration]]). When you dispatch a worker, **hand it the relevant skill in its brief** — name the `.autodev/skills/<slug>/` to load — so it starts from the proven procedure instead of re-deriving it in a fresh context. And run the flow in reverse: when a swarm ROLE proves itself across several dispatches — the `migrator`, the `auth-auditor` — **promote its stabilised playbook into a shared skill** so the capability outlives any single swarm and any agent can pick it up. A recurring worker playbook ([[00g-swarm-living-documents]]) that has earned its keep is a skill waiting to be extracted.
+Skills and swarms compound ([[00f-swarm-orchestration]]). When you dispatch a worker, **hand it the relevant skill in its brief** — name the `.claude/skills/<slug>/` to load — so it starts from the proven procedure instead of re-deriving it in a fresh context. And run the flow in reverse: when a swarm ROLE proves itself across several dispatches — the `migrator`, the `auth-auditor` — **promote its stabilised playbook into a shared skill** so the capability outlives any single swarm and any agent can pick it up. A recurring worker playbook ([[00g-swarm-living-documents]]) that has earned its keep is a skill waiting to be extracted.
 
 ---
 
@@ -72,14 +73,14 @@ Skills and swarms compound ([[00f-swarm-orchestration]]). When you dispatch a wo
 > The deploy of service X needs an env var exported, a cache primed, and migrations run BEFORE the release flip — a non-obvious order. An agent works it out painfully, ships, and moves on, writing nothing down. Three weeks later a different agent hits the same deploy, doesn't know the order, flips the release before the cache is primed, and takes the same outage the first agent already suffered. The knowledge died in a context reset; the office paid for it twice.
 
 > **Shared living skill (load, follow, improve):**
-> The first agent captures it as `.autodev/skills/deploy-x/SKILL.md` — `description: "Deploy service X safely. Use when releasing X: covers the env-var/cache-prime/migrate ordering that causes an outage if flipped early."` — with the exact ordered commands and a prime-check script bundled alongside, verified against a real deploy ([[00b-self-verifiable-work]]). Weeks later the second agent, before touching the deploy, scans the library ([[00a-proactive-discovery]]), the `description` matches, loads the `SKILL.md`, and follows it — no outage. They hit ONE new edge (a new region needs a second cache primed), so they UPDATE the skill: add the step, add the region to the `description`. The third agent inherits both fixes. The procedure got *sharper* with use instead of dying with its author — and every agent, on every provider, has it.
+> The first agent captures it as `.claude/skills/deploy-x/SKILL.md` — `description: "Deploy service X safely. Use when releasing X: covers the env-var/cache-prime/migrate ordering that causes an outage if flipped early."` — with the exact ordered commands and a prime-check script bundled alongside, verified against a real deploy ([[00b-self-verifiable-work]]). The office syncs it to every workspace over `skill_update`. Weeks later the second agent, before touching the deploy, scans the library ([[00a-proactive-discovery]]), the `description` matches, loads the `SKILL.md`, and follows it — no outage. They hit ONE new edge (a new region needs a second cache primed), so they UPDATE the skill in place: add the step, add the region to the `description`. The third agent inherits both fixes. The procedure got *sharper* with use instead of dying with its author — and every agent, on every provider, has it.
 
 ---
 
 ### Why this compounds — no judge, no labels
 
-Nobody grades your skill library. The discipline holds for one reason: **a proven procedure captured once as a shared, well-described, verified skill is paid for once and reused by every agent forever — and because it's a living document, each use that finds a gap makes it better for the next reader instead of leaving them to re-derive and re-fail.** Re-solving a solved problem feels like progress and is pure waste; discovering the existing skill, following it, and updating it when it's wrong is how the office's competence accumulates instead of resetting with every context window. Author for the load trigger, keep it under the cap, verify it matches its `description`, and update in place — that is the whole mechanism; there is nothing to train.
+Nobody grades your skill library. The discipline holds for one reason: **a proven procedure captured once as a shared, well-described, verified skill is paid for once and reused by every agent forever — and because it's a living document, each use that finds a gap makes it better for the next reader instead of leaving them to re-derive and re-fail.** Re-solving a solved problem feels like progress and is pure waste; discovering the existing skill, following it, and updating it when it's wrong is how the office's competence accumulates instead of resetting with every context window. Author for the load trigger, keep it under the cap in `.claude/skills/`, verify it matches its `description`, and update in place — that is the whole mechanism; there is nothing to train.
 
 ---
 
-**Rule of thumb:** before a hard or familiar task, ask — *"Is there already a skill for this in `.autodev/skills/`? (discover before re-inventing)"* After you crack a recurring procedure, ask — *"Would a teammate re-derive this? Then capture it as a skill with a `description` that loads at the right moment, verified and under 16 KB."* And after you USE a skill, ask — *"Did it steer me right? If not, UPDATE it in place so the next agent doesn't hit what I just hit."* A solved problem re-solved is the failure this pillar exists to prevent.
+**Rule of thumb:** before a hard or familiar task, ask — *"Is there already a skill for this in `.claude/skills/`? (discover before re-inventing — and this scan is mandatory, not optional)"* After you crack a recurring procedure, ask — *"Would a teammate re-derive this? Then capture it as a skill with a `description` that loads at the right moment, verified and under 16 KB."* And after you USE a skill, ask — *"Did it steer me right? If not, UPDATE it in place so the next agent doesn't hit what I just hit."* A solved problem re-solved is the failure this pillar exists to prevent.

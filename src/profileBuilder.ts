@@ -67,6 +67,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00f-swarm-orchestration', label: 'Swarm Orchestration', file: '00f-swarm-orchestration.md',
+    keyRules: [
+      'Your context window is finite — grinding a hard/broad/context-heavy task alone fills it and you DEGRADE mid-task (the out-of-context failure). Become the orchestrator: decompose ([[00e-long-horizon-planning]]) and delegate the heavy reading to workers who burn their OWN fresh contexts, keeping yours lean for the plan+steering. The tell "I\'m about to read a lot to answer this" = delegate it. Small edit/quick lookup → do inline; do NOT over-swarm.',
+      'Stay lean: never pull raw file dumps/logs/large outputs into your own window — have workers read and return only the distilled result (conclusion/diff/artifact), in a shape you specify. Bias to parallel fan-out for independent sub-tasks. Spawn via your provider\'s subagent capability (native Task-style spawn) OR assign the slice as an office task to a teammate (send_message + their get_tasks; pick with list_agents/agent_profile/agent_tasks); collect returns with wait_for_events.',
+      'Every worker gets a LIVING DOCUMENT at .autodev/swarm/<agent-slug>/AGENT.md (same durable .autodev/ tree as graph/issues; write with your file tools) — a self-contained brief AND running log: role, scope (owns/must-not-touch), real handles (paths/commands/acceptance) for a context-degraded reader ([[00c-verifiable-threads]]), input→output contract, reusable playbook, progress log. It PERSISTS → reuse+refine for recurring hard tasks. On return VERIFY don\'t rubber-stamp ([[00b-self-verifiable-work]]), reconcile vs plan, honest verdict ([[00d-turn-end-retrospective]]).',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

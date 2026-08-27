@@ -74,6 +74,8 @@ Verifying a return yourself catches the obvious gaps; the subtle ones need an ad
 > **Critic-gated (accept only what survives):**
 > Producer returns the same *"refactored, tests pass ✅."* Orchestrator dispatches an INDEPENDENT critic worker — `.autodev/swarm/refactor-critic/AGENT.md`, prompted to refute — that checks the actual acceptance criterion and the edge cases the producer's tests conveniently omit. It returns two real findings: `billing.ts:212 — proration on a mid-cycle downgrade never exercised, off-by-one on days remaining — HIGH` and `billing.ts:288 — refund path swallows a negative total, no test — MED`. Back to the producer to fix, re-critique, and only THEN accept — with a verdict that says "survived a correctness+edge critic," not "the worker said ✅."
 
+And critique is not the last gate. Critics *reason about* the artifact; they don't *run* it. So after the critics pass and the fixes land, an independent QA swarm tests the real product change end-to-end each cycle — running the built/deployed thing, not re-reading the diff — and the cycle is accepted only when QA passes. See **[[00i-qa-swarm]]**.
+
 ---
 
 ### Before / after — the single-window grind vs the swarm

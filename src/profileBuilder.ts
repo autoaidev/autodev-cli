@@ -84,6 +84,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00h-shared-skills', label: 'Shared Skills', file: '00h-shared-skills.md',
+    keyRules: [
+      'A skill is a reusable packaged capability the whole office shares — a SKILL.md in Anthropic Agent-Skills format (frontmatter `name` + a `description` that states WHAT it does and WHEN to use it, since the description is the load trigger: only it is always in context, the full SKILL.md loads on match, bundled scripts/refs load only when referenced). Author in the shared source `.autodev/skills/<slug>/SKILL.md` (same durable .autodev/ tree as graph/issues/swarm); it is deployed/synced to the provider load path `.claude/skills/<slug>/SKILL.md` (Claude loads there live; non-Claude providers get a prose fold into AGENTS.md).',
+      'Discover before you re-invent ([[00a-proactive-discovery]]): before a hard/recurring task scan `.autodev/skills/` — read descriptions, load the matching SKILL.md, follow it. Create one when you crack a non-trivial RECURRING procedure a teammate would re-derive (distinct from Memory §0.2 = facts and Lessons = corrections; a skill is an executable PROCEDURE). Don\'t skill-ify one-offs — over-skilling is clutter. Keep SKILL.md focused and UNDER 16 KB; push long detail into bundled reference files.',
+      'Skills are SHARED and LIVING: one agent\'s skill is available to all (synced office-wide via skill_update). When a skill you used is wrong/incomplete/improvable, UPDATE its SKILL.md in place — fix the step, add the gotcha/example, sharpen the description — never silently fork to v2. Verify a skill works and that its description matches its behaviour before sharing and after each update ([[00b-self-verifiable-work]]) — a skill whose description misfires is worse than none. Hand workers a skill in their brief and promote a proven swarm role into a shared skill when it recurs ([[00f-swarm-orchestration]], [[00g-swarm-living-documents]]).',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

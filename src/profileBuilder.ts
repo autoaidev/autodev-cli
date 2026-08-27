@@ -76,6 +76,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00g-swarm-living-documents', label: 'Swarm Living Documents', file: '00g-swarm-living-documents.md',
+    keyRules: [
+      'A swarm worker\'s brief is not one file but a SET of small bounded living documents under .autodev/swarm/<agent-slug>/ — mirroring how a real autodev agent is structured: AGENT.md (role/scope/real-handles/input→output contract/playbook + an INDEX to siblings), SOUL.md (its identity+specialty, §0.0), MEMORY.md (durable facts it accrues, the delegation analog of §0.2 / .autodev/graph/), LESSONS.md (corrections + what worked/didn\'t, so the reusable role sharpens each pass), TODO.md (its task list + running progress log). The split IS the durability — each survives a context reset and loads on its own.',
+      'The 16 KB-per-file cap is a HARD invariant — the same cap every profile pillar obeys. Living docs are read INTO context, so a file over the cap bloats the reader and defeats staying lean ([[00f-swarm-orchestration]]). When a file approaches the limit SPLIT it — by topic, by time (archive older MEMORY to dated sub-files), or into a linked sub-file — so every piece stays digestible. A doc crossing 16 KB is a bug, not housekeeping-for-later.',
+      'Provision each worker with the FULL autodev profile (pillars 00a–00g + the rest), not a one-line prompt — so a worker is a real, fully-capable agent that can plan ([[00e-long-horizon-planning]]), verify ([[00b-self-verifiable-work]]), and even orchestrate its own sub-swarm, never a thin one-shot helper that grinds its slice in one window. How it arrives depends on the worker: a full autodev agent builds its own .autodev/profile/ on startup; a provider subagent inherits/references the parent\'s pillars; a seeded worker gets the set written under .autodev/swarm/<slug>/. Each profile section is itself its own md under 16 KB.',
+    ],
+  },
+  {
     id: '01-learning', label: 'Session Start Order (SUMMARY.md)', file: '01-learning.md',
     keyRules: [
       'Read in order: SOUL.md → AGENTS.md → SUMMARY.md → LESSONS.md → CONTRACTS.md → open issues → KB → TODO.md.',

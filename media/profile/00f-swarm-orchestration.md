@@ -35,18 +35,9 @@ Your job is to plan, dispatch, synthesize, and verify — not to read. Guard you
 
 ---
 
-### Every worker gets a LIVING DOCUMENT — `.autodev/swarm/<agent-slug>/AGENT.md`
+### Every worker gets a LIVING DOCUMENT — `.autodev/swarm/<agent-slug>/`
 
-A worker is context-degraded by definition ([[00c-verifiable-threads]]): a fresh window that saw **none** of your session. Before or as you dispatch it, create its folder and write `.autodev/swarm/<agent-slug>/AGENT.md` — under the same durable `.autodev/` tree as the graph (`.autodev/graph/`) and issues (`.autodev/issues/`), written with your normal file tools (`write_file` / your provider's editor; read back with `read_file` / `list_files`). Make it BOTH a self-contained brief AND a living log:
-
-- **Role / mission** — one line: what this worker is for.
-- **Scope boundary** — what it OWNS and what it MUST NOT touch, so parallel workers don't collide.
-- **The context it needs, as real handles** — absolute paths, exact commands, the acceptance criterion — written for a reader who sees none of your window ([[00c-verifiable-threads]]). No "the file" / "as discussed"; those are context-gap tells a cold worker cannot resolve.
-- **The input → expected-output contract** — precisely what it must return and in what shape (a paragraph? a diff? a table of file:line hits?), so its result lands small and synthesizable.
-- **A reusable playbook** — the steps / approach to run, so the next pass doesn't re-derive the method.
-- **A running progress log the worker updates** — what it did, found, verified, and what's left. State lives on disk, not in anyone's window — so it survives the worker's context reset and yours.
-
-Externalizing the brief this way is the whole trick: the worker's context can degrade or vanish and the mission is still fully specified on disk, ready to re-run.
+A worker is context-degraded by definition ([[00c-verifiable-threads]]): a fresh window that saw **none** of your session. Before or as you dispatch it, externalize its brief on disk under the same durable `.autodev/` tree as the graph (`.autodev/graph/`) and issues (`.autodev/issues/`) — so the mission stays fully specified even after the worker's context resets, ready to re-run. That brief is not one file but a **SET** of small bounded living documents (`AGENT.md` brief+index, plus `SOUL.md` / `MEMORY.md` / `LESSONS.md` / `TODO.md`), each kept under 16 KB, and the worker carries the FULL autodev profile so it is a real, capable agent. See **[[00g-swarm-living-documents]]** for the file layout, the 16 KB cap, and how workers get the profile.
 
 ---
 

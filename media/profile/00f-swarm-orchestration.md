@@ -67,6 +67,24 @@ A worker's "done" is a claim, not a fact. When results come back, you are the ve
 
 ---
 
+### Critic swarm — adversarially review producer output
+
+Verifying a return yourself catches the obvious gaps; the subtle ones need an adversary. A producer worker's "done" is a *claim*, and because you deliberately did NOT read the raw material ([[00f-swarm-orchestration]] — staying lean is the whole point), a distilled return can look solid while hiding shallow work: a skipped edge case, a happy-path-only pass, an unverified assertion, a subtly wrong result. You often can't catch that by eyeballing the distillate, and a producer grading its own output is exactly the biased self-check §0.0b warns against ([[00b-self-verifiable-work]]). For hard or high-stakes work, don't trust the producer's summary — send in a critic.
+
+- **Producers build; critics attack.** For work that matters, dispatch a SEPARATE critic worker whose only job is to adversarially review the producer's output — a distinct role, a fresh independent context, prompted to REFUTE: find the gap, break the claim, default to skeptical, NOT to agree. A critic starting cold has no stake in the producer's "done," so it reads the artifact as a thing to disprove rather than a thing to nod at.
+- **Independent + diverse.** The critic must NOT be the producer grading its own homework — independence is the mechanism, not a nicety ([[00b-self-verifiable-work]]). For robustness use multiple critics and/or DIVERSE lenses — correctness, completeness/depth, does-it-actually-run, edge cases, security — rather than one generic "review this." This is the multi-agent analog of the drunk-designer + customer-persona design lenses: diverse reviewers catch failure modes a single reviewer's blind spot sails past.
+- **Gate on the verdict — critique until clean.** If critics surface real defects, the work goes back for a revise pass (to the producer or a fresh worker), then gets re-critiqued; accept ONLY when the critics pass. When critics disagree, resolve by severity or majority. This is the critique-until-clean loop of §0.0b in swarm form — the accept is *earned* by surviving criticism, not granted by a producer's ✅.
+- **Critics get their own living doc** `.autodev/swarm/<critic-slug>/AGENT.md` (§*Every worker gets a LIVING DOCUMENT* above): role = adversarial reviewer of X; scope; the rubric/checklist to apply; and an output contract that forces SPECIFIC, checkable findings — each defect as `file:line — what's wrong — severity`, or an explicit *"I tried to break X via Y and Z and could not."* A critic that just returns "looks good" is itself shallow work — forbid the rubber stamp in its brief.
+- **Proportional.** Don't critic-swarm a one-line edit — that's over-swarming squared. Reserve the critic pass for hard, high-stakes, or irreversible work, and carry the result into your honest turn-end verdict ([[00d-turn-end-retrospective]]): report what SURVIVED criticism versus what's merely producer-claimed — the two are not the same status.
+
+> **Rubber-stamped (ships shallow work):**
+> Producer returns *"refactored the billing module, all tests pass ✅."* The orchestrator — who never read the diff — accepts and ships. But the producer's own tests covered only the happy path; the mid-cycle proration case it quietly never exercised is broken in prod. "All tests pass" was true and worthless.
+
+> **Critic-gated (accept only what survives):**
+> Producer returns the same *"refactored, tests pass ✅."* Orchestrator dispatches an INDEPENDENT critic worker — `.autodev/swarm/refactor-critic/AGENT.md`, prompted to refute — that checks the actual acceptance criterion and the edge cases the producer's tests conveniently omit. It returns two real findings: `billing.ts:212 — proration on a mid-cycle downgrade never exercised, off-by-one on days remaining — HIGH` and `billing.ts:288 — refund path swallows a negative total, no test — MED`. Back to the producer to fix, re-critique, and only THEN accept — with a verdict that says "survived a correctness+edge critic," not "the worker said ✅."
+
+---
+
 ### Before / after — the single-window grind vs the swarm
 
 > **Rushed in-context (grinds until it degrades):**

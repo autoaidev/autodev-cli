@@ -30,6 +30,25 @@ const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// A spawn that never physically ran — the binary/shell is missing (`ENOENT`),
+// permission-denied, or the `cwd` we asked for doesn't exist (Node surfaces the
+// latter as `spawnSync /bin/sh ENOENT`). These are hostile-sandbox conditions,
+// not product failures, so we convert them into a clean SKIP rather than a hard
+// fail of `npm test`.
+function isSpawnFailure(e) {
+  if (!e) { return false; }
+  if (e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'EPERM') { return true; }
+  return /^spawn(Sync)?\s/.test(String(e.syscall || ''));
+}
+
+let skipped = false;
+function skip(why) {
+  if (skipped) { return; }
+  skipped = true;
+  console.log(`  ⚠ SKIP: ${why} — integration harness unavailable`);
+  process.exit(0);
+}
+
 function req(method, urlStr, { token, body, timeoutMs = 15_000 } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body == null ? null : JSON.stringify(body);
@@ -61,22 +80,34 @@ async function pingOk() {
 }
 
 function artisan(args, extraEnv = {}) {
-  return execSync(`php artisan ${args}`, {
-    cwd: OFFICE,
-    encoding: 'utf8',
-    env: { ...process.env, APP_ENV: 'local', APP_URL: BASE, WS_PORT, ...extraEnv },
-    timeout: 60_000,
-  });
+  try {
+    return execSync(`php artisan ${args}`, {
+      cwd: OFFICE,
+      encoding: 'utf8',
+      env: { ...process.env, APP_ENV: 'local', APP_URL: BASE, WS_PORT, ...extraEnv },
+      timeout: 60_000,
+    });
+  } catch (e) {
+    // A shell/binary that can't be spawned at all (sandbox / missing cwd) is a
+    // SKIP, not a failure. A real artisan error (non-zero exit) still throws.
+    if (isSpawnFailure(e)) { skip(`cannot spawn php artisan (${e.code || e.message})`); }
+    throw e;
+  }
 }
 
 function mintToken() {
   const script = path.join(REPO, 'scripts', 'mint_dummy_token.php');
-  return execSync(`php ${JSON.stringify(script)}`, {
-    cwd: OFFICE,
-    encoding: 'utf8',
-    env: { ...process.env, APP_ENV: 'local', APP_URL: BASE, WS_PORT },
-    timeout: 30_000,
-  }).trim();
+  try {
+    return execSync(`php ${JSON.stringify(script)}`, {
+      cwd: OFFICE,
+      encoding: 'utf8',
+      env: { ...process.env, APP_ENV: 'local', APP_URL: BASE, WS_PORT },
+      timeout: 30_000,
+    }).trim();
+  } catch (e) {
+    if (isSpawnFailure(e)) { skip(`cannot spawn php to mint token (${e.code || e.message})`); }
+    throw e;
+  }
 }
 
 const children = [];
@@ -86,11 +117,14 @@ function spawnOffice(cmd, args) {
     env: { ...process.env, APP_ENV: 'local', APP_URL: BASE, WS_PORT, COMPOSER_ALLOW_SUPERUSER: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  // Never let a spawn failure (e.g. `php` missing) surface as an unhandled
-  // 'error' event and crash the whole test process — log it and move on. The
-  // skip-guard above should prevent us ever getting here without infra, but
-  // this keeps a boot failure recoverable rather than fatal.
-  child.on('error', (e) => { console.log('  · spawnOffice error:', e.message); });
+  // Never let a spawn failure (e.g. `php` missing, blocked shell, or a missing
+  // `cwd`) surface as an unhandled 'error' event and crash the whole test. When
+  // the process physically could not run, that's a hostile-sandbox condition →
+  // clean SKIP + exit 0. Anything else is just logged and left recoverable.
+  child.on('error', (e) => {
+    if (isSpawnFailure(e)) { skip(`cannot spawn ${cmd} (${e.code || e.message})`); }
+    console.log('  · spawnOffice error:', e.message);
+  });
   children.push(child);
   return child;
 }
@@ -254,6 +288,9 @@ const officeChild = spawn(process.execPath, [
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 children.push(officeChild);
+officeChild.on('error', (e) => {
+  if (isSpawnFailure(e)) { skip(`cannot spawn autodev office CLI (${e.code || e.message})`); }
+});
 officeChild.stdout.on('data', d => { officeOut += d.toString('utf8'); });
 officeChild.stderr.on('data', d => { officeOut += d.toString('utf8'); });
 

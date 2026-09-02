@@ -161,11 +161,65 @@ function shellQuotePath(p_: string): string {
   return `"${p_.replace(/\\/g, '/')}"`;
 }
 
-/** Use the exact Node runtime running the extension host.
+/** Look for a real `node` executable on PATH (absolute path). Returns null if
+ *  none is found. Used only when process.execPath is NOT a plain node binary
+ *  (i.e. we're running inside an Electron host — see hookNodeBinary). */
+function resolveNodeOnPath(): string | null {
+  const isWin = process.platform === 'win32';
+  const names = isWin ? ['node.exe', 'node.cmd', 'node'] : ['node'];
+  const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':').filter(Boolean);
+  for (const name of names) {
+    for (const dir of dirs) {
+      const full = path.join(dir, name);
+      try { if (fs.existsSync(full)) { return full; } } catch { /* ignore */ }
+    }
+  }
+  return null;
+}
+
+/** Basename looks like a genuine Node runtime (node / nodejs, optional .exe). */
+function isNodeBasename(exe: string): boolean {
+  return /^node(js)?(\.exe)?$/i.test(path.basename(exe));
+}
+
+/**
+ * Absolute path to a real Node runtime to bake into a hook command.
+ *
+ * `process.execPath` is normally the node binary — but when the CLI's
+ * hooksManager runs inside an Electron host (the VS Code extension, whose
+ * extension host IS Electron), execPath is the `code`/electron binary. Baking
+ * THAT into a hook command is the "constantly opens VS Code" bug: Claude/Copilot
+ * run the hook command on every tool event, and an Electron binary invoked with a
+ * script argument OPENS A VS CODE WINDOW instead of executing the script — it only
+ * behaves as node when ELECTRON_RUN_AS_NODE=1 is set. So:
+ *   - real node execPath        → use it (an absolute path, always resolvable).
+ *   - Electron execPath         → resolve a genuine `node` on PATH (also absolute,
+ *                                 so the hook's own minimal PATH is irrelevant).
+ * Only if no real node is found do we fall back to execPath, which nodeExec()
+ * then forces into node mode via ELECTRON_RUN_AS_NODE=1.
+ */
+function hookNodeBinary(): string {
+  const exe = process.execPath;
+  if (isNodeBasename(exe) && !process.versions.electron) { return exe; }
+  return resolveNodeOnPath() ?? exe;
+}
+
+/** Use a real Node runtime for hook subprocesses.
  * Copilot hook subprocesses can have a minimal PATH (especially on headless
- * hosts), so relying on bare `node` may fail and drop hook events. */
+ * hosts), so we bake an ABSOLUTE node path rather than relying on bare `node`.
+ * When only an Electron binary is available (no node on PATH), force it to act
+ * as node so the hook never spawns an editor window. */
 function nodeExec(): string {
-  return shellQuotePath(process.execPath);
+  const bin = hookNodeBinary();
+  const quoted = shellQuotePath(bin);
+  // If the only runtime we could bake is the Electron binary itself, it must run
+  // with ELECTRON_RUN_AS_NODE=1 or every hook event opens VS Code.
+  const isElectronFallback = bin === process.execPath && (!!process.versions.electron || !isNodeBasename(bin));
+  if (!isElectronFallback) { return quoted; }
+  // POSIX shells accept a `VAR=val cmd` prefix. On the (rare) Windows case where
+  // node is unresolvable under Electron, emit the bare path — node.exe is almost
+  // always on PATH there, so this branch effectively never runs.
+  return process.platform === 'win32' ? quoted : `ELECTRON_RUN_AS_NODE=1 ${quoted}`;
 }
 
 /** Shell command for Claude Code — Claude already includes hook_event_name in
@@ -246,8 +300,10 @@ function isCurrentClaudeEntry(group: any, workspaceRoot: string): boolean {
   const cmd = group.hooks?.[0]?.command;
   if (typeof cmd !== 'string') return false;
   const expectedSink = hooksJsonlPath(workspaceRoot).replace(/\\/g, '/');
-  const expectedNode = process.execPath.replace(/\\/g, '/');
+  const expectedNode = hookNodeBinary().replace(/\\/g, '/');
   // Also require the .mjs extension so legacy .js installs are re-migrated.
+  // Match on the resolved node binary (not raw execPath): an entry baked with the
+  // Electron binary is thus seen as stale and re-installed with a real node path.
   return cmd.includes(JSON.stringify(expectedSink))
     && cmd.includes('hook-append.mjs')
     && cmd.includes(expectedNode);
@@ -355,7 +411,7 @@ function isAutodevCopilotEntry(entry: any): boolean {
 function isCurrentCopilotEntry(entry: any, workspaceRoot: string): boolean {
   if (!isAutodevCopilotEntry(entry)) return false;
   const expectedSink = hooksJsonlPath(workspaceRoot).replace(/\\/g, '/');
-  const expectedNode = process.execPath.replace(/\\/g, '/');
+  const expectedNode = hookNodeBinary().replace(/\\/g, '/');
   const cmd = entry?.bash ?? entry?.powershell ?? '';
   // Also require the .mjs extension so legacy .js installs are re-migrated.
   // Also require the powershell field (added in v1.0.218) so Windows installs

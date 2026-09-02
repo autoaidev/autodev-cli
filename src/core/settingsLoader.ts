@@ -98,6 +98,13 @@ export interface AutodevSettings {
    */
   grokModel: string;
   /**
+   * Optional model override for the Dummy provider (used in tests / demos).
+   * When set, `resolveConfiguredModel` surfaces it as the agent's model.
+   * Leave empty to use the dummy provider's own default. Mirrors the other
+   * per-provider model keys (`claudeModel`/`grokModel`/…).
+   */
+  dummyModel: string;
+  /**
    * When true, writes `setCacheKey: true` into the provider options of the
    * project-level `opencode.json`, enabling prompt/model caching.
    */
@@ -280,6 +287,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   opencodeModel: '',
   sessionName: '',
   grokModel: '',
+  dummyModel: '',
   opencodeCacheEnabled: false,
   mcpServers: {},
   disabledBuiltinMcp: [],

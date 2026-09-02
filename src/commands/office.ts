@@ -8,6 +8,7 @@ import { log } from '../logger';
 import { applyWsUrl } from '../connect';
 import { fetchJsonAuth, preflight } from '../core/officeAuth';
 import { DEFAULT_BASE_URL, loadUserConfig } from '../core/userConfig';
+import { isUserStopped } from '../core/stopMarker';
 
 // ---------------------------------------------------------------------------
 // `autodev office <slug>` — run a WHOLE office with one command.
@@ -175,6 +176,10 @@ export function officeCommand(program: Command): void {
       // reservation that closes that TOCTOU window.
       const starting = new Set<string>();
       const notedOnline = new Set<string>();
+      // Characters the user explicitly STOPPED (a `.autodev/stopped` marker in
+      // their workspace). We must not respawn these — logged once each to avoid
+      // spamming the watcher output every poll.
+      const notedStopped = new Set<string>();
       let stopping = false;
 
       // Never send the agent token to a host the user didn't point us at. Mirrors
@@ -283,6 +288,19 @@ export function officeCommand(program: Command): void {
             continue;
           }
           notedOnline.delete(a.id);
+          // Honor a user Stop: while the workspace carries a `.autodev/stopped`
+          // marker (written by the desktop app's Stop), do NOT respawn it —
+          // otherwise the watcher resurrects a deliberately-stopped agent ~15s
+          // later. Cleared only by an explicit start.
+          const dir = path.join(root, safeSeg(a.slug));
+          if (isUserStopped(dir)) {
+            if (!notedStopped.has(a.id)) {
+              log.gray(`  • ${a.name} was stopped by the user — not restarting (start it to resume).`);
+              notedStopped.add(a.id);
+            }
+            continue;
+          }
+          notedStopped.delete(a.id);
           await startAgent(a);
         }
       };

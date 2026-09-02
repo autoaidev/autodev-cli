@@ -7,6 +7,7 @@ import { CLI_VERSION } from '../version';
 import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
 import { TODO_TEMPLATE } from './init';
 import { installHooks, areHooksInstalled } from '../hooksManager';
+import { clearUserStopped } from '../core/stopMarker';
 
 const PROVIDERS = ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui', 'dummy'] as const;
 
@@ -44,6 +45,13 @@ export function startCommand(program: Command): void {
           process.exit(0);
         }
       }
+
+      // An explicit start is the user asking this workspace to RUN — clear any
+      // "stay stopped" marker so this loop isn't treated as user-stopped and a
+      // supervisor is free to keep it online again. (The office watcher never
+      // spawns `start` while the marker exists, so this only fires on a genuine
+      // manual/app start.)
+      clearUserStopped(cwd);
 
       // Parent-death watchdog: when a manager spawns this loop and sets
       // AUTODEV_EXIT_WITH_PARENT=1 (the desktop app does), exit if that parent

@@ -100,6 +100,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00k-internal-workflows', label: 'Internal Workflows', file: '00k-internal-workflows.md',
+    keyRules: [
+      'Prefer a DETERMINISTIC internal workflow over ad-hoc one-off spawns for anything multi-stage or fan-out: explicit stages (produce → validate → critique → synthesize), fan-out one worker per unit for breadth, barriers only where a stage genuinely needs all prior results, loop-until-clean. If you\'re about to hand-spawn agents in sequence and eyeball the returns, that sequence IS a workflow — encode it. Determinism + reproducibility + coverage are the point; ad-hoc spawning is the exception ([[00f-swarm-orchestration]], [[00e-long-horizon-planning]]).',
+      'Validation and critique run as SEPARATE cohorts INDEPENDENT of the producer — no self-grading. Producer builds → a separate critic swarm reads it to REFUTE (diverse lenses) → a separate validation/QA swarm RUNS the real thing; three distinct roles, three fresh contexts. Independence is what makes the signal trustworthy ([[00b-self-verifiable-work]], [[00f-swarm-orchestration]] critic, [[00i-qa-swarm]]). A producer\'s own "done ✅" and green tests pass by construction and are not verification.',
+      'Adversarial + durable: critics try to BREAK the work, and a finding (or a clean verdict) counts only if it survives an independent pass — accept only what refutation and a real run could not break. Each cohort gets its living-document set under .autodev/swarm/<slug>/ (each <16 KB, [[00g-swarm-living-documents]]); outputs feed MEMORY/LESSONS/TODO and any unresolved items go to the deferred set to be swept before turn end ([[00j-deferred-task-resolution]], [[00d-turn-end-retrospective]]).',
+    ],
+  },
+  {
     id: '00h-shared-skills', label: 'Shared Skills', file: '00h-shared-skills.md',
     keyRules: [
       'A skill is a reusable packaged capability the whole office shares — a SKILL.md in Anthropic Agent-Skills format (frontmatter `name` + a `description` that states WHAT it does and WHEN to use it, since the description is the load trigger: only it is always in context, the full SKILL.md loads on match, bundled scripts/refs load only when referenced). The shared library IS `.claude/skills/<slug>/SKILL.md` — the real Claude skills location the provider auto-loads and re-reads each run; there is no separate `.autodev/skills/` source. The office keeps every agent\'s `.claude/skills/` in sync over the `skill_update` channel (non-Claude providers get a prose fold into AGENTS.md), so a skill authored by one agent is shared with all.',

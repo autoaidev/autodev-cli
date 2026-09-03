@@ -67,6 +67,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00j-deferred-task-resolution', label: 'Deferred-Task Resolution', file: '00j-deferred-task-resolution.md',
+    keyRules: [
+      'The moment you defer a task ("TODO later"/follow-up/"out of scope for now"), record it in the DURABLE deferred set — TODO.md (manage_agent_todos) as [ ] with WHY + the real handle, plus Memory (§0.2)/graph (§0.20) for a durable fact — never a passing thought in your head that a context reset erases ([[00g-swarm-living-documents]], [[00c-verifiable-threads]]).',
+      'Before ending the turn, SWEEP the deferred set and actively try to CLOSE each item now — the default is resolve, not re-defer; a task re-listed unchanged turn after turn IS the parked-backlog failure. Closing meets the same bar as any [x]: an objective check ran ([[00b-self-verifiable-work]]). This is a turn-end action alongside the retrospective ([[00d-turn-end-retrospective]]).',
+      'A task may stay deferred past the sweep ONLY if genuinely blocked (missing input, external dependency, human/peer decision) — and then record BOTH the block reason AND the concrete unblock condition in the living docs so it resurfaces next cycle. "Autodev" means no indefinite parking: a leftover task with no written unblock condition is a DROPPED task and a failure mode, not a normal state ([[00d-turn-end-retrospective]], [[00e-long-horizon-planning]]).',
+    ],
+  },
+  {
     id: '00f-swarm-orchestration', label: 'Swarm Orchestration', file: '00f-swarm-orchestration.md',
     keyRules: [
       'Your context window is finite — grinding a hard/broad/context-heavy task alone fills it and you DEGRADE mid-task (the out-of-context failure). Become the orchestrator: decompose ([[00e-long-horizon-planning]]) and delegate the heavy reading to workers who burn their OWN fresh contexts, keeping yours lean for the plan+steering. The tell "I\'m about to read a lot to answer this" = delegate it. Small edit/quick lookup → do inline; do NOT over-swarm.',

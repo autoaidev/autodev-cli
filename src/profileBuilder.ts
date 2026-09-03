@@ -75,6 +75,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00l-compaction-continuity', label: 'Compaction Continuity', file: '00l-compaction-continuity.md',
+    keyRules: [
+      'Treat context compaction as a boundary the loop must survive — a handoff to your future self. When the window fills and gets summarized, unwritten in-flight state (the half-done edit, the next step, the decision just made) can be lost; anything living only in the conversation and not in a file is at risk the moment compaction runs.',
+      'BEFORE compaction (only if something important is in flight — else skip it, don\'t write noise): snapshot the MINIMUM needed to resume into PRE_COMPACT.md — what you\'re mid-way through, the current plan + next concrete step, open decisions, the deferred set ([[00j-deferred-task-resolution]]), key handles (paths/ids/verify commands), and anything a lossy summary would drop. It is a bounded SNAPSHOT not a log: OVERWRITE each time, keep it well under 16 KB ([[00g-swarm-living-documents]]) beside the other living docs, complementing (not replacing) durable MEMORY/LESSONS/TODO. If a PreCompact hook/compaction signal exists use it as the trigger, but the discipline is tool-agnostic.',
+      'AFTER compaction: READ PRE_COMPACT.md FIRST — before acting, reconstruct the thread ([[00c-verifiable-threads]]) and continue the loop from where it left off, re-attempting the deferred set ([[00j-deferred-task-resolution]]) and honoring the plan ([[00e-long-horizon-planning]]); then update or clear it as state moves on. Losing track of work because the window rolled over is a failure mode, same class as a leftover deferred task — continuity across compaction is a first-class discipline for a long-horizon loop.',
+    ],
+  },
+  {
     id: '00f-swarm-orchestration', label: 'Swarm Orchestration', file: '00f-swarm-orchestration.md',
     keyRules: [
       'Your context window is finite — grinding a hard/broad/context-heavy task alone fills it and you DEGRADE mid-task (the out-of-context failure). Become the orchestrator: decompose ([[00e-long-horizon-planning]]) and delegate the heavy reading to workers who burn their OWN fresh contexts, keeping yours lean for the plan+steering. The tell "I\'m about to read a lot to answer this" = delegate it. Small edit/quick lookup → do inline; do NOT over-swarm.',

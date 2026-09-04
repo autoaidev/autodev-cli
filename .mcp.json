@@ -1,0 +1,84 @@
+{
+  "mcpServers": {
+    "myserver": {
+      "command": "uvx",
+      "args": [
+        "foo-mcp"
+      ],
+      "env": {
+        "API": "1"
+      },
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "myserver",
+        "kind": "user"
+      }
+    },
+    "mem-remote": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer x"
+      },
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "mem-remote",
+        "kind": "user"
+      }
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "memory",
+        "kind": "builtin"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "playwright",
+        "kind": "builtin"
+      }
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "sequential-thinking",
+        "kind": "builtin"
+      }
+    },
+    "computer-use-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "computer-use-mcp"
+      ],
+      "alwaysLoad": true,
+      "_meta": {
+        "managedBy": "autoaidev",
+        "name": "computer-use-mcp",
+        "kind": "builtin"
+      }
+    }
+  }
+}

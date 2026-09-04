@@ -1,0 +1,59 @@
+{
+  "mcp": {
+    "memory": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "enabled": true
+    },
+    "playwright": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": true
+    },
+    "sequential-thinking": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "enabled": true
+    },
+    "computer-use-mcp": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "computer-use-mcp"
+      ],
+      "enabled": true
+    },
+    "myserver": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "foo-mcp"
+      ],
+      "enabled": true,
+      "environment": {
+        "API": "1"
+      }
+    },
+    "mem-remote": {
+      "type": "remote",
+      "url": "https://example.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer x"
+      }
+    }
+  }
+}

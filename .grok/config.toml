@@ -1,0 +1,34 @@
+[mcp_servers.memory]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+enabled = true
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+enabled = true
+
+[mcp_servers.sequential-thinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+enabled = true
+
+[mcp_servers.computer-use-mcp]
+command = "npx"
+args = ["-y", "computer-use-mcp"]
+enabled = true
+
+[mcp_servers.myserver]
+command = "uvx"
+args = ["foo-mcp"]
+enabled = true
+
+[mcp_servers.myserver.env]
+API = "1"
+
+[mcp_servers.mem-remote]
+url = "https://example.com/mcp"
+enabled = true
+
+[mcp_servers.mem-remote.headers]
+Authorization = "Bearer x"

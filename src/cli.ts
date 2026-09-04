@@ -16,6 +16,7 @@ import { officeCommand } from './commands/office';
 import { deprovisionCommand } from './commands/deprovision';
 import { loginCommand } from './commands/login';
 import { modelsCommand } from './commands/models';
+import { mcpCommand } from './commands/mcp';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -105,6 +106,7 @@ officeCommand(program);
 deprovisionCommand(program);
 loginCommand(program);
 modelsCommand(program);
+mcpCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error((err as Error).message);

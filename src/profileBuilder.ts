@@ -83,6 +83,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00n-context-checkpoints', label: 'Context Checkpoints', file: '00n-context-checkpoints.md',
+    keyRules: [
+      'User says "save progress/state/my work/context" → run Context-Save; "resume where I left off / restore context / where was I" → run Context-Restore. Checkpoints are the durable, browsable, cross-session/worktree counterpart to the transient single-slot PRE_COMPACT.md snapshot ([[00l-compaction-continuity]]); both write for a degraded future reader ([[00c-verifiable-threads]]).',
+      'Context-Save (CAPTURE ONLY, no code changes): read git state (branch, status --short, diff --stat, log --oneline -10), INFER don\'t interrogate, and write an APPEND-ONLY file .autodev/checkpoints/<YYYYMMDD-HHMMSS>-<title-slug>.md — NEVER overwrite/delete an existing one (durable history). Frontmatter: status, branch (ALWAYS — critical for cross-branch restore), timestamp (ISO-8601), session_duration, files_modified. Four sections: Summary, Decisions Made, Remaining Work (numbered), Notes — Decisions+Notes are the high-signal anti-bloat parts; Remaining Work ties to the deferred set ([[00j-deferred-task-resolution]]). The filename timestamp is the canonical clock (survives mtime drift).',
+      'Context-Restore (READ-ONLY, no code changes): sort .autodev/checkpoints/*.md by the filename YYYYMMDD-HHMMSS prefix DESC (NOT mtime), reorder current-branch FIRST + other-branch as fallback (never hard-filter — cross-branch handoff — but a current-branch checkpoint must not be shadowed by a newer sibling-worktree save). Load the user\'s fragment/number or the newest current-branch one; present title/branch/saved-time/status + Summary/Remaining Work/Notes, foregrounding WHAT\'S LEFT; WARN on branch mismatch. None found → say run Context-Save first. Then reconstruct the thread ([[00c-verifiable-threads]]), re-attempt the deferred set ([[00j-deferred-task-resolution]]), honor the plan ([[00e-long-horizon-planning]]).',
+    ],
+  },
+  {
     id: '00f-swarm-orchestration', label: 'Swarm Orchestration', file: '00f-swarm-orchestration.md',
     keyRules: [
       'Your context window is finite — grinding a hard/broad/context-heavy task alone fills it and you DEGRADE mid-task (the out-of-context failure). Become the orchestrator: decompose ([[00e-long-horizon-planning]]) and delegate the heavy reading to workers who burn their OWN fresh contexts, keeping yours lean for the plan+steering. The tell "I\'m about to read a lot to answer this" = delegate it. Small edit/quick lookup → do inline; do NOT over-swarm.',

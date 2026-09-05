@@ -30,7 +30,7 @@ When you sense context is filling, or a compaction signal / `PreCompact` hook fi
 ### `PRE_COMPACT.md` is a bounded SNAPSHOT, not a log
 
 - **Keep it well under 16 KB** — the same hard cap every living doc obeys ([[00g-swarm-living-documents]], §0.0g). It is read straight back into a fresh context; a bloated snapshot bloats exactly the reader it exists for.
-- **OVERWRITE it each time** — latest state supersedes. It is a single current snapshot, never an append-only history.
+- **OVERWRITE it each time** — latest state supersedes. It is a single current snapshot, never an append-only history. For a durable, browsable, cross-session/worktree handoff, use the Context Checkpoints save/restore ([[00n-context-checkpoints]], §0.0n) — an append-only history you can list and pick from; `PRE_COMPACT.md` stays the fast single-slot snapshot for THIS thread across a compaction.
 - **Keep it beside the other living docs** — the workspace root / the agent's `.autodev/` living-doc location, consistent with where `MEMORY.md`/`TODO.md` live ([[00g-swarm-living-documents]], §0.0g).
 - **It complements, does not replace, durable memory.** `MEMORY`/`LESSONS`/`TODO` and the graph (§0.2, §0.20) hold *learned facts* that outlive the task; `PRE_COMPACT.md` holds the *transient thread state* — the "where was I" — needed to resume THIS run. Durable lessons still go to the durable stores; don't dump them into the snapshot.
 

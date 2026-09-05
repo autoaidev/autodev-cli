@@ -116,6 +116,14 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00m-autoplan', label: 'Autoplan — Harden The Plan', file: '00m-autoplan.md',
+    keyRules: [
+      'Autoplan HARDENS a rough plan before any code is written — it does not replace planning ([[00e-long-horizon-planning]]). Run it after you have a plan for a non-trivial task and before you build, or when the user says "autoplan"/"auto-review"/"harden the plan". A flaw caught in the plan is far cheaper than one caught in the diff or in prod. Rough plan in, fully reviewed plan out.',
+      'Review the plan through INDEPENDENT multi-lens critique — strategy/scope, engineering, design/UX (only if user-facing), developer-experience (only if it ships a dev surface) — each a fresh reviewer with no prior-phase context so it cannot rubber-stamp ([[00f-swarm-orchestration]], [[00i-qa-swarm]], [[00k-internal-workflows]]). Full depth, real artifacts (findings, alternatives, failure-mode registry, test-coverage gaps): never a one-line "looks good" ([[00b-self-verifiable-work]]).',
+      'Resolve MECHANICAL forks yourself via an explicit rubric (completeness, whole blast radius, simplest, DRY, explicit-over-clever, bias-to-action) — don\'t ping-pong the user. Batch every TASTE recommendation and every USER-CHALLENGE into ONE approval gate at the end (ask_user/choice), then build. Log every auto-decision ([[00g-swarm-living-documents]]); route deferrals to the deferred set ([[00j-deferred-task-resolution]]); bound the revise loop (~3 cycles); once chosen, don\'t bail.',
+    ],
+  },
+  {
     id: '00h-shared-skills', label: 'Shared Skills', file: '00h-shared-skills.md',
     keyRules: [
       'A skill is a reusable packaged capability the whole office shares — a SKILL.md in Anthropic Agent-Skills format (frontmatter `name` + a `description` that states WHAT it does and WHEN to use it, since the description is the load trigger: only it is always in context, the full SKILL.md loads on match, bundled scripts/refs load only when referenced). The shared library IS `.claude/skills/<slug>/SKILL.md` — the real Claude skills location the provider auto-loads and re-reads each run; there is no separate `.autodev/skills/` source. The office keeps every agent\'s `.claude/skills/` in sync over the `skill_update` channel (non-Claude providers get a prose fold into AGENTS.md), so a skill authored by one agent is shared with all.',

@@ -136,6 +136,115 @@ export function buildDetect(root: string, deps?: Partial<BinDetectDeps>): Detect
 }
 
 // ---------------------------------------------------------------------------
+// buildCatalog — the single, stable "known/pickable MCP servers" catalog the
+// app + extension render a "browse & add a known server" picker from (mirroring
+// how `autodev models --json` backs the model picker). ONE authoritative source:
+//   - 'builtin'  : sourced from DEFAULT_MCP_SERVERS (the always-applied baseline,
+//                  toggled via disabledBuiltinMcp) — NOT re-hardcoded here.
+//   - 'common'   : well-known, opt-in servers we have a REAL config for.
+//   - 'creative' : blender / gimp from mcpCatalog (platform-aware via serverSpecFor).
+// Keep this shape stable — external consumers depend on it.
+// ---------------------------------------------------------------------------
+
+export type CatalogKind = 'builtin' | 'common' | 'creative';
+
+/** The concrete server config a picker would write (stdio or remote McpJsonEntry). */
+export interface CatalogEntry {
+  id: string;
+  name: string;
+  kind: CatalogKind;
+  transport: 'stdio' | 'http' | 'sse';
+  server: McpJsonEntry;
+  description: string;
+  experimental: boolean;
+  /** Present for 'creative' entries — the host app this server drives. */
+  requiresApp?: CreativeAppId;
+}
+
+export interface CatalogResult {
+  servers: CatalogEntry[];
+}
+
+// Human-facing metadata for the built-ins (name + one-line description). The
+// server CONFIG (command/args/env) is always taken from DEFAULT_MCP_SERVERS —
+// only the display strings live here.
+const BUILTIN_META: Record<string, { name: string; description: string }> = {
+  'memory': { name: 'Memory', description: 'Persistent knowledge-graph memory across sessions' },
+  'playwright': { name: 'Playwright', description: 'Browser automation & web interaction' },
+  'sequential-thinking': { name: 'Sequential Thinking', description: 'Structured step-by-step reasoning scratchpad' },
+  'computer-use-mcp': { name: 'Computer Use', description: 'Desktop control: screenshot, mouse & keyboard' },
+};
+
+/** Placeholder allowed-dir the filesystem 'common' entry carries until the user edits it. */
+export const FILESYSTEM_PATH_PLACEHOLDER = '<ALLOWED_DIR>';
+
+/** Convert an mcpManager McpServerEntry → the catalog stdio server shape (drops copilot `tools`). */
+function builtinServer(command: string, args: string[], env?: Record<string, string>): McpJsonEntry {
+  return { command, args, ...(env && Object.keys(env).length ? { env } : {}) };
+}
+
+/** Human-facing metadata for the 'creative' entries (description keyed by app id). */
+const CREATIVE_DESCRIPTION: Record<CreativeAppId, string> = {
+  blender: '3D modeling & scene control via the Blender MCP addon',
+  gimp: 'Image editing via the GIMP MCP bridge (experimental)',
+};
+
+/**
+ * Build the authoritative catalog of known/pickable MCP servers. Pure &
+ * platform-parameterised (defaults to process.platform) so the app consumes it
+ * via `mcp catalog --json` and the extension imports it in-process.
+ */
+export function buildCatalog(platform: NodeJS.Platform = process.platform): CatalogResult {
+  const servers: CatalogEntry[] = [];
+
+  // 1) built-ins — sourced from DEFAULT_MCP_SERVERS (never re-hardcoded).
+  for (const s of DEFAULT_MCP_SERVERS) {
+    const meta = BUILTIN_META[s.name];
+    servers.push({
+      id: s.name,
+      name: meta?.name ?? s.name,
+      kind: 'builtin',
+      transport: 'stdio',
+      server: builtinServer(s.command, s.args, s.env),
+      description: meta?.description ?? '',
+      experimental: false,
+    });
+  }
+
+  // 2) common — well-known, opt-in servers we have a REAL config for. We only
+  // ship 'filesystem' (the real @modelcontextprotocol/server-filesystem) with a
+  // placeholder scoped-dir the user edits. No invented github/fetch entries.
+  servers.push({
+    id: 'filesystem',
+    name: 'Filesystem',
+    kind: 'common',
+    transport: 'stdio',
+    server: {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-filesystem', FILESYSTEM_PATH_PLACEHOLDER],
+    },
+    description: 'Local filesystem access (scoped to an allowed directory)',
+    experimental: false,
+  });
+
+  // 3) creative — blender / gimp from mcpCatalog, platform-aware via serverSpecFor.
+  for (const entry of getCatalog(platform)) {
+    servers.push({
+      id: entry.id,
+      name: entry.name,
+      kind: 'creative',
+      transport: 'stdio',
+      server: serverSpecFor(entry.id, platform),
+      description: CREATIVE_DESCRIPTION[entry.id],
+      experimental: entry.experimental,
+      requiresApp: entry.id,
+    });
+  }
+
+  return { servers };
+}
+
+// ---------------------------------------------------------------------------
 // --enable <app> — write the server spec + propagate + print manual steps.
 // ---------------------------------------------------------------------------
 
@@ -301,6 +410,27 @@ export function mcpCommand(program: Command): void {
     .action((name: string, p: string | undefined) => {
       const root = resolveRoot(p);
       setEnabled(root, name, false);
+    });
+
+  // autodev mcp catalog [--json]
+  cmd
+    .command('catalog')
+    .description('List the known/pickable MCP servers (single source of truth for the app + extension picker)')
+    .option('--json', 'Output the stable catalog JSON (the shape the app + extension consume)')
+    .action((opts: { json?: boolean }) => {
+      const result = buildCatalog();
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        return;
+      }
+      log.section('🗂️  MCP server catalog');
+      for (const s of result.servers) {
+        const exp = s.experimental ? ' (experimental)' : '';
+        log.plain(`  ${s.id.padEnd(20)} ${s.kind.padEnd(9)} ${s.transport.padEnd(6)} ${s.description}${exp}`);
+      }
+      log.plain('');
+      log.gray('  Built-ins are the always-applied baseline (toggle via mcp enable/disable).');
+      log.gray('  Add a common/creative one with:  autodev mcp add <name> --command <c> --arg <a>');
     });
 
   // autodev mcp detect [path] [--json] [--enable <app>] [--gimp-client <path>]

@@ -104,6 +104,83 @@ export class ConfigManager {
     }
   }
 
+  /**
+   * Reconcile the two Claude gates that decide whether a project `.mcp.json`
+   * server is actually usable, driving BOTH from the EFFECTIVE ENABLED MCP set
+   * (built-ins ∪ enabled user/creative entries ∪ pixel-office − disabled) that
+   * `syncProjectMcpServers` computes — NOT a hardcoded built-ins-only list. This
+   * is why a user/creative server like `blender` used to be present in `.mcp.json`
+   * yet silently omitted by Claude: it had neither the permission grant nor the
+   * per-project load flag.
+   *
+   * Two gates, both project-scoped (project `.mcp.json` servers only need the
+   * project-level entries):
+   *   1. project `.claude/settings.json` → permissions.allow: one `mcp__<server>`
+   *      per enabled server (the PERMISSION gate — a bare `mcp__<server>` grants
+   *      all of that server's tools and is valid in default mode; `"*"` is NOT
+   *      and Claude strips it with a warning).
+   *   2. `~/.claude.json` → projects[root].enabledMcpjsonServers: the LOADING gate
+   *      (Claude Code only loads project `.mcp.json` servers listed here; a
+   *      non-interactive `claude -p` session silently omits the rest).
+   *
+   * Merge, don't clobber: NON-mcp allow rules (Bash/Read/…) and `mcp__*` rules for
+   * servers autodev doesn't manage are preserved verbatim. Only the auto-managed
+   * `mcp__<server>` set (servers in `managedNames`) is reconciled to the effective
+   * set — missing enabled servers are added; managed servers no longer enabled are
+   * dropped. Stale `"*"` wildcards are removed.
+   */
+  static reconcileClaudeMcpAccess(
+    root: string,
+    effectiveNames: string[],
+    managedNames: Set<string>,
+    log?: (m: string) => void,
+  ): void {
+    const effective = new Set(effectiveNames);
+    // Server name embedded in an allow rule: `mcp__<server>` or
+    // `mcp__<server>__<tool>` → `<server>` (pixel-office has a hyphen, no
+    // internal `__`, so split on `__` is safe).
+    const serverOf = (rule: string): string => rule.slice('mcp__'.length).split('__')[0];
+
+    // Gate 1 — permissions.allow in the PROJECT settings.
+    const projectSettings = path.join(root, '.claude', 'settings.json');
+    _mergeJson(projectSettings, (cfg) => {
+      const perms = _obj(cfg['permissions']);
+      const prev = Array.isArray(perms['allow'])
+        ? (perms['allow'] as unknown[]).map(String)
+        : [];
+      const kept: string[] = [];
+      for (const rule of prev) {
+        if (rule === '*') { continue; }                 // invalid wildcard — strip
+        if (!rule.startsWith('mcp__')) { kept.push(rule); continue; } // non-mcp — preserve
+        const server = serverOf(rule);
+        if (!managedNames.has(server)) { kept.push(rule); continue; } // foreign mcp — preserve
+        if (effective.has(server)) { kept.push(rule); }               // managed + enabled — keep
+        // else: managed but no longer enabled — drop
+      }
+      const have = new Set(kept);
+      for (const name of effectiveNames) {
+        const bare = `mcp__${name}`;
+        if (!have.has(bare)) { kept.push(bare); have.add(bare); }
+      }
+      perms['allow'] = kept;
+      cfg['permissions'] = perms;
+    }, log, 'Claude MCP allow-list (project)');
+
+    // Gate 2 — enabledMcpjsonServers under ~/.claude.json projects[root].
+    const claudeJson = path.join(os.homedir(), '.claude.json');
+    _mergeJson(claudeJson, (cfg) => {
+      const projects = _obj(cfg['projects']);
+      const proj = _obj(projects[root]);
+      const prev = Array.isArray(proj['enabledMcpjsonServers'])
+        ? (proj['enabledMcpjsonServers'] as unknown[]).map(String)
+        : [];
+      const foreign = prev.filter((n) => !managedNames.has(n)); // preserve non-managed
+      proj['enabledMcpjsonServers'] = [...new Set([...foreign, ...effectiveNames])];
+      projects[root] = proj;
+      cfg['projects'] = projects;
+    }, log, 'Claude enabledMcpjsonServers (project)');
+  }
+
   // -------------------------------------------------------------------------
   // OpenCode CLI
   // -------------------------------------------------------------------------
@@ -349,6 +426,13 @@ export class ConfigManager {
       ...baseServers.map(s => s.name),
       'pixel-office',
     ]);
+
+    // Grant Claude permission + enable loading for EVERY enabled server (built-ins
+    // AND user/creative entries like blender/gimp) so nothing is silently omitted.
+    // Derived from the same effective set fanned out below — never a hardcoded
+    // built-ins list. Preserves any non-mcp / foreign allow rules the user set.
+    try { ConfigManager.reconcileClaudeMcpAccess(root, Object.keys(effective), managedNames, log); }
+    catch (e) { log?.(`ConfigManager: Claude MCP access reconcile failed: ${e}`); }
 
     // Strip any stale mcpServers we previously wrote into .claude/settings.json
     // or .claude/settings.local.json so they don't shadow .mcp.json.

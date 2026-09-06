@@ -9,3 +9,9 @@ coverage/
 external/
 /.idea
 *.diff
+
+# Test/tool artifact output (Playwright MCP, QA swarm, test runners)
+.playwright-mcp/
+qa/
+test-results/
+playwright-report/

@@ -112,6 +112,13 @@ export async function sendPromptToAi(
     ]) {
       ensureProjectGitignore(root, entry);
     }
+    // Test/tool artifact output dirs — junk written by QA swarms, Playwright MCP,
+    // and test runners; never source. Keep conservative: only artifact dirs.
+    for (const entry of [
+      '.playwright-mcp/', 'qa/', 'test-results/', 'playwright-report/',
+    ]) {
+      ensureProjectGitignore(root, entry);
+    }
 
     const settings = loadSettingsForRoot(root);
 

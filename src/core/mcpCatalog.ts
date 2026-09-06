@@ -158,7 +158,7 @@ export function getCatalog(platform: NodeJS.Platform): McpCatalogEntry[] {
       prerequisites: [{ id: 'uv', installHint: uvInstallHint(platform) }],
       postSetup: [
         'The MCP client runs from git automatically (uv fetches it) — no manual download of the client.',
-        `You still need the GIMP-side plugin: download gimp_mcp_server.py from https://github.com/libreearth/gimp-mcp into your GIMP 3.x plug-ins folder (${gimpPluginDir(platform)}), restart GIMP, then Filters → Development → Start MCP Server (listens on localhost:9876).`,
+        `The GIMP-side AUTO-START plugin is installed for you into your GIMP 3.x plug-ins folder (${gimpPluginDir(platform)}) — just restart GIMP and the server auto-starts on localhost:9876 (no menu click). Re-run any time with: autodev mcp gimp-install-plugin`,
         'Requires GIMP 3.0+ (the plugin uses the GIMP 3.0 API).',
         "Port 9876 collides with Blender — don't run both MCP servers at once.",
       ],
@@ -173,10 +173,10 @@ export function getCatalog(platform: NodeJS.Platform): McpCatalogEntry[] {
 /** GIMP 3.0 plug-ins directory, per OS (where the server-side plugin lives). */
 function gimpPluginDir(platform: NodeJS.Platform): string {
   return platform === 'win32'
-    ? '%APPDATA%\\GIMP\\3.0\\plug-ins\\'
+    ? '%APPDATA%\\GIMP\\3.x\\plug-ins\\'
     : platform === 'darwin'
-      ? '~/Library/Application Support/GIMP/3.0/plug-ins/'
-      : '~/.config/GIMP/3.0/plug-ins/';
+      ? '~/Library/Application Support/GIMP/3.x/plug-ins/'
+      : '~/.config/GIMP/3.x/plug-ins/';
 }
 
 /** Lookup a single catalog entry. */

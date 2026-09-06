@@ -17,6 +17,7 @@ import {
   loadSettingsForRoot, settingsWritePath, type AutodevSettings,
 } from '../core/settingsLoader';
 import { writeFileSecure } from '../core/secureFile';
+import { installGimpPlugin, type GimpInstallResult } from '../core/gimpPluginInstall';
 
 // Names autodev treats as built-in MCP servers (toggled via disabledBuiltinMcp,
 // not via an enabled:false entry in .mcp.json).
@@ -305,10 +306,33 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
       log.plain(`    ${entry.prerequisites[0]!.installHint}`);
     }
   }
+  // Auto-install the GIMP-side AUTO-START plugin so the user copies nothing and
+  // the socket opens on GIMP launch (no menu click). Best-effort: a failure here
+  // must not fail the client-config write above.
+  try {
+    const res = installGimpPlugin();
+    printGimpInstall(res);
+  } catch (e) {
+    log.warn(`⚠  Could not auto-install the GIMP plugin: ${(e as Error).message}`);
+    log.gray('   You can retry with:  autodev mcp gimp-install-plugin');
+  }
+
   log.section('Manual steps');
   for (const s of entry.postSetup) { log.plain(`  • ${s}`); }
   for (const n of entry.notes) { log.gray(`  ! ${n}`); }
   return 0;
+}
+
+/** Pretty-print an installGimpPlugin() result (shared by --enable + standalone). */
+function printGimpInstall(res: GimpInstallResult): void {
+  if (res.installed) {
+    log.success(`Installed the AUTO-START GIMP MCP plugin (GIMP ${res.version}).`);
+    for (const p of res.paths) { log.plain(`    ${p}`); }
+    log.plain('  Restart GIMP — the MCP server auto-starts on launch (localhost:9876). No menu click needed.');
+  } else {
+    log.warn('⚠  The GIMP MCP plugin was NOT installed.');
+  }
+  for (const w of res.warnings) { log.gray(`  ! ${w}`); }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +476,16 @@ export function mcpCommand(program: Command): void {
       log.plain('');
       log.gray('  Built-ins are the always-applied baseline (toggle via mcp enable/disable).');
       log.gray('  Add a common/creative one with:  autodev mcp add <name> --command <c> --arg <a>');
+    });
+
+  // autodev mcp gimp-install-plugin [dir]
+  cmd
+    .command('gimp-install-plugin [dir]')
+    .description('Install the AUTO-START GIMP 3.x MCP plugin (localhost:9876 opens on GIMP launch — no menu click)')
+    .action((dir: string | undefined) => {
+      const res = installGimpPlugin(dir ? { targetDir: path.resolve(dir) } : undefined);
+      printGimpInstall(res);
+      if (!res.installed) { process.exit(1); }
     });
 
   // autodev mcp detect [path] [--json] [--enable <app>] [--gimp-client <path>]

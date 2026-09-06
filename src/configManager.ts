@@ -7,6 +7,7 @@ import { resolveMcpStartupTimeoutSec } from './core/mcpStartupTimeout';
 import { writeFileSecure } from './core/secureFile';
 import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 import { migrateCreativeMcpEntries } from './core/mcpCatalogMigrate';
+import { installGimpPluginIfDetected } from './core/gimpPluginInstall';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -413,6 +414,26 @@ export class ConfigManager {
       // never emit `command: undefined` / `[null]` into a provider config.
       if (!isRemoteMcp(raw) && typeof raw.command !== 'string') continue;
       effective[name] = raw;
+    }
+
+    // If a `gimp` MCP server is ENABLED in the effective set, best-effort install
+    // the GIMP-side AUTO-START plugin so the socket bridge opens on GIMP launch —
+    // exactly what `mcp detect --enable gimp` does, but now also on the in-process
+    // enable path the VS Code extension uses (saveProjectUserMcp + this sync),
+    // which never called the CLI's `mcp detect`. The plugin body is EMBEDDED
+    // (gimpPluginSource.ts), so this works in the extension bundle too (no media
+    // file on disk). Fully guarded + idempotent: only when GIMP 3.x is detected,
+    // and a failure/absent GIMP must NEVER break the sync.
+    if (effective['gimp']) {
+      try {
+        const res = installGimpPluginIfDetected();
+        if (res.installed) {
+          log?.(`ConfigManager: installed auto-start GIMP MCP plugin (GIMP ${res.version}) — ${res.paths.join(', ')}`);
+        }
+        for (const w of res.warnings) { log?.(`ConfigManager: GIMP plugin: ${w}`); }
+      } catch (e) {
+        log?.(`ConfigManager: GIMP plugin auto-install skipped (non-fatal): ${e}`);
+      }
     }
 
     // Names autodev may manage (everything in .mcp.json in any state + built-ins

@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { detectApp, type DetectAppResult } from './binDetect';
+import { GIMP_PLUGIN_SOURCE } from './gimpPluginSource';
 
 export interface GimpInstallDeps {
   platform: NodeJS.Platform;
@@ -36,7 +37,13 @@ export interface GimpInstallDeps {
   writeFile: (p: string, data: string) => void;
   chmod: (p: string, mode: number) => void;
   copyFile: (src: string, dst: string) => void;
-  /** The vendored auto-start plugin source (media/gimp/gimp_mcp_server.py). */
+  /** Read an existing file (for idempotent-skip content comparison). '' if unreadable. */
+  readFile: (p: string) => string;
+  /**
+   * The auto-start plugin source. Defaults to the EMBEDDED string
+   * (GIMP_PLUGIN_SOURCE) so it works when esbuild-bundled into the VS Code
+   * extension where media/gimp/gimp_mcp_server.py is NOT on disk at runtime.
+   */
   readPluginSource: () => string;
   /** GIMP detection (to gate on major < 3). Defaults to detectApp('gimp'). */
   detectGimp: () => DetectAppResult;
@@ -76,7 +83,10 @@ function realDeps(): GimpInstallDeps {
     writeFile: (p, data) => { fs.writeFileSync(p, data); },
     chmod: (p, mode) => { try { fs.chmodSync(p, mode); } catch { /* non-POSIX fs */ } },
     copyFile: (src, dst) => { fs.copyFileSync(src, dst); },
-    readPluginSource: () => fs.readFileSync(vendoredPluginSourcePath(), 'utf8'),
+    readFile: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } },
+    // Runtime uses the EMBEDDED source (bundle-safe). media/gimp/gimp_mcp_server.py
+    // stays the canonical source + GPL attribution, but is no longer read at runtime.
+    readPluginSource: () => GIMP_PLUGIN_SOURCE,
     detectGimp: () => detectApp('gimp'),
   };
 }
@@ -138,12 +148,26 @@ export function gimpMajorFromPath(p: string | null): number | null {
   return m ? parseInt(m[1]!, 10) : null;
 }
 
-/** Write the vendored plugin into one plug-ins dir (backing up any existing copy). */
+/**
+ * Write the plugin into one plug-ins dir. IDEMPOTENT: if the target already
+ * holds byte-identical content, skip the write (and the .bak) — but still ensure
+ * the executable bit on non-Windows. A .bak backup is made ONLY when overwriting
+ * content that DIFFERS from the source.
+ */
 function installInto(pluginsDir: string, source: string, d: GimpInstallDeps): string {
   const sub = path.join(pluginsDir, 'gimp_mcp_server');
   const py = path.join(sub, 'gimp_mcp_server.py');
   d.mkdirp(sub);
-  if (d.fileExists(py)) { d.copyFile(py, py + '.bak'); }
+  if (d.fileExists(py)) {
+    const existing = d.readFile(py);
+    if (existing === source) {
+      // Already up to date — no write, no backup. Still ensure it's executable.
+      if (d.platform !== 'win32') { d.chmod(py, 0o755); }
+      return py;
+    }
+    // Different content → back it up before overwriting.
+    d.copyFile(py, py + '.bak');
+  }
   d.writeFile(py, source);
   if (d.platform !== 'win32') { d.chmod(py, 0o755); }
   return py;
@@ -210,4 +234,33 @@ export function installGimpPlugin(
   }
 
   return { installed: paths.length > 0, paths, version, warnings };
+}
+
+/**
+ * Sync-path variant: install the auto-start plugin ONLY when GIMP 3.x is actually
+ * DETECTED. Unlike installGimpPlugin (which will create a 3.0 config dir even with
+ * no GIMP present — appropriate for the explicit `mcp detect --enable gimp` /
+ * `gimp-install-plugin` flows), this refuses to touch the filesystem when GIMP is
+ * absent or is clearly < 3, so a routine ConfigManager.syncProjectMcpServers on a
+ * box without GIMP never spuriously creates a config dir. Returns a skip result
+ * (installed:false + warning) instead of throwing so callers can swallow it.
+ */
+export function installGimpPluginIfDetected(
+  opts?: GimpInstallOpts,
+  deps?: Partial<GimpInstallDeps>,
+): GimpInstallResult {
+  const d: GimpInstallDeps = { ...realDeps(), ...deps };
+  const det = d.detectGimp();
+  const major = gimpMajorFromPath(det.path);
+  // Require a detected GIMP that is not clearly < 3 (major null = version not in
+  // the launcher path, e.g. a macOS app bundle — allowed).
+  if (!det.installed || (major !== null && major < 3)) {
+    return {
+      installed: false,
+      paths: [],
+      version: null,
+      warnings: ['GIMP 3.x not detected — auto-start plugin install skipped (sync path).'],
+    };
+  }
+  return installGimpPlugin(opts, deps);
 }

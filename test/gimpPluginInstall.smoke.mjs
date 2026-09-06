@@ -14,8 +14,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { installGimpPlugin, gimpMajorFromPath, vendoredPluginSourcePath } from '../out/core/gimpPluginInstall.js';
+import { installGimpPlugin, installGimpPluginIfDetected, gimpMajorFromPath, vendoredPluginSourcePath } from '../out/core/gimpPluginInstall.js';
+import { GIMP_PLUGIN_SOURCE, GIMP_PLUGIN_SOURCE_HASH } from '../out/core/gimpPluginSource.js';
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + msg); } else { console.log('  ✓ ' + msg); } };
@@ -27,6 +29,7 @@ const REPO = path.resolve(__dirname, '..');
 function makeDeps(over) {
   const files = new Set(over.files || []);
   const dirs = over.dirs || {};
+  const contents = over.contents || {}; // path -> existing file content (for idempotency)
   const writes = [];
   const mkdirs = [];
   const chmods = [];
@@ -41,6 +44,7 @@ function makeDeps(over) {
     writeFile: (p, data) => { writes.push({ p, data }); },
     chmod: (p, mode) => { chmods.push({ p, mode }); },
     copyFile: (src, dst) => { copies.push({ src, dst }); },
+    readFile: (p) => (Object.prototype.hasOwnProperty.call(contents, p) ? contents[p] : ''),
     readPluginSource: () => over.source || 'PLUGIN-SOURCE',
     detectGimp: () => over.detect || { installed: false, path: null, source: null },
   };
@@ -207,6 +211,141 @@ function makeDeps(over) {
   ok(/Derived from libreearth\/gimp-mcp @49c46dd/.test(body), 'vendored plugin carries GPL provenance header');
   const lic = path.join(REPO, 'media', 'gimp', 'LICENSE');
   ok(fs.existsSync(lic) && /GNU GENERAL PUBLIC LICENSE/.test(fs.readFileSync(lic, 'utf8')), 'GPL LICENSE vendored at media/gimp/LICENSE');
+}
+
+// ── (+) EMBEDDED source: install writes GIMP_PLUGIN_SOURCE (bundle-safe) ─────
+// Do NOT override readPluginSource → the real default (embedded string) is used.
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const py = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  const writes = [];
+  const chmods = [];
+  const deps = {
+    platform: 'linux', env: {}, homedir: () => home,
+    fileExists: () => false,
+    listDir: (p) => (p === gimpBase ? ['3.2'] : []),
+    mkdirp: () => {},
+    writeFile: (p, data) => { writes.push({ p, data }); },
+    chmod: (p, mode) => { chmods.push({ p, mode }); },
+    copyFile: () => {},
+    readFile: () => '',
+    detectGimp: () => ({ installed: false, path: null, source: null }),
+    // readPluginSource intentionally omitted → uses embedded GIMP_PLUGIN_SOURCE.
+  };
+  const res = installGimpPlugin(undefined, deps);
+  ok(res.installed === true, 'embedded: installs');
+  ok(writes.length === 1 && writes[0].p === py, 'embedded: wrote exactly the target .py');
+  ok(writes[0].data === GIMP_PLUGIN_SOURCE, 'embedded: written content === GIMP_PLUGIN_SOURCE');
+  ok(/plug-in-mcp-server-autostart/.test(GIMP_PLUGIN_SOURCE), 'embedded: source carries the auto-start query proc');
+  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'embedded: chmod 0o755 on the .py');
+  ok(typeof GIMP_PLUGIN_SOURCE_HASH === 'string' && GIMP_PLUGIN_SOURCE_HASH.length === 12, 'embedded: exposes a 12-hex content hash');
+}
+
+// ── (+) IDEMPOTENT: identical existing content → skip write, no .bak ─────────
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const py = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  const { deps, writes, copies, chmods } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    files: [py],                       // target already exists…
+    contents: { [py]: 'PLUGIN-SOURCE' }, // …with byte-identical content
+    source: 'PLUGIN-SOURCE',
+  });
+  const res = installGimpPlugin(undefined, deps);
+  ok(res.installed === true, 'idempotent: reports installed (path present)');
+  ok(res.paths[0] === py, 'idempotent: returns the target path');
+  ok(writes.length === 0, 'idempotent: NO write when content is identical');
+  ok(copies.length === 0, 'idempotent: NO .bak when content is identical');
+  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'idempotent: still ensures chmod 0o755');
+}
+
+// ── (+) gen script output matches the media .py ─────────────────────────────
+{
+  const py = fs.readFileSync(vendoredPluginSourcePath(), 'utf8');
+  ok(GIMP_PLUGIN_SOURCE === py, 'gen: GIMP_PLUGIN_SOURCE === media/gimp/gimp_mcp_server.py (in sync)');
+  const wantHash = createHash('sha256').update(py, 'utf8').digest('hex').slice(0, 12);
+  ok(GIMP_PLUGIN_SOURCE_HASH === wantHash, 'gen: GIMP_PLUGIN_SOURCE_HASH matches sha256(.py)');
+}
+
+// ── (+) SYNC path: installGimpPluginIfDetected gates on GIMP 3.x detection ───
+// GIMP 3.x detected → installs to the resolved 3.x dir (what sync invokes).
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const { deps, writes } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    detect: { installed: true, path: '/usr/bin/gimp-3.2', source: 'path' },
+    source: 'PLUGIN-SOURCE',
+  });
+  const res = installGimpPluginIfDetected(undefined, deps);
+  const expected = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  ok(res.installed === true, 'sync: GIMP 3.x detected → installed');
+  ok(res.paths[0] === expected, 'sync: installs into the resolved 3.x plug-ins dir');
+  ok(writes.some((w) => w.p === expected), 'sync: wrote the plugin');
+}
+// GIMP absent → NOT installed, nothing written, no throw.
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const { deps, writes, mkdirs } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    detect: { installed: false, path: null, source: null },
+    source: 'PLUGIN-SOURCE',
+  });
+  const res = installGimpPluginIfDetected(undefined, deps);
+  ok(res.installed === false, 'sync: GIMP absent → NOT installed');
+  ok(writes.length === 0 && mkdirs.length === 0, 'sync: GIMP absent → filesystem untouched');
+  ok(res.warnings.some((w) => /not detected/i.test(w)), 'sync: GIMP absent → skip warning (no throw)');
+}
+// GIMP < 3 → NOT installed.
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const { deps, writes } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    detect: { installed: true, path: '/usr/bin/gimp-2.10', source: 'path' },
+    source: 'PLUGIN-SOURCE',
+  });
+  const res = installGimpPluginIfDetected(undefined, deps);
+  ok(res.installed === false, 'sync: GIMP 2.10 → NOT installed');
+  ok(writes.length === 0, 'sync: GIMP 2.10 → nothing written');
+}
+
+// ── (+) SYNC integration: gimp ENABLED in .mcp.json → sync must NOT throw ────
+// On a box without GIMP the plugin is not installed, but sync must still succeed
+// (the whole call is guarded). Proves the wiring in ConfigManager.syncProjectMcpServers.
+{
+  const os = await import('os');
+  const { ConfigManager } = await import('../out/configManager.js');
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-gimp-sync-')));
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
+    mcpServers: {
+      gimp: { command: 'uvx', args: ['--from', 'git+https://example/gimp-mcp', 'gimp-mcp'], enabled: true, _meta: { kind: 'user' } },
+    },
+  }, null, 2));
+  let threw = null;
+  try { ConfigManager.syncProjectMcpServers(dir); } catch (e) { threw = e; }
+  ok(threw === null, 'sync: gimp ENABLED + no GIMP on box → sync completes without throwing');
+  const after = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  const srv = after.mcpServers ?? after.servers ?? {};
+  ok(!!srv['gimp'], 'sync: gimp entry preserved in .mcp.json');
+
+  // gimp DISABLED → sync still succeeds (and obviously installs nothing).
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
+    mcpServers: {
+      gimp: { command: 'uvx', args: ['gimp-mcp'], enabled: false, _meta: { kind: 'user' } },
+    },
+  }, null, 2));
+  let threw2 = null;
+  try { ConfigManager.syncProjectMcpServers(dir); } catch (e) { threw2 = e; }
+  ok(threw2 === null, 'sync: gimp DISABLED → sync completes without throwing');
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 if (failures) { console.error(`\ngimpPluginInstall.smoke: ${failures} FAILED`); process.exit(1); }

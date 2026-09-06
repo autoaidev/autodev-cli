@@ -20,6 +20,7 @@ Every *"TODO later"*, *follow-up*, *defer*, or *"out of scope for now"* is an en
 Before you yield — this is a turn-end action, run alongside the retrospective (§0.0d) — re-read the deferred set and **try to close each item now**, not copy it forward untouched.
 
 - **The default is resolve, not re-defer.** Re-listing the same task unchanged turn after turn *is* the parked-backlog failure wearing a checklist. Each cycle the set should shrink or a real block should be recorded — never a silent carry.
+- **Advancing means closing, not parking.** The sweep is about DOING the next step now, not re-listing it more neatly — a clear, unblocked deferred item gets resolved THIS turn, not carried forward with a tidier note ([[00e-long-horizon-planning]] momentum, §0.0e; [[00d-turn-end-retrospective]], §0.0d).
 - **Closing meets the same bar as any `[x]`:** an objective check ran ([[00b-self-verifiable-work]], §0.0b). A deferred task "resolved" on a vibe is just a fresh deferral in disguise.
 
 ---

@@ -32,6 +32,7 @@ Your job is to plan, dispatch, synthesize, and verify — not to read. Guard you
 - **Do not pull raw material into your own window.** No large file dumps, no full logs, no multi-thousand-line outputs. Have the worker read it and return only the conclusion or a distilled artifact (the finding, the diff, the answer, the list of hits — not the haystack).
 - **Ask for the distillate, not the source.** "Return the three functions that touch auth and why" — not "return the file." Specify the *shape* of what comes back so it lands small.
 - **Bias to parallel fan-out.** Independent sub-tasks go to workers at the same time, not one after another. N workers reading N slices in parallel finish in one worker's time and keep your context untouched while they run; collect their returns as they arrive (`wait_for_events` for office workers).
+- **Drive, don't idle.** When a stage or worker returns and its result checks out, immediately advance — dispatch the next milestone — instead of waiting or declaring partial completion and stopping ([[00e-long-horizon-planning]] momentum).
 
 ---
 

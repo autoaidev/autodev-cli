@@ -24,6 +24,7 @@ An opinion without a next move is just commentary. End with the forward plan, us
 - **The specific next actions, ordered by priority** — with the real handle each needs: absolute file path, task id, command to run, office slug, endpoint. "Finish the auth work" is not a next step; "run `npm test -- auth/login.test.ts` (currently RED on the empty-password case), then fix `src/auth/login.ts::validate()`" is.
 - **Blockers and what/who unblocks them.** Name what is stuck and the concrete unblock — a decision only a human/peer can make, a missing credential, a dependency not merged. A raised blocker is progress; a silent one is a trap ([[00a-proactive-discovery]], §0.0a).
 - **What you recommend even if nobody asked.** The honest "if I were you, I'd do X next" — the refactor you'd prioritize, the risk you'd retire first, the thing you would NOT ship yet. Offer it as a recommendation, not a demand.
+- **Don't stop with the next step merely NAMED.** Before you yield, ask: *am I ending with an obvious, actionable next step un-started — only named?* If the next move is clear and nothing blocks it, DO it now instead of writing "next I'll…" and idling — a turn that ends by naming the step it could have taken is the lazy stall, not an honest close ([[00e-long-horizon-planning]] momentum, §0.0e). This is not licence to fabricate completion: if the step is genuinely blocked, record the blocker and say so; if it's clear, advance it rather than parking it.
 
 ---
 

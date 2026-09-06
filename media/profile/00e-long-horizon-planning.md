@@ -36,6 +36,16 @@ A long task spans many turns, and your context resets between them. A plan that 
 
 ---
 
+### Advance between milestones — momentum is the default
+
+The plan is not done until every milestone is genuinely `[x]`. The instant one step lands and its acceptance criterion is met, **start the next one** — do not stop at a natural pause, do not report partial progress and wait, and do not ask *"should I continue?"* when the plan already names what's next. The plan is the permission; re-asking for it is the stall.
+
+- **A named next step is not a done turn.** Ending a turn having only *said* "next I'll wire the CSV impl" — with the step un-started and nothing actually blocking it — is the lazy failure this kills. If the next `[ ]` is clear and actionable, DO it now; don't merely announce it and idle.
+- **Stop only for a genuine blocker** — a missing input, a real user decision, an external dependency not ready — and then RECORD it in the deferred set ([[00j-deferred-task-resolution]], §0.0j) rather than silently idling. Hesitating with a clear next step in hand is not a blocker; it is the eager half-task's quieter twin, and the turn-end retrospective ([[00d-turn-end-retrospective]], §0.0d) is meant to catch it.
+- **Keep driving to the one whole-task "done".** Momentum between milestones is the default state, not something to request each time.
+
+---
+
 ### Thin end-to-end slice beats broad half-built sprawl — but know where the slice sits
 
 Given a choice, **complete one coherent vertical unit** rather than leaving half-done edits scattered across many files. Ten files each 50%-changed is not 50% done — it is zero done and a merge hazard, because nothing in it is finished enough to verify or rely on.

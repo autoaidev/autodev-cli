@@ -122,9 +122,9 @@ function makeFs(files, dirs) {
      JSON.stringify(bLinux.args) === JSON.stringify(['--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
     'blender server (non-win) = uvx --from git+…lab… --with "mcp<2" blender-mcp (official Lab client)');
   const bWin = serverSpecFor('blender', 'win32');
-  ok(bWin.command === 'cmd' &&
-     JSON.stringify(bWin.args) === JSON.stringify(['/c', 'uvx', '--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
-    'blender server (win32) = cmd /c uvx --from git+…lab… --with "mcp<2" blender-mcp');
+  ok(bWin.command === 'uvx' &&
+     JSON.stringify(bWin.args) === JSON.stringify(['--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
+    'blender server (win32) = bare uvx --from git+…lab… (no cmd/c wrapper, no hardcoded path)');
 
   const gStub = serverSpecFor('gimp', 'linux');
   ok(gStub.enabled === false && gStub.args[0] === GIMP_CLIENT_PLACEHOLDER,

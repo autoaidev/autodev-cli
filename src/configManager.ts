@@ -6,6 +6,7 @@ import { loadSettingsForRoot } from './core/settingsLoader';
 import { resolveMcpStartupTimeoutSec } from './core/mcpStartupTimeout';
 import { writeFileSecure } from './core/secureFile';
 import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
+import { migrateCreativeMcpEntries } from './core/mcpCatalogMigrate';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -214,6 +215,15 @@ export class ConfigManager {
         _migrateLegacyMcpServers(root, stale, log);
       }
     } catch { /* ignore */ }
+
+    // Auto-migrate stale creative-app MCP servers (blender/gimp) that were
+    // snapshotted into .mcp.json from an OLD catalog spec (e.g. a pre-fix enable
+    // wrote `cmd /c uvx blender-mcp`). Re-resolves them from the CURRENT catalog
+    // (`serverSpecFor`) and persists the upgrade back to .mcp.json BEFORE the
+    // fan-out below reads it, so every provider config gets the corrected command
+    // (the full-uvx-path Blender Lab client). blender always; gimp stub-only.
+    try { migrateCreativeMcpEntries(root, process.platform, log); }
+    catch (e) { log?.(`ConfigManager: creative MCP migration failed: ${e}`); }
 
     // User entries now live in .mcp.json — read them straight from there.
     let userMcp = loadProjectUserMcp(root);

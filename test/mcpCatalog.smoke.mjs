@@ -77,13 +77,15 @@ const nonEmptyServer = (s) =>
     'blender server uses the Lab --from git+…lab… client (not bare community blender-mcp)');
   ok(nonEmptyServer(gimp.server), 'gimp has a non-empty server');
 
-  // Platform-awareness: on win32 blender is wrapped in cmd /c uvx --from …lab….
+  // Launcher form: bare `uvx` on EVERY platform (no cmd/c wrapper, no hardcoded
+  // uvx path) — win32 must be identical to linux.
   const win = buildCatalog('win32');
   const wBlender = win.servers.find((s) => s.id === 'blender');
-  ok(wBlender.server.command === 'cmd' &&
-     JSON.stringify(wBlender.server.args.slice(0, 3)) === JSON.stringify(['/c', 'uvx', '--from']) &&
-     wBlender.server.args.some((a) => a.includes('projects.blender.org/lab/blender_mcp')),
-    'blender server is platform-aware (cmd /c uvx --from …lab… on win32)');
+  ok(wBlender.server.command === 'uvx' &&
+     wBlender.server.args[0] === '--from' &&
+     wBlender.server.args.some((a) => a.includes('projects.blender.org/lab/blender_mcp')) &&
+     JSON.stringify(wBlender.server.args) === JSON.stringify(blender.server.args),
+    'blender server is bare uvx --from …lab… on win32 too (no cmd/c, no path)');
 }
 
 // ── JSON round-trips cleanly ────────────────────────────────────────────────

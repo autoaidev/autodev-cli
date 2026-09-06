@@ -77,10 +77,11 @@ const BLENDER_LAB_ARGS = ['--from', BLENDER_LAB_FROM, '--with', 'mcp<2', 'blende
 
 /**
  * The McpJsonEntry we would write for an app. Platform-aware.
- *  - Blender: the OFFICIAL Blender Lab client via `uvx --from git+…lab…#subdirectory=mcp
- *    --with "mcp<2" blender-mcp` (wrapped in `cmd /c` on win32 so the .cmd shim
- *    resolves). This matches the "MCP from Blender Lab" add-on. NEVER bare
- *    `uvx blender-mcp` — that pulls the incompatible community PyPI package.
+ *  - Blender: the OFFICIAL Blender Lab client via bare `uvx --from git+…lab…#subdirectory=mcp
+ *    --with "mcp<2" blender-mcp` (uvx resolved from PATH). This matches the "MCP
+ *    from Blender Lab" add-on. NEVER bare `uvx blender-mcp` (no --from) — that
+ *    pulls the incompatible community PyPI package. (The exact launcher form is
+ *    under review; the args are the load-bearing part the migration re-resolves.)
  *  - GIMP: a best-effort stdio stub `python <client.py>`, written enabled:false
  *    unless the caller supplies a real client path — GIMP ships no launcher, so
  *    we never pretend it's one-click.
@@ -91,9 +92,9 @@ export function serverSpecFor(
   opts?: { gimpClientPath?: string },
 ): McpJsonEntry {
   if (app === 'blender') {
-    return platform === 'win32'
-      ? { command: 'cmd', args: ['/c', 'uvx', ...BLENDER_LAB_ARGS] }
-      : { command: 'uvx', args: [...BLENDER_LAB_ARGS] };
+    // command is bare `uvx` (resolved from PATH) on every platform; args carry the
+    // official Blender Lab `--from git+…lab…` client.
+    return { command: 'uvx', args: [...BLENDER_LAB_ARGS] };
   }
   // gimp — experimental stub.
   const client = (opts?.gimpClientPath && opts.gimpClientPath.trim()) || GIMP_CLIENT_PLACEHOLDER;

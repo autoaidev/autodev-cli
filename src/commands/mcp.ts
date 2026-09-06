@@ -260,6 +260,9 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
       return 1;
     }
     const server = serverSpecFor('blender', platform);
+    // Tag it so a future catalog change is unambiguously re-resolvable by the sync
+    // migration (migrateCreativeMcpEntries), even without a name match.
+    server._meta = { ...(server._meta || {}), catalogId: 'blender' };
     const user = loadProjectUserMcp(root);
     user[entry.serverName] = server;
     saveProjectUserMcp(root, user);
@@ -280,6 +283,7 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
   log.warn('⚠  GIMP MCP is EXPERIMENTAL — upstream ships no packaged launcher; expect manual wiring.');
   const gimpClient = (opts.gimpClient && opts.gimpClient.trim()) || undefined;
   const server = serverSpecFor('gimp', platform, { gimpClientPath: gimpClient });
+  server._meta = { ...(server._meta || {}), catalogId: 'gimp' };
   const user = loadProjectUserMcp(root);
   user[entry.serverName] = server;
   saveProjectUserMcp(root, user);
@@ -392,6 +396,16 @@ export function mcpCommand(program: Command): void {
       }
       sync(root);
       log.success(`Removed MCP server "${name}".`);
+    });
+
+  // autodev mcp resync [path]
+  cmd
+    .command('resync [path]')
+    .description('Re-sync MCP servers to every provider (also migrates stale creative-app servers to the current catalog)')
+    .action((p: string | undefined) => {
+      const root = resolveRoot(p);
+      sync(root);
+      log.success('Re-synced MCP servers to all providers (creative-app entries migrated to the current catalog).');
     });
 
   // autodev mcp enable <name> [path]

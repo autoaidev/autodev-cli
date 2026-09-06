@@ -176,6 +176,7 @@ export function getCatalog(platform: NodeJS.Platform): McpCatalogEntry[] {
       notes: [
         `Log: ${gimpLogPath(platform)} (Store/MSIX GIMP also mirrors a copy inside its sandbox LocalCache).`,
         `The client runs via \`uv run --with ${GIMP_MCP_PIN} <installed client>\`; the ${GIMP_MCP_PIN} pin is load-bearing (current mcp releases break the client on a removed description= kwarg).`,
+        'GIMP 3.2.4 can crash (access-violation) on TextLayer merge_down/merge_filter — rasterize text via Gimp.Layer.new_from_visible first, then filter/merge the raster copy.',
       ],
     },
   ];

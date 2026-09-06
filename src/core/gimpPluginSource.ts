@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 /** sha256 (first 12 hex) of the canonical media/gimp/gimp_mcp_server.py. */
-export const GIMP_PLUGIN_SOURCE_HASH = "c4b85cccece9";
+export const GIMP_PLUGIN_SOURCE_HASH = "e9f5d21b82f7";
 
 /** Full body of the user-verified GIMP 3.x MCP server plug-in (media/gimp/gimp_mcp_server.py). */
 export const GIMP_PLUGIN_SOURCE = `#!/usr/bin/env python3
@@ -225,10 +225,6 @@ class MCPPlugin(Gimp.PlugIn):
         global _main_loop
         started, message = self.ensure_server()
         _log(message)
-        try:
-            Gimp.message(message)
-        except Exception:
-            pass
         if not started:
             return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(message))
 
@@ -258,11 +254,12 @@ class MCPPlugin(Gimp.PlugIn):
 
         GimpUi.init('gimp_mcp_server.py')
         window = Gtk.Window(title='GIMP MCP Server')
-        window.set_default_size(420, 160)
-        window.set_keep_above(True)
+        window.set_default_size(360, 120)
+        window.set_keep_above(False)
+        window.set_skip_taskbar_hint(False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_border_width(16)
-        label = Gtk.Label(label=message + '\\n\\nLeave this window open while Grok talks to GIMP.')
+        label = Gtk.Label(label=message + '\\nLeave this window open.')
         label.set_line_wrap(True)
         box.pack_start(label, True, True, 0)
         button = Gtk.Button(label='Stop server')
@@ -271,7 +268,6 @@ class MCPPlugin(Gimp.PlugIn):
         window.add(box)
         window.connect('destroy', self._on_status_closed)
         window.show_all()
-        window.present()
         _log('Status window opened')
 
     def _on_status_closed(self, *_args):

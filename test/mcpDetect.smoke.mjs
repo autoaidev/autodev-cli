@@ -91,27 +91,101 @@ function makeFs(files, dirs) {
 }
 
 // blender NOT installed → installed:false
+// (runWhich:()=>null keeps this hermetic regardless of the real host's PATH.)
 {
   const emptyFs = makeFs([]);
   const res = detectApp('blender', {
-    platform: 'linux', env: { PATH: '/usr/bin' }, homedir: () => '/home/u', ...emptyFs,
+    platform: 'linux', env: { PATH: '/usr/bin' }, homedir: () => '/home/u', runWhich: () => null, ...emptyFs,
   });
   ok(res.installed === false && res.path === null && res.source === null, 'blender not-installed → false/null/null');
 }
 
 // ── (c) detectApp gimp: PATH hit on linux; and app-bundle on mac ────────────
+// runWhich:()=>null forces the manual fileExists parse (what these cases test).
 {
   const linFs = makeFs(['/usr/bin/gimp-2.10']);
   const res = detectApp('gimp', {
-    platform: 'linux', env: { PATH: '/usr/bin' }, homedir: () => '/home/u', ...linFs,
+    platform: 'linux', env: { PATH: '/usr/bin' }, homedir: () => '/home/u', runWhich: () => null, ...linFs,
   });
   ok(res.installed === true && res.source === 'path', 'gimp detected on PATH (gimp-2.10, linux)');
 
   const macFs = makeFs(['/Applications/GIMP.app/Contents/MacOS/gimp']);
   const macRes = detectApp('gimp', {
-    platform: 'darwin', env: { PATH: '/usr/bin' }, homedir: () => '/Users/u', ...macFs,
+    platform: 'darwin', env: { PATH: '/usr/bin' }, homedir: () => '/Users/u', runWhich: () => null, ...macFs,
   });
   ok(macRes.installed === true && macRes.source === 'app-bundle', 'gimp detected via /Applications bundle (mac)');
+}
+
+// ── (c1b) THE BUG: Windows execution-alias reparse stub ─────────────────────
+// GIMP 3.x from the Store leaves an AppExecLink reparse stub on PATH at
+// %LOCALAPPDATA%\Microsoft\WindowsApps\gimp-3.exe. Node's fs.existsSync/statSync
+// FAIL on that reparse point → fileExists returns FALSE, so the old dir-glob
+// probe could not see it. But `where gimp-3` DOES resolve it. This simulates
+// exactly that: fileExists is FALSE everywhere, yet runWhich('gimp-3') returns
+// the alias path → detection MUST succeed via the OS-native resolver.
+{
+  const aliasPath = 'C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\gimp-3.exe';
+  const res = detectApp('gimp', {
+    platform: 'win32',
+    env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: 'C:\\Users\\user\\AppData\\Local', PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user',
+    // The reparse stub: fileExists FAILS for it (statSync throws on the reparse point).
+    fileExists: () => false,
+    listDir: () => [],
+    // `where gimp-3` authoritatively resolves the alias, other names not found.
+    runWhich: (name) => (name === 'gimp-3' ? aliasPath + '\r\n' : null),
+  });
+  ok(res.installed === true, 'gimp reparse-stub detected via `where` even when fileExists FAILS');
+  ok(res.path === aliasPath, 'gimp reparse-stub path is the resolved WindowsApps alias');
+  ok(res.source === 'store', 'gimp reparse-stub source = store (path is under \\Microsoft\\WindowsApps\\)');
+
+  // Not-found: runWhich returns null (throws/non-zero) AND no dirs → installed:false.
+  const none = detectApp('gimp', {
+    platform: 'win32',
+    env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: 'C:\\Users\\user\\AppData\\Local', PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user',
+    fileExists: () => false,
+    listDir: () => [],
+    runWhich: () => { throw new Error('INFO: Could not find files'); }, // `where` exits non-zero → execFileSync throws
+  });
+  ok(none.installed === false && none.path === null && none.source === null,
+    'gimp not-found (runWhich throws, no dirs) → false/null/null');
+
+  // A plain PATH resolution (not under WindowsApps) → source 'path', not 'store'.
+  const onPath = detectApp('gimp', {
+    platform: 'win32',
+    env: { PATH: 'C:\\tools', PATHEXT: '.EXE' },
+    homedir: () => 'C:\\Users\\user',
+    fileExists: () => false,
+    listDir: () => [],
+    runWhich: (name) => (name === 'gimp-3.2' ? 'C:\\tools\\gimp-3.2.exe' : null),
+  });
+  ok(onPath.installed === true && onPath.path === 'C:\\tools\\gimp-3.2.exe' && onPath.source === 'path',
+    'gimp resolved by `where` outside WindowsApps → source path');
+
+  // Blender parity: reparse-stub alias resolved via `where blender`.
+  const bAlias = 'C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\blender.exe';
+  const bRes = detectApp('blender', {
+    platform: 'win32',
+    env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: 'C:\\Users\\user\\AppData\\Local', PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user',
+    fileExists: () => false,
+    listDir: () => [],
+    runWhich: (name) => (name === 'blender' ? bAlias : null),
+  });
+  ok(bRes.installed === true && bRes.path === bAlias && bRes.source === 'store',
+    'blender reparse-stub detected via `where` (fileExists FAILS) → source store');
+}
+
+// ── (c1c) detectBinOnPath native fallback (uvx/git reparse robustness) ───────
+{
+  const found = detectBinOnPath('uvx', {
+    platform: 'win32', env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE' },
+    homedir: () => 'C:\\Users\\user', fileExists: () => false, listDir: () => [],
+    runWhich: (name) => (name === 'uvx' ? 'C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\uvx.exe' : null),
+  });
+  ok(found === 'C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\uvx.exe',
+    'detectBinOnPath falls back to `where` for a reparse-stub uvx (fileExists FAILS)');
 }
 
 // ── (c2) Microsoft Store / execution-alias installs on win32 ────────────────
@@ -209,7 +283,7 @@ function makeFs(files, dirs) {
   // Inject linux deps with nothing installed so the shape is deterministic.
   const emptyFs = makeFs([]);
   const result = buildDetect(root, {
-    platform: 'linux', env: { PATH: '/nowhere' }, homedir: () => '/home/u', ...emptyFs,
+    platform: 'linux', env: { PATH: '/nowhere' }, homedir: () => '/home/u', runWhich: () => null, ...emptyFs,
   });
   ok(Array.isArray(result.apps) && result.apps.length === 2, 'buildDetect returns 2 apps');
 

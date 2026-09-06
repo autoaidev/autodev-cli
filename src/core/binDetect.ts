@@ -6,13 +6,18 @@
 // the detection logic is unit-testable without the app actually being present:
 // a fake Program Files tree on win32, a PATH hit on linux, etc.
 //
-// We only ever stat / glob directories and read PATH — we never spawn the app.
-// (Node fs/path/os only; no child_process here.)
+// We never spawn the app itself. We DO shell the OS name resolver
+// (`where` on win32, `which` on unix) as the authoritative launcher probe:
+// `fs.existsSync`/`statSync` FAIL on Windows execution-alias reparse stubs
+// (%LOCALAPPDATA%\Microsoft\WindowsApps\*.exe are 0-byte AppExecLink
+// reparse points → stat errors → existsSync returns false), so a pure
+// filesystem probe cannot see a Store-installed launcher. The OS resolver can.
 // ---------------------------------------------------------------------------
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { execFileSync } from 'child_process';
 
 export interface BinDetectDeps {
   platform: NodeJS.Platform;
@@ -22,6 +27,15 @@ export interface BinDetectDeps {
   fileExists: (p: string) => boolean;
   /** List a directory's immediate children. Returns [] on any error/missing dir. */
   listDir: (p: string) => string[];
+  /**
+   * OS-native name resolver: shells `where <name>` (win32) / `which <name>`
+   * (unix) and returns the raw stdout, or null on any failure / not-found.
+   * Injected so tests can simulate `where gimp-3` → a WindowsApps alias path
+   * without a real Windows box. The default impl only actually shells out when
+   * the requested platform matches the real host (so cross-platform-simulated
+   * unit tests stay hermetic and never touch the host PATH).
+   */
+  runWhich: (name: string, platform: NodeJS.Platform) => string | null;
 }
 
 function realFileExists(p: string): boolean {
@@ -32,6 +46,27 @@ function realListDir(p: string): string[] {
   try { return fs.readdirSync(p); } catch { return []; }
 }
 
+/**
+ * Real OS-native resolver. Shells `where`/`which` and returns raw stdout.
+ * try/catch-guarded end to end: a missing resolver or a non-zero exit
+ * (not-found) throws → we return null and detection falls through.
+ * Only shells out when `platform` matches the real host — a unit test that
+ * *simulates* win32 on a linux CI box must inject its own runWhich; the
+ * default here refuses to leak the host's PATH into a foreign-platform sim.
+ */
+function realRunWhich(name: string, platform: NodeJS.Platform): string | null {
+  if (platform !== process.platform) { return null; }
+  try {
+    const isWin = process.platform === 'win32';
+    const out = isWin
+      ? execFileSync('where', [name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000, windowsHide: true })
+      : execFileSync('which', [name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 });
+    return typeof out === 'string' ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 export function defaultBinDetectDeps(): BinDetectDeps {
   return {
     platform: process.platform,
@@ -39,6 +74,7 @@ export function defaultBinDetectDeps(): BinDetectDeps {
     homedir: os.homedir,
     fileExists: realFileExists,
     listDir: realListDir,
+    runWhich: realRunWhich,
   };
 }
 
@@ -55,10 +91,37 @@ function winExts(env: NodeJS.ProcessEnv): string[] {
 }
 
 /**
+ * Authoritative OS-native resolution of a bare launcher name via `where`/`which`.
+ * Returns the first resolved absolute path (trimmed), or null. This is the only
+ * probe that correctly sees Windows execution-alias reparse stubs, which
+ * `fs.existsSync`/`statSync` (and therefore every fileExists-based probe) miss.
+ * Never throws — runWhich is fully try/catch-guarded.
+ */
+function whichSyncNative(name: string, d: BinDetectDeps): string | null {
+  // Only meaningful for bare names; explicit paths are probed via fileExists.
+  if (/[\\/]/.test(name)) { return null; }
+  let out: string | null = null;
+  try { out = d.runWhich(name, d.platform); } catch { out = null; }
+  if (!out) { return null; }
+  const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+  return first || null;
+}
+
+/** True if a resolved path lives under the Microsoft Store execution-alias dir. */
+function isWindowsAppsAliasPath(p: string): boolean {
+  return /[\\/]Microsoft[\\/]WindowsApps[\\/]/i.test(p);
+}
+
+/**
  * Resolve a bare launcher name against PATH, plus a few well-known install
  * dirs that are frequently missing from a GUI-launched process's PATH
  * (~/.local/bin everywhere; %LOCALAPPDATA%\Programs and %APPDATA%\npm on win).
  * Returns the absolute path of the first match, or null.
+ *
+ * Order: fast manual PATH/extra-dir parse first (cheap, no spawn), then the
+ * authoritative OS-native `where`/`which` resolver as a fallback — the latter
+ * is what catches PATHEXT edge cases and Windows execution-alias reparse stubs
+ * that fileExists cannot stat.
  */
 export function detectBinOnPath(bin: string, deps?: Partial<BinDetectDeps>): string | null {
   const d = mergeDeps(deps);
@@ -89,7 +152,9 @@ export function detectBinOnPath(bin: string, deps?: Partial<BinDetectDeps>): str
       if (d.fileExists(full)) { return full; }
     }
   }
-  return null;
+
+  // Authoritative fallback: OS resolver (handles reparse-stub aliases + PATHEXT).
+  return whichSyncNative(bin, d);
 }
 
 // 'store' = a Microsoft Store / execution-alias install on Windows
@@ -177,7 +242,12 @@ function winStorePackageExes(pkgRe: RegExp, binLeaves: string[], exeRe: RegExp, 
 }
 
 function detectBlender(d: BinDetectDeps): DetectAppResult {
-  // 1) PATH (all platforms) — highest confidence.
+  // 1) OS-native resolver FIRST — authoritative for PATH + PATHEXT + Windows
+  //    execution-alias reparse stubs (which fileExists cannot stat).
+  const nativ = whichSyncNative('blender', d);
+  if (nativ) { return { installed: true, path: nativ, source: isWindowsAppsAliasPath(nativ) ? 'store' : 'path' }; }
+
+  // 2) Manual PATH / off-PATH dir probe (fileExists fast path).
   const onPath = detectBinOnPath('blender', d);
   if (onPath) { return { installed: true, path: onPath, source: 'path' }; }
 
@@ -232,7 +302,15 @@ function detectGimp(d: BinDetectDeps): DetectAppResult {
   // Newest-first. Includes GIMP 3.x versioned launcher names used by the
   // Microsoft Store / CLI execution aliases (gimp-3, gimp-3.2, …).
   const binNames = ['gimp-3.2', 'gimp-3.1', 'gimp-3.0', 'gimp-3', 'gimp-2.99', 'gimp-2.10', 'gimp'];
-  // 1) PATH (all platforms).
+  // 1) OS-native resolver FIRST — authoritative for PATH + PATHEXT + Windows
+  //    execution-alias reparse stubs (0-byte AppExecLink stubs that
+  //    fileExists/statSync cannot see). A hit under \Microsoft\WindowsApps\
+  //    is a Store/execution-alias install → source 'store', else 'path'.
+  for (const b of binNames) {
+    const nativ = whichSyncNative(b, d);
+    if (nativ) { return { installed: true, path: nativ, source: isWindowsAppsAliasPath(nativ) ? 'store' : 'path' }; }
+  }
+  // 2) Manual PATH / off-PATH dir probe (fileExists fast path).
   for (const b of binNames) {
     const onPath = detectBinOnPath(b, d);
     if (onPath) { return { installed: true, path: onPath, source: 'path' }; }

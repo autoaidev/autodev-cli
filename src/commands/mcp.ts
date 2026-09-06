@@ -10,7 +10,7 @@ import { ConfigManager } from '../configManager';
 import { DEFAULT_MCP_SERVERS } from '../mcpManager';
 import { detectApp, detectBinOnPath, type BinDetectDeps, type DetectAppResult } from '../core/binDetect';
 import {
-  getCatalog, serverSpecFor, catalogEntry, GIMP_CLIENT_PLACEHOLDER,
+  getCatalog, serverSpecFor, catalogEntry, pythonInstallHint,
   type CreativeAppId,
 } from '../core/mcpCatalog';
 import {
@@ -98,11 +98,12 @@ export interface DetectResult {
   apps: DetectApp[];
 }
 
-/** Is a prerequisite launcher present on PATH? (uvx / python[3]). */
+/** Is a prerequisite launcher present on PATH? (uv / uvx / git / python[3]). */
 function prereqInstalled(id: string, deps?: Partial<BinDetectDeps>): boolean {
   if (id === 'python') {
     return !!(detectBinOnPath('python3', deps) || detectBinOnPath('python', deps));
   }
+  // Every other id (uv, uvx, git, …) is a bare launcher name resolved on PATH.
   return !!detectBinOnPath(id, deps);
 }
 
@@ -279,8 +280,10 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
     return 0;
   }
 
-  // gimp — experimental.
-  log.warn('⚠  GIMP MCP is EXPERIMENTAL — upstream ships no packaged launcher; expect manual wiring.');
+  // gimp — experimental, but runnable now: the default writes the git-based client
+  // that `uv` fetches + launches (no manual clone). --gimp-client stays an OPTIONAL
+  // override for a user's local checkout (run via python).
+  log.warn('⚠  GIMP MCP is EXPERIMENTAL — upstream is a prototype; expect rough edges.');
   const gimpClient = (opts.gimpClient && opts.gimpClient.trim()) || undefined;
   const server = serverSpecFor('gimp', platform, { gimpClientPath: gimpClient });
   server._meta = { ...(server._meta || {}), catalogId: 'gimp' };
@@ -290,13 +293,17 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
   sync(root);
 
   if (gimpClient) {
-    log.success(`Configured GIMP MCP client "${entry.serverName}" → ${gimpClient}`);
+    log.success(`Configured GIMP MCP client "${entry.serverName}" → local ${gimpClient}`);
+    if (!prereqInstalled('python')) {
+      log.warn('⚠  No python/python3 on PATH (needed to run your local client):');
+      log.plain(`    ${pythonInstallHint(platform)}`);
+    }
   } else {
-    log.warn(`Wrote a DISABLED stub "${entry.serverName}" (args: ${GIMP_CLIENT_PLACEHOLDER}). Provide --gimp-client <path> to complete it.`);
-  }
-  if (!prereqInstalled('python')) {
-    log.warn('⚠  No python/python3 on PATH:');
-    log.plain(`    ${entry.prerequisites[0]!.installHint}`);
+    log.success(`Configured GIMP MCP server "${entry.serverName}" (runs from git via uv).`);
+    if (!prereqInstalled('uv')) {
+      log.warn('⚠  `uv` is NOT on PATH — the server is written but will not start until you install uv:');
+      log.plain(`    ${entry.prerequisites[0]!.installHint}`);
+    }
   }
   log.section('Manual steps');
   for (const s of entry.postSetup) { log.plain(`  • ${s}`); }
@@ -487,7 +494,7 @@ export function mcpCommand(program: Command): void {
       }
       log.plain('');
       log.gray('  Enable one with:  autodev mcp detect --enable blender');
-      log.gray('  GIMP (experimental): autodev mcp detect --enable gimp --gimp-client <gimp_mcp_client.py>');
+      log.gray('  GIMP (experimental): autodev mcp detect --enable gimp   (or --gimp-client <path> for a local checkout)');
     });
 }
 

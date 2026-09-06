@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { detectBinOnPath, detectApp } from '../out/core/binDetect.js';
-import { serverSpecFor, getCatalog, GIMP_CLIENT_PLACEHOLDER } from '../out/core/mcpCatalog.js';
+import { serverSpecFor, getCatalog, GIMP_MCP_CLIENT_URL, GIMP_MCP_PIN } from '../out/core/mcpCatalog.js';
 import { buildDetect } from '../out/commands/mcp.js';
 
 let failures = 0;
@@ -269,12 +269,23 @@ function makeFs(files, dirs) {
      JSON.stringify(bWin.args) === JSON.stringify(['--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
     'blender server (win32) = bare uvx --from git+…lab… (no cmd/c wrapper, no hardcoded path)');
 
-  const gStub = serverSpecFor('gimp', 'linux');
-  ok(gStub.enabled === false && gStub.args[0] === GIMP_CLIENT_PLACEHOLDER,
-    'gimp stub is enabled:false with placeholder client path');
+  // DEFAULT gimp = the git-based client run by bare `uv` (NOT a disabled stub),
+  // enabled by default, identical on every platform.
+  const gLinux = serverSpecFor('gimp', 'linux');
+  ok(gLinux.command === 'uv' &&
+     JSON.stringify(gLinux.args) === JSON.stringify(['run', '--with', GIMP_MCP_PIN, GIMP_MCP_CLIENT_URL]) &&
+     gLinux.enabled === undefined,
+    'gimp server (default) = uv run --with mcp==1.2.0 <raw github url>, enabled (no stub)');
+  const gWin = serverSpecFor('gimp', 'win32');
+  ok(gWin.command === 'uv' && JSON.stringify(gWin.args) === JSON.stringify(gLinux.args),
+    'gimp git-based server is identical bare `uv` on win32 (no cmd/c, no path)');
+  ok(GIMP_MCP_PIN === 'mcp==1.2.0' && /raw\.githubusercontent\.com\/libreearth\/gimp-mcp/.test(GIMP_MCP_CLIENT_URL) &&
+     /gimp_mcp_client\.py$/.test(GIMP_MCP_CLIENT_URL),
+    'gimp client URL is the pinned libreearth/gimp-mcp raw gimp_mcp_client.py + mcp==1.2.0 pin');
+  // OPTIONAL local override: a user's cloned client is run via python (enabled).
   const gReal = serverSpecFor('gimp', 'linux', { gimpClientPath: '/opt/gimp-mcp/client.py' });
-  ok(gReal.enabled === undefined && gReal.args[0] === '/opt/gimp-mcp/client.py',
-    'gimp with real client path is not stubbed/disabled');
+  ok(gReal.command === 'python3' && gReal.enabled === undefined && gReal.args[0] === '/opt/gimp-mcp/client.py',
+    'gimp with a local client path → python3 <path>, enabled (not stubbed)');
 }
 
 // ── (e) buildDetect stable shape ────────────────────────────────────────────
@@ -304,6 +315,11 @@ function makeFs(files, dirs) {
   ok(blender.notes.some((s) => /9876/.test(s)), 'blender notes explain the same-name/same-port 9876 collision');
   ok(blender.installed === false && blender.alreadyEnabled === false, 'blender not installed / not enabled in fresh workspace');
   ok(Array.isArray(blender.postSetup) && blender.postSetup.length > 0, 'blender has postSetup steps');
+  ok(gimp.server.command === 'uv' && gimp.server.args[0] === 'run', 'gimp server spec = uv run (git-based client)');
+  ok(gimp.prerequisites.map((p) => p.id).includes('uv'), 'gimp prerequisite is uv (uv run fetches the client)');
+  ok(gimp.postSetup.some((s) => /uv fetches/i.test(s)), 'gimp postSetup says the client runs from git via uv');
+  ok(gimp.postSetup.some((s) => /GIMP 3\.0\+/.test(s)), 'gimp postSetup requires GIMP 3.0+');
+  ok(gimp.postSetup.some((s) => /9876/.test(s)), 'gimp postSetup notes the port-9876 Blender collision');
   ok(Array.isArray(gimp.notes) && gimp.notes.length > 0, 'gimp surfaces honesty notes');
   // JSON must round-trip cleanly (no undefined/functions leak).
   const json = JSON.parse(JSON.stringify(result));

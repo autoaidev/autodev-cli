@@ -11,9 +11,11 @@
 // It is deliberately narrow:
 //   - blender : ALWAYS re-resolved if command/args drift from the catalog spec
 //               (Blender has no user-customizable fields, so replacing is safe).
-//   - gimp    : re-resolved ONLY while the entry is still a STUB (args still carry
-//               the <GIMP_MCP_CLIENT_PY> placeholder). If the user pointed it at a
-//               real client path, we never clobber it.
+//   - gimp    : re-resolved to the git-based `uv run …` spec if the stored entry
+//               drifts from the current catalog (covers the OLD <GIMP_MCP_CLIENT_PY>
+//               placeholder stub AND any earlier command). The ONE thing we never
+//               clobber is a user's LOCAL checkout: a python/python3 entry pointing
+//               at a concrete (non-placeholder) client path is preserved.
 // `enabled`, `env`, and `_meta` are preserved; the match is name-based so entries
 // written before any `_meta.catalogId` tag existed still migrate. Non-creative
 // entries (built-ins, filesystem's <ALLOWED_DIR>, custom user servers) are never
@@ -34,9 +36,16 @@ function _argsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
   return true;
 }
 
-/** A gimp entry is still a STUB (never completed by the user) if its args carry the placeholder. */
-function _isGimpStub(e: McpJsonEntry): boolean {
-  return Array.isArray(e.args) && e.args.some((a) => a === GIMP_CLIENT_PLACEHOLDER);
+/**
+ * A gimp entry the migration must PRESERVE: a user's local checkout, i.e. a
+ * python/python3 command pointing at a concrete (non-placeholder) client path.
+ * Everything else (the old <GIMP_MCP_CLIENT_PY> placeholder stub, or any earlier
+ * command form) is upgradeable to the current git-based catalog spec.
+ */
+function _isGimpLocalPython(e: McpJsonEntry): boolean {
+  if (e.command !== 'python' && e.command !== 'python3') { return false; }
+  const first = Array.isArray(e.args) ? e.args[0] : undefined;
+  return typeof first === 'string' && first.length > 0 && first !== GIMP_CLIENT_PLACEHOLDER;
 }
 
 /**
@@ -59,8 +68,9 @@ export function migrateCreativeMcpEntries(
     // Only stdio creative entries can match a catalog spec — a remote (url) entry
     // under this name is not ours to touch.
     if (typeof entry.command !== 'string') continue;
-    // GIMP: never clobber a real client path — migrate only while still a stub.
-    if (id === 'gimp' && !_isGimpStub(entry)) continue;
+    // GIMP: never clobber a user's local checkout (python[3] + real client path);
+    // everything else (old placeholder stub / earlier command) upgrades below.
+    if (id === 'gimp' && _isGimpLocalPython(entry)) continue;
 
     const spec = serverSpecFor(id, platform);
     // Idempotent — already the catalog spec, nothing to do.
@@ -76,7 +86,7 @@ export function migrateCreativeMcpEntries(
     changed = true;
     log?.(id === 'blender'
       ? 'ConfigManager: migrated blender MCP server to the Blender Lab client'
-      : 'ConfigManager: migrated gimp MCP server stub to the current catalog spec');
+      : 'ConfigManager: migrated gimp MCP server to the git-based uv run client');
   }
 
   if (changed) {

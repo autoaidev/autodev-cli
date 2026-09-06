@@ -85,20 +85,25 @@ console.log('creative-app MCP migration smoke');
 }
 
 // ---------------------------------------------------------------------------
-// 3. GIMP: a STILL-A-STUB entry (placeholder client) is re-resolved; stays a
-//    disabled stub.
+// 3. GIMP: an OLD <GIMP_MCP_CLIENT_PY> placeholder stub is upgraded to the
+//    git-based `uv run …` spec. `enabled` is preserved (not force-flipped).
 // ---------------------------------------------------------------------------
 {
   const root = mkRoot();
   writeMcp(root, {
     gimp: { command: 'python', args: [GIMP_CLIENT_PLACEHOLDER], enabled: false, _meta: { kind: 'user' } },
   });
+  const before = readEntry(root, 'gimp');
   const changed = migrateCreativeMcpEntries(root, 'linux');
   const spec = serverSpecFor('gimp', 'linux');
   const e = readEntry(root, 'gimp');
-  ok('gimp stub re-resolved to current catalog command', changed === true && e.command === spec.command);
-  ok('gimp stub still carries the placeholder (still a stub)', e.args[0] === GIMP_CLIENT_PLACEHOLDER);
-  ok('gimp stub stays disabled', e.enabled === false);
+  console.log('    before:', JSON.stringify({ command: before.command, args: before.args }));
+  console.log('    after :', JSON.stringify({ command: e.command, args: e.args }));
+  ok('old gimp stub upgraded to the git-based uv command', changed === true && e.command === 'uv' && e.command === spec.command);
+  ok('old gimp stub args → uv run --with mcp==1.2.0 <raw github url>', eqArgs(e.args, spec.args) &&
+     e.args[0] === 'run' && e.args.some((a) => /raw\.githubusercontent\.com\/libreearth\/gimp-mcp/.test(a)));
+  ok('placeholder is gone (no longer a stub)', !e.args.includes(GIMP_CLIENT_PLACEHOLDER));
+  ok('gimp enabled state preserved (stayed disabled)', e.enabled === false);
 }
 
 // ---------------------------------------------------------------------------

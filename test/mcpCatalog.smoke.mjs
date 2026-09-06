@@ -76,6 +76,15 @@ const nonEmptyServer = (s) =>
      !(blender.server.args[0] === 'blender-mcp'),
     'blender server uses the Lab --from git+…lab… client (not bare community blender-mcp)');
   ok(nonEmptyServer(gimp.server), 'gimp has a non-empty server');
+  // GIMP is the git-based client run by bare `uv` (uv run --with mcp==1.2.0 <raw
+  // github url>) — NOT a disabled stub, NOT python.
+  ok(gimp.server.command === 'uv' &&
+     gimp.server.args[0] === 'run' &&
+     gimp.server.args.includes('--with') &&
+     gimp.server.args.includes('mcp==1.2.0') &&
+     gimp.server.args.some((a) => /raw\.githubusercontent\.com\/libreearth\/gimp-mcp/.test(a) && /gimp_mcp_client\.py$/.test(a)) &&
+     gimp.server.enabled === undefined,
+    'gimp server = uv run --with mcp==1.2.0 <pinned raw github client> (not a stub)');
 
   // Launcher form: bare `uvx` on EVERY platform (no cmd/c wrapper, no hardcoded
   // uvx path) — win32 must be identical to linux.

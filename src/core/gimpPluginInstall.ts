@@ -7,7 +7,7 @@
 // The plug-in is MENU-TRIGGERED (the user's verified flow): in GIMP the user runs
 // Tools → MCP → Start MCP Server (or Filters → Development → Start MCP Server) and
 // keeps the "GIMP MCP Server" window open — that holds the out-of-process plug-in
-// alive and the :9876 socket. We do NOT auto-start it (the PERSISTENT approach we
+// alive and the :9877 socket. We do NOT auto-start it (the PERSISTENT approach we
 // tried did not work on GIMP 3.2); we only install the files.
 //
 // GROUNDED RULES (see AutoDev research):

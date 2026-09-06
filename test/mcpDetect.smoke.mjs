@@ -323,7 +323,7 @@ function makeFs(files, dirs) {
   ok(gimp.postSetup.some((s) => /installed automatically/i.test(s)),
     'gimp postSetup says the plugin + client are installed automatically');
   ok(gimp.postSetup.some((s) => /GIMP 3\.x/i.test(s)), 'gimp postSetup requires GIMP 3.x');
-  ok(gimp.postSetup.some((s) => /9876/.test(s)), 'gimp postSetup notes the port-9876 Blender collision');
+  ok(gimp.postSetup.some((s) => /9877/.test(s)), 'gimp postSetup notes GIMP MCP uses port 9877');
   ok(Array.isArray(gimp.notes) && gimp.notes.length > 0, 'gimp surfaces honesty notes');
   // JSON must round-trip cleanly (no undefined/functions leak).
   const json = JSON.parse(JSON.stringify(result));

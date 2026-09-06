@@ -21,7 +21,7 @@ logger = logging.getLogger("GimpMCPServer")
 
 
 class GimpConnection:
-    def __init__(self, host='127.0.0.1', port=9876):
+    def __init__(self, host='127.0.0.1', port=9877):
         self.host = host
         self.port = port
         self.sock = None

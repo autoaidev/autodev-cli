@@ -332,7 +332,7 @@ function printGimpInstall(res: GimpInstallResult): void {
     for (const p of res.paths) { log.plain(`    plug-in: ${p}`); }
     for (const p of res.clientPaths) { log.plain(`    client:  ${p}`); }
     log.plain("  In GIMP: Tools → MCP → Start MCP Server (or Filters → Development), and KEEP the");
-    log.plain("  'GIMP MCP Server' window open — it holds the plug-in alive on localhost:9876.");
+    log.plain("  'GIMP MCP Server' window open — it holds the plug-in alive on localhost:9877.");
   } else {
     log.warn('⚠  The GIMP MCP plugin was NOT installed.');
   }
@@ -485,7 +485,7 @@ export function mcpCommand(program: Command): void {
   // autodev mcp gimp-install-plugin [dir]
   cmd
     .command('gimp-install-plugin [dir]')
-    .description('Install the AUTO-START GIMP 3.x MCP plugin (localhost:9876 opens on GIMP launch — no menu click)')
+    .description('Install the AUTO-START GIMP 3.x MCP plugin (localhost:9877 opens on GIMP launch — no menu click)')
     .action((dir: string | undefined) => {
       const res = installGimpPlugin(dir ? { targetDir: path.resolve(dir) } : undefined);
       printGimpInstall(res);

@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 /** sha256 (first 12 hex) of the canonical media/gimp/gimp_mcp_client.py. */
-export const GIMP_CLIENT_SOURCE_HASH = "03f3cfe6c80a";
+export const GIMP_CLIENT_SOURCE_HASH = "a11b5a3693a8";
 
 /** Full body of the user-verified GIMP MCP client (FastMCP stdio) (media/gimp/gimp_mcp_client.py). */
 export const GIMP_CLIENT_SOURCE = `#!/usr/bin/env python3
@@ -35,7 +35,7 @@ logger = logging.getLogger("GimpMCPServer")
 
 
 class GimpConnection:
-    def __init__(self, host='127.0.0.1', port=9876):
+    def __init__(self, host='127.0.0.1', port=9877):
         self.host = host
         self.port = port
         self.sock = None

@@ -5,7 +5,7 @@
 # Derived from libreearth/gimp-mcp (GPL-3.0; see media/gimp/LICENSE) and fixed by
 # the user / AutoDev for GIMP 3.2 (Store / MSIX). Verified working on real GIMP
 # 3.2.44: a menu-triggered PLUGIN (Tools -> MCP / Filters -> Development -> Start
-# MCP Server) that listens on 127.0.0.1:9876 and drives GIMP. Keep the "GIMP MCP
+# MCP Server) that listens on 127.0.0.1:9877 and drives GIMP. Keep the "GIMP MCP
 # Server" window open — GLib.MainLoop() holds the out-of-process plug-in alive.
 #
 # This is the user's verified file; the body below is kept byte-for-byte. The
@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 
 # GIMP MCP Server Plugin (GIMP 3.2)
-# Listens on localhost:9876 so the libreearth gimp-mcp client can drive GIMP.
+# Listens on localhost:9877 so it does not collide with Blender MCP (9876).
 
 import gi
 gi.require_version('Gimp', '3.0')
@@ -31,7 +31,7 @@ import threading
 import traceback
 
 HOST = '127.0.0.1'
-PORT = 9876
+PORT = 9877
 # Store GIMP redirects GLib config dir into the MSIX LocalCache. Also write
 # to the real roaming profile so the log is findable.
 _LOG_PATHS = [
@@ -190,7 +190,7 @@ class MCPPlugin(Gimp.PlugIn):
         procedure.set_menu_label(_('Start MCP Server'))
         procedure.set_documentation(
             _('Starts an MCP server to control GIMP externally'),
-            _('Listens on 127.0.0.1:9876 for the GIMP MCP client'),
+            _('Listens on 127.0.0.1:9877 for the GIMP MCP client'),
             name,
         )
         procedure.set_attribution('GIMP MCP', 'GIMP MCP', '2026')

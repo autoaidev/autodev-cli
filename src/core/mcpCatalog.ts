@@ -169,9 +169,9 @@ export function getCatalog(platform: NodeJS.Platform): McpCatalogEntry[] {
       prerequisites: [{ id: 'uv', installHint: uvInstallHint(platform) }],
       postSetup: [
         `Plugin + client are installed automatically into your GIMP 3.x config (${gimpPluginDir(platform)}) — you copy nothing. Re-run any time with: autodev mcp gimp-install-plugin`,
-        "In GIMP: Tools → MCP → Start MCP Server (or Filters → Development → Start MCP Server), and KEEP the 'GIMP MCP Server' window open — it holds the plug-in process alive and the :9876 socket. One click per GIMP session (the window may hide behind other apps; use the taskbar).",
+        "In GIMP: Tools → MCP → Start MCP Server (or Filters → Development → Start MCP Server), and KEEP the 'GIMP MCP Server' window open — it holds the plug-in process alive and the :9877 socket. One click per GIMP session (the window may hide behind other apps; use the taskbar).",
         'Requires GIMP 3.x (the plugin uses the GIMP 3.0 Python API).',
-        "Port 9876 collides with Blender — don't run both MCP servers at once.",
+        'GIMP MCP uses port 9877; Blender uses 9876, so they no longer collide and can run together.',
       ],
       notes: [
         `Log: ${gimpLogPath(platform)} (Store/MSIX GIMP also mirrors a copy inside its sandbox LocalCache).`,

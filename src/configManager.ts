@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
+import { resolveMcpStartupTimeoutSec } from './core/mcpStartupTimeout';
 import { writeFileSecure } from './core/secureFile';
 import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 
@@ -355,6 +356,14 @@ export class ConfigManager {
       } catch { /* ignore */ }
     }
 
+    // MCP server startup/request timeout (ms) written into the provider config
+    // files that expose such a knob. Single source of truth: settings
+    // `mcpStartupTimeoutSec` (default 90). Slow MCP servers (e.g. the Blender Lab
+    // client) exceed the tight per-CLI defaults; opencode defaults to a 5s MCP
+    // request timeout, so this is a real fix, not just forward-compat.
+    let mcpTimeoutMs = resolveMcpStartupTimeoutSec() * 1000;
+    try { mcpTimeoutMs = resolveMcpStartupTimeoutSec(loadSettingsForRoot(root)) * 1000; } catch { /* use default */ }
+
     // VS Code workspace MCP: .vscode/mcp.json — supports remote { type, url, headers }.
     _mergeJson(path.join(root, '.vscode', 'mcp.json'), (cfg) => {
       const srv = _obj(cfg['servers']);
@@ -369,20 +378,27 @@ export class ConfigManager {
     }, log, 'VS Code MCP (.vscode/mcp.json)');
 
     // OpenCode project config: opencode.json — remote servers use type:'remote'.
+    // OpenCode's per-server `timeout` (ms) governs MCP requests incl. the
+    // connect-time tools/list handshake (default 5000 — far too tight for a slow
+    // server like the Blender Lab client). Write it per-server plus a global
+    // experimental.mcp_timeout so both surfaces are covered.
     _mergeJson(path.join(root, 'opencode.json'), (cfg) => {
       const mcp = _obj(cfg['mcp']);
       for (const name of managedNames) {
         const e = effective[name];
         if (!e) { delete mcp[name]; continue; }
         if (isRemoteMcp(e)) {
-          mcp[name] = { type: 'remote', url: e.url, enabled: true, ...(e.headers ? { headers: e.headers } : {}) };
+          mcp[name] = { type: 'remote', url: e.url, enabled: true, timeout: mcpTimeoutMs, ...(e.headers ? { headers: e.headers } : {}) };
         } else {
-          const entry: Record<string, unknown> = { type: 'local', command: [e.command, ...(e.args ?? [])], enabled: true };
+          const entry: Record<string, unknown> = { type: 'local', command: [e.command, ...(e.args ?? [])], enabled: true, timeout: mcpTimeoutMs };
           if (e.env && Object.keys(e.env).length > 0) { entry['environment'] = e.env; }
           mcp[name] = entry;
         }
       }
       cfg['mcp'] = mcp;
+      const exp = _obj(cfg['experimental']);
+      exp['mcp_timeout'] = mcpTimeoutMs;
+      cfg['experimental'] = exp;
     }, log, 'OpenCode project MCP (opencode.json)');
 
     // Copilot CLI MCP — PER-WORKSPACE, not the global ~/.copilot/mcp-config.json.
@@ -397,14 +413,17 @@ export class ConfigManager {
     // global file), so write our servers to a file inside the WORKSPACE and let
     // the command builder pass it. Each agent then carries its own MCP config and
     // they stop fighting. See buildCopilotCliCommand().
+    // Copilot's per-server `timeout` (ms) is undocumented and reported not to be
+    // fully honored (github/copilot-cli#172), but it IS an accepted field and the
+    // only timeout surface Copilot exposes — write it best-effort/forward-compat.
     _writeJson(copilotMcpConfigPath(root), () => {
       const srv: Record<string, unknown> = {};
       for (const name of managedNames) {
         const e = effective[name];
         if (!e) { continue; }
         srv[name] = isRemoteMcp(e)
-          ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}), tools: ['*'] }
-          : { type: 'local', command: e.command, args: e.args ?? [], env: e.env ?? {}, tools: ['*'] };
+          ? { type: e.type === 'sse' ? 'sse' : 'http', url: e.url, ...(e.headers ? { headers: e.headers } : {}), tools: ['*'], timeout: mcpTimeoutMs }
+          : { type: 'local', command: e.command, args: e.args ?? [], env: e.env ?? {}, tools: ['*'], timeout: mcpTimeoutMs };
       }
       return { mcpServers: srv };
     }, log, 'Copilot MCP (per-workspace)');
@@ -425,7 +444,7 @@ export class ConfigManager {
     // Remote servers carry a nested [mcp_servers.<name>.headers] table for the
     // A2A bearer token. TOML (not JSON), so we regenerate only the managed
     // mcp_servers blocks and preserve any other grok settings in the file.
-    _writeGrokToml(path.join(root, '.grok', 'config.toml'), managedNames, effective, log);
+    _writeGrokToml(path.join(root, '.grok', 'config.toml'), managedNames, effective, Math.round(mcpTimeoutMs / 1000), log);
   }
 
   /**
@@ -654,6 +673,7 @@ function _writeGrokToml(
   filePath: string,
   managedNames: Set<string>,
   effective: McpJsonEntries,
+  startupTimeoutSec: number,
   log?: (m: string) => void,
 ): void {
   try {
@@ -682,8 +702,11 @@ function _writeGrokToml(
       const e = effective[name];
       if (!e) continue;
       const key = `mcp_servers.${_tomlKey(name)}`;
+      // startup_timeout_sec: harmless/forward-compat — current grok IGNORES it
+      // (it honors GROK_MCP_STARTUP_TIMEOUT_SECS, injected at spawn), but writing
+      // it here means the moment grok wires the config path up, it just works.
       if (isRemoteMcp(e) && e.url) {
-        const b = [`[${key}]`, `url = ${_tomlStr(e.url)}`, `enabled = true`];
+        const b = [`[${key}]`, `url = ${_tomlStr(e.url)}`, `enabled = true`, `startup_timeout_sec = ${startupTimeoutSec}`];
         if (e.headers && Object.keys(e.headers).length) {
           b.push('', `[${key}.headers]`);
           for (const [hk, hv] of Object.entries(e.headers)) { b.push(`${_tomlKey(hk)} = ${_tomlStr(String(hv))}`); }
@@ -691,7 +714,8 @@ function _writeGrokToml(
         blocks.push(b.join('\n'));
       } else if (typeof e.command === 'string') {
         const b = [`[${key}]`, `command = ${_tomlStr(e.command)}`,
-          `args = [${(e.args ?? []).map(a => _tomlStr(String(a))).join(', ')}]`, `enabled = true`];
+          `args = [${(e.args ?? []).map(a => _tomlStr(String(a))).join(', ')}]`, `enabled = true`,
+          `startup_timeout_sec = ${startupTimeoutSec}`];
         if (e.env && Object.keys(e.env).length) {
           b.push('', `[${key}.env]`);
           for (const [ek, ev] of Object.entries(e.env)) { b.push(`${_tomlKey(ek)} = ${_tomlStr(String(ev))}`); }

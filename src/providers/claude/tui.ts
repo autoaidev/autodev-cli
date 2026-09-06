@@ -159,7 +159,10 @@ async function getOrCreateClient(
     verbose: true,
     includePartialMessages: true,
     resumeSessionId: resumeSessionId || undefined,
-    env: { CI: 'true' },
+    // MCP server startup timeout (ms) — set by applyMcpStartupEnv('claude') on
+    // process.env before this runs. Pass it through explicitly so it survives
+    // regardless of whether the client merges or replaces the child env.
+    env: { CI: 'true', ...(process.env['MCP_TIMEOUT'] ? { MCP_TIMEOUT: process.env['MCP_TIMEOUT'] } : {}) },
     ...(model ? { model: model.replace(/-1m$/i, '') } : {}),
   });
 

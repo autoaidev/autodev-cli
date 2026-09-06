@@ -67,13 +67,23 @@ const nonEmptyServer = (s) =>
   ok(blender && blender.kind === 'creative' && blender.experimental === false, 'blender kind:creative, experimental:false');
   ok(gimp && gimp.kind === 'creative' && gimp.experimental === true, 'gimp kind:creative, experimental:true');
   ok(blender.requiresApp === 'blender' && gimp.requiresApp === 'gimp', 'creative entries carry requiresApp');
-  ok(blender.server.command === 'uvx' && nonEmptyServer(blender.server), 'blender server = uvx blender-mcp (linux)');
+  // Blender uses the OFFICIAL Blender Lab client (uvx --from git+…lab…), NOT the
+  // community `uvx blender-mcp` (wrong protocol, collides on port 9876).
+  ok(blender.server.command === 'uvx' && nonEmptyServer(blender.server), 'blender server = uvx (linux)');
+  ok(blender.server.args.includes('--from') &&
+     blender.server.args.some((a) => a.includes('projects.blender.org/lab/blender_mcp')) &&
+     blender.server.args.includes('blender-mcp') &&
+     !(blender.server.args[0] === 'blender-mcp'),
+    'blender server uses the Lab --from git+…lab… client (not bare community blender-mcp)');
   ok(nonEmptyServer(gimp.server), 'gimp has a non-empty server');
 
-  // Platform-awareness: on win32 blender is wrapped in cmd /c.
+  // Platform-awareness: on win32 blender is wrapped in cmd /c uvx --from …lab….
   const win = buildCatalog('win32');
   const wBlender = win.servers.find((s) => s.id === 'blender');
-  ok(wBlender.server.command === 'cmd', 'blender server is platform-aware (cmd /c on win32)');
+  ok(wBlender.server.command === 'cmd' &&
+     JSON.stringify(wBlender.server.args.slice(0, 3)) === JSON.stringify(['/c', 'uvx', '--from']) &&
+     wBlender.server.args.some((a) => a.includes('projects.blender.org/lab/blender_mcp')),
+    'blender server is platform-aware (cmd /c uvx --from …lab… on win32)');
 }
 
 // ── JSON round-trips cleanly ────────────────────────────────────────────────

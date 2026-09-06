@@ -116,12 +116,15 @@ function makeFs(files, dirs) {
 
 // ── (d) serverSpecFor platform-awareness + gimp stub ────────────────────────
 {
+  const LAB_FROM = 'git+https://projects.blender.org/lab/blender_mcp.git@v1.0.0#subdirectory=mcp';
   const bLinux = serverSpecFor('blender', 'linux');
-  ok(bLinux.command === 'uvx' && JSON.stringify(bLinux.args) === JSON.stringify(['blender-mcp']),
-    'blender server (non-win) = uvx blender-mcp');
+  ok(bLinux.command === 'uvx' &&
+     JSON.stringify(bLinux.args) === JSON.stringify(['--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
+    'blender server (non-win) = uvx --from git+…lab… --with "mcp<2" blender-mcp (official Lab client)');
   const bWin = serverSpecFor('blender', 'win32');
-  ok(bWin.command === 'cmd' && JSON.stringify(bWin.args) === JSON.stringify(['/c', 'uvx', 'blender-mcp']),
-    'blender server (win32) = cmd /c uvx blender-mcp');
+  ok(bWin.command === 'cmd' &&
+     JSON.stringify(bWin.args) === JSON.stringify(['/c', 'uvx', '--from', LAB_FROM, '--with', 'mcp<2', 'blender-mcp']),
+    'blender server (win32) = cmd /c uvx --from git+…lab… --with "mcp<2" blender-mcp');
 
   const gStub = serverSpecFor('gimp', 'linux');
   ok(gStub.enabled === false && gStub.args[0] === GIMP_CLIENT_PLACEHOLDER,
@@ -146,8 +149,16 @@ function makeFs(files, dirs) {
   ok(blender && blender.experimental === false, 'blender experimental:false');
   ok(gimp && gimp.experimental === true, 'gimp experimental:true');
   ok(blender.serverName === 'blender' && blender.server.command === 'uvx', 'blender server spec = uvx');
-  ok(Array.isArray(blender.prerequisites) && blender.prerequisites[0].id === 'uvx', 'blender prereq = uvx');
-  ok(blender.prerequisites[0].installed === false, 'blender uvx prereq installed:false (injected empty PATH)');
+  const prereqIds = blender.prerequisites.map((p) => p.id);
+  ok(prereqIds.includes('uvx') && prereqIds.includes('git'),
+    'blender prerequisites include BOTH uvx AND git (Lab client clones a git repo)');
+  ok(blender.prerequisites.every((p) => p.installed === false), 'blender prereqs installed:false (injected empty PATH)');
+  ok(blender.prerequisites.find((p) => p.id === 'git').installHint.length > 0, 'blender git prereq carries an install hint');
+  // The Lab client is documented; postSetup warns against the community package.
+  ok(blender.postSetup.some((s) => /Blender Lab/i.test(s)), 'blender postSetup references the Blender Lab add-on');
+  ok(blender.postSetup.some((s) => /do not|don.?t/i.test(s) && /community|install-addon/i.test(s)),
+    'blender postSetup warns against the community add-on / install-addon');
+  ok(blender.notes.some((s) => /9876/.test(s)), 'blender notes explain the same-name/same-port 9876 collision');
   ok(blender.installed === false && blender.alreadyEnabled === false, 'blender not installed / not enabled in fresh workspace');
   ok(Array.isArray(blender.postSetup) && blender.postSetup.length > 0, 'blender has postSetup steps');
   ok(Array.isArray(gimp.notes) && gimp.notes.length > 0, 'gimp surfaces honesty notes');

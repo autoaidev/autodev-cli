@@ -46,6 +46,7 @@ import { randomUUID } from 'crypto';
 import { eventTypeFor } from '../../hookEventNormalizer';
 import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
+import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import type { ProviderId } from '../../providers';
 
 // ---------------------------------------------------------------------------
@@ -370,8 +371,16 @@ function launchSession(root: string, sessionId: string, resume: boolean, model: 
   // grok exits CLEANLY (exit_group(0)), which we misread as "session died during
   // startup". Hiding the nesting (proper TERM, no TMUX) makes grok use the normal
   // terminal path and it stays alive. (strace-confirmed 2026-08-02.)
+  // The pane inherits the tmux SERVER's env, not our process — so explicitly
+  // stamp the MCP startup timeout onto the launch `env` here. Honor a value the
+  // caller already set on process.env (GrokProvider.dispatch → applyMcpStartupEnv,
+  // or a user override); otherwise fall back to the default. Grok ignores
+  // config.toml's startup_timeout_sec, so this env var is the real knob.
+  const grokMcpStartupSecs =
+    process.env['GROK_MCP_STARTUP_TIMEOUT_SECS'] || String(MCP_STARTUP_TIMEOUT_DEFAULT_SEC);
   const parts = [
     'exec', 'env', '-u', 'TMUX', '-u', 'TMUX_PANE', 'TERM=xterm-256color',
+    `GROK_MCP_STARTUP_TIMEOUT_SECS=${grokMcpStartupSecs}`,
     shq(GROK_BIN),
     '--no-alt-screen', '--always-approve',
     '--cwd', shq(root),
@@ -1125,7 +1134,17 @@ export function sendGrokPrompt(
         '--prompt-file', promptFilePath,
         '--output-format', 'streaming-json',
       ],
-      { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
+      {
+        cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
+        // Give slow MCP servers time to start (grok's default is 30s). Honor a
+        // pre-existing value; otherwise apply the default. Grok ignores
+        // config.toml's startup_timeout_sec — this env var is the real knob.
+        env: {
+          ...process.env,
+          GROK_MCP_STARTUP_TIMEOUT_SECS:
+            process.env['GROK_MCP_STARTUP_TIMEOUT_SECS'] || String(MCP_STARTUP_TIMEOUT_DEFAULT_SEC),
+        },
+      },
     );
   } catch (spawnErr) {
     failSpawn((spawnErr as Error)?.message ?? String(spawnErr));

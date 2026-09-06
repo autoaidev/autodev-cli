@@ -244,6 +244,16 @@ export interface AutodevSettings {
   exportDailyBackup: boolean;
   /** Agent database ID (set automatically when export_config is received from pixel-office). */
   agentId: string;
+  /**
+   * How long (seconds) a provider should wait for an MCP server to finish
+   * STARTING before killing it. Slow MCP servers (e.g. the Blender Lab client,
+   * which clones a git repo + loads the full Blender docs on first run) exceed
+   * the tight per-CLI defaults (Grok kills at 30s). The CLI injects this via the
+   * env var / config field each provider actually honors when it spawns the
+   * agent (grok: GROK_MCP_STARTUP_TIMEOUT_SECS; claude: MCP_TIMEOUT in ms). A
+   * pre-existing env value is never clobbered. Default 90.
+   */
+  mcpStartupTimeoutSec: number;
 }
 
 export const SETTINGS_DEFAULTS: AutodevSettings = {
@@ -313,6 +323,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   exportEnabled: false,
   exportDailyBackup: false,
   agentId: '',
+  mcpStartupTimeoutSec: 90,
 };
 
 /**

@@ -55,9 +55,32 @@ export function pythonInstallHint(platform: NodeJS.Platform): string {
   return 'Install python3 via your package manager (e.g. apt install python3)';
 }
 
+/** Per-platform install hint for git (the Blender Lab client clones a git repo via uvx). */
+export function gitInstallHint(platform: NodeJS.Platform): string {
+  if (platform === 'win32') { return 'Install Git from https://git-scm.com/download/win (tick "Add to PATH")'; }
+  if (platform === 'darwin') { return 'brew install git   (or: xcode-select --install)'; }
+  return 'Install git via your package manager (e.g. apt install git)';
+}
+
+/**
+ * The official Blender Lab MCP client, pinned to the user-verified tag. This is
+ * the client that matches the "MCP from Blender Lab" add-on shipped inside
+ * Blender (protocol `{"type":"execute",...}\0` on localhost:9876). It is a
+ * DIFFERENT project from the community PyPI `blender-mcp` (ahujasid/blender-mcp,
+ * bare `uvx blender-mcp`) which speaks an incompatible `get_addon_info` protocol
+ * and collides on the same name + port — see notes on the catalog entry. `uvx
+ * --from git+…` makes uv clone the Lab repo (hence the extra `git` prerequisite).
+ */
+export const BLENDER_LAB_FROM =
+  'git+https://projects.blender.org/lab/blender_mcp.git@v1.0.0#subdirectory=mcp';
+const BLENDER_LAB_ARGS = ['--from', BLENDER_LAB_FROM, '--with', 'mcp<2', 'blender-mcp'];
+
 /**
  * The McpJsonEntry we would write for an app. Platform-aware.
- *  - Blender: `uvx blender-mcp` (wrapped in `cmd /c` on win32 so the .cmd shim resolves).
+ *  - Blender: the OFFICIAL Blender Lab client via `uvx --from git+…lab…#subdirectory=mcp
+ *    --with "mcp<2" blender-mcp` (wrapped in `cmd /c` on win32 so the .cmd shim
+ *    resolves). This matches the "MCP from Blender Lab" add-on. NEVER bare
+ *    `uvx blender-mcp` — that pulls the incompatible community PyPI package.
  *  - GIMP: a best-effort stdio stub `python <client.py>`, written enabled:false
  *    unless the caller supplies a real client path — GIMP ships no launcher, so
  *    we never pretend it's one-click.
@@ -69,8 +92,8 @@ export function serverSpecFor(
 ): McpJsonEntry {
   if (app === 'blender') {
     return platform === 'win32'
-      ? { command: 'cmd', args: ['/c', 'uvx', 'blender-mcp'] }
-      : { command: 'uvx', args: ['blender-mcp'] };
+      ? { command: 'cmd', args: ['/c', 'uvx', ...BLENDER_LAB_ARGS] }
+      : { command: 'uvx', args: [...BLENDER_LAB_ARGS] };
   }
   // gimp — experimental stub.
   const client = (opts?.gimpClientPath && opts.gimpClientPath.trim()) || GIMP_CLIENT_PLACEHOLDER;
@@ -92,14 +115,20 @@ export function getCatalog(platform: NodeJS.Platform): McpCatalogEntry[] {
       name: 'Blender',
       experimental: false,
       serverName: 'blender',
-      prerequisites: [{ id: 'uvx', installHint: uvInstallHint(platform) }],
+      prerequisites: [
+        { id: 'uvx', installHint: uvInstallHint(platform) },
+        { id: 'git', installHint: gitInstallHint(platform) },
+      ],
       postSetup: [
-        'Run `uvx blender-mcp install-addon` to install the Blender addon',
-        "In Blender: Preferences → Add-ons → enable 'Interface: MCP for Blender'",
-        "In the 3D viewport press N → 'MCP for Blender' → Start MCP Server (listens on localhost:9876)",
+        "In Blender: Edit → Preferences → Add-ons → enable 'MCP from Blender Lab' (Host localhost, Port 9876). Keep Blender open — the add-on only works while Blender is running.",
+        "Do NOT install or enable the community 'MCP for Blender' add-on, and do NOT run `uvx blender-mcp install-addon` — that is a DIFFERENT, incompatible project (wrong protocol) that collides on the same name + port 9876.",
+        'First start is slow — the Lab client clones its git repo and loads the full Blender docs; allow ~90s. If your runner kills MCP startup early, raise its startup timeout (for Grok: set env `GROK_MCP_STARTUP_TIMEOUT_SECS=90`, since Grok ignores `startup_timeout_sec` in config.toml).',
         'Run only one MCP client against Blender at a time',
       ],
-      notes: [],
+      notes: [
+        'Two different projects share the name "blender-mcp" AND port 9876 with INCOMPATIBLE protocols: the official Blender Lab client (this entry) and the community PyPI package (ahujasid/blender-mcp). This entry uses the official Blender Lab client (`uvx --from git+…projects.blender.org/lab/blender_mcp…`) which matches the "MCP from Blender Lab" add-on.',
+        'Never run bare `uvx blender-mcp` — it pulls the community PyPI package, which speaks a different (get_addon_info) protocol the Lab add-on never answers, so the client times out and gets killed.',
+      ],
     },
     {
       id: 'gimp',

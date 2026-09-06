@@ -11,22 +11,35 @@
 // It is deliberately narrow:
 //   - blender : ALWAYS re-resolved if command/args drift from the catalog spec
 //               (Blender has no user-customizable fields, so replacing is safe).
-//   - gimp    : re-resolved to the git-based `uv run …` spec if the stored entry
-//               drifts from the current catalog (covers the OLD <GIMP_MCP_CLIENT_PY>
-//               placeholder stub AND any earlier command). The ONE thing we never
-//               clobber is a user's LOCAL checkout: a python/python3 entry pointing
-//               at a concrete (non-placeholder) client path is preserved.
+//   - gimp    : the ONE thing we never clobber is a user's concrete local client
+//               (python[3] <path>, or `uv run … <concrete local path>`). Anything
+//               else — the old <…> placeholder stub, OR the BROKEN raw-github
+//               upstream client (raw.githubusercontent.com/…/gimp_mcp_client.py)
+//               — is upgraded to `uv run --with mcp==1.2.0 <LOCAL client path>`
+//               using the client installGimpPlugin() writes on this machine. If
+//               GIMP is not installed we can't compute that path, so we leave the
+//               entry as-is (we never NEWLY write the broken raw URL).
 // `enabled`, `env`, and `_meta` are preserved; the match is name-based so entries
 // written before any `_meta.catalogId` tag existed still migrate. Non-creative
 // entries (built-ins, filesystem's <ALLOWED_DIR>, custom user servers) are never
 // touched. Idempotent: an entry already equal to the catalog spec is left alone.
 // ---------------------------------------------------------------------------
 
-import { serverSpecFor, GIMP_CLIENT_PLACEHOLDER, type CreativeAppId } from './mcpCatalog';
+import { serverSpecFor, gimpClientArgOf, isConcreteGimpClientArg, type CreativeAppId } from './mcpCatalog';
+import { resolveGimpClientPath } from './gimpPluginInstall';
 import { loadProjectUserMcp, saveProjectUserMcp, type McpJsonEntry, type McpJsonEntries } from './projectMcp';
 
 /** Creative catalog ids we re-resolve (single source: mcpCatalog). */
 const CREATIVE_IDS: CreativeAppId[] = ['blender', 'gimp'];
+
+export interface MigrateOpts {
+  /**
+   * Resolve the local gimp client path for this machine, or null when GIMP 3.x is
+   * absent. Defaults to resolveGimpClientPath() (real detection). Injectable for
+   * tests. When null, a gimp entry that needs upgrading is left as-is.
+   */
+  resolveGimpClient?: () => string | null;
+}
 
 function _argsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
   const aa = a ?? [];
@@ -37,15 +50,13 @@ function _argsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
 }
 
 /**
- * A gimp entry the migration must PRESERVE: a user's local checkout, i.e. a
- * python/python3 command pointing at a concrete (non-placeholder) client path.
- * Everything else (the old <GIMP_MCP_CLIENT_PY> placeholder stub, or any earlier
- * command form) is upgradeable to the current git-based catalog spec.
+ * A gimp entry the migration must PRESERVE: it already points at a CONCRETE local
+ * client (a real filesystem path, not the placeholder and not a URL) — either a
+ * user's own checkout or the client we already installed. Everything else (the
+ * placeholder stub, the broken raw-github URL, or a bare command) is upgradeable.
  */
-function _isGimpLocalPython(e: McpJsonEntry): boolean {
-  if (e.command !== 'python' && e.command !== 'python3') { return false; }
-  const first = Array.isArray(e.args) ? e.args[0] : undefined;
-  return typeof first === 'string' && first.length > 0 && first !== GIMP_CLIENT_PLACEHOLDER;
+function _isGimpConcreteLocal(e: McpJsonEntry): boolean {
+  return isConcreteGimpClientArg(gimpClientArgOf(e));
 }
 
 /**
@@ -57,7 +68,10 @@ export function migrateCreativeMcpEntries(
   root: string,
   platform: NodeJS.Platform,
   log?: (m: string) => void,
+  opts?: MigrateOpts,
 ): boolean {
+  const resolveGimpClient = opts?.resolveGimpClient ?? (() => resolveGimpClientPath());
+
   let userMcp: McpJsonEntries;
   try { userMcp = loadProjectUserMcp(root); } catch { return false; }
 
@@ -68,11 +82,21 @@ export function migrateCreativeMcpEntries(
     // Only stdio creative entries can match a catalog spec — a remote (url) entry
     // under this name is not ours to touch.
     if (typeof entry.command !== 'string') continue;
-    // GIMP: never clobber a user's local checkout (python[3] + real client path);
-    // everything else (old placeholder stub / earlier command) upgrades below.
-    if (id === 'gimp' && _isGimpLocalPython(entry)) continue;
 
-    const spec = serverSpecFor(id, platform);
+    let spec: McpJsonEntry;
+    if (id === 'gimp') {
+      // Never clobber a user's concrete local client (or the one we installed).
+      if (_isGimpConcreteLocal(entry)) continue;
+      // Otherwise (placeholder stub / broken raw-github URL / bare command) upgrade
+      // to the locally-installed client — but only if we can resolve one. Without a
+      // detected GIMP we leave the entry as-is (never NEWLY write the broken URL).
+      const clientPath = resolveGimpClient();
+      if (!clientPath) continue;
+      spec = serverSpecFor('gimp', platform, { gimpClientPath: clientPath });
+    } else {
+      spec = serverSpecFor(id, platform);
+    }
+
     // Idempotent — already the catalog spec, nothing to do.
     if (entry.command === spec.command && _argsEqual(entry.args, spec.args)) continue;
 
@@ -86,7 +110,7 @@ export function migrateCreativeMcpEntries(
     changed = true;
     log?.(id === 'blender'
       ? 'ConfigManager: migrated blender MCP server to the Blender Lab client'
-      : 'ConfigManager: migrated gimp MCP server to the git-based uv run client');
+      : 'ConfigManager: migrated gimp MCP server to the locally-installed client (uv run)');
   }
 
   if (changed) {

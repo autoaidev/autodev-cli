@@ -85,39 +85,80 @@ console.log('creative-app MCP migration smoke');
 }
 
 // ---------------------------------------------------------------------------
-// 3. GIMP: an OLD <GIMP_MCP_CLIENT_PY> placeholder stub is upgraded to the
-//    git-based `uv run …` spec. `enabled` is preserved (not force-flipped).
+// 3. GIMP: the BROKEN raw-github upstream client is upgraded to the
+//    LOCALLY-INSTALLED client form (`uv run --with mcp==1.2.0 <local path>`)
+//    when GIMP is detected (injected resolver). enabled preserved; URL gone.
 // ---------------------------------------------------------------------------
+const LOCAL_CLIENT = '/home/u/.config/GIMP/3.2/mcp/gimp_mcp_client.py';
 {
   const root = mkRoot();
+  const RAW = 'https://raw.githubusercontent.com/libreearth/gimp-mcp/49c46dd/gimp_mcp_client.py';
   writeMcp(root, {
-    gimp: { command: 'python', args: [GIMP_CLIENT_PLACEHOLDER], enabled: false, _meta: { kind: 'user' } },
+    gimp: { command: 'uv', args: ['run', '--with', 'mcp==1.2.0', RAW], enabled: false, _meta: { kind: 'user' } },
   });
   const before = readEntry(root, 'gimp');
-  const changed = migrateCreativeMcpEntries(root, 'linux');
-  const spec = serverSpecFor('gimp', 'linux');
+  const changed = migrateCreativeMcpEntries(root, 'linux', undefined, { resolveGimpClient: () => LOCAL_CLIENT });
+  const spec = serverSpecFor('gimp', 'linux', { gimpClientPath: LOCAL_CLIENT });
   const e = readEntry(root, 'gimp');
   console.log('    before:', JSON.stringify({ command: before.command, args: before.args }));
   console.log('    after :', JSON.stringify({ command: e.command, args: e.args }));
-  ok('old gimp stub upgraded to the git-based uv command', changed === true && e.command === 'uv' && e.command === spec.command);
-  ok('old gimp stub args → uv run --with mcp==1.2.0 <raw github url>', eqArgs(e.args, spec.args) &&
-     e.args[0] === 'run' && e.args.some((a) => /raw\.githubusercontent\.com\/libreearth\/gimp-mcp/.test(a)));
-  ok('placeholder is gone (no longer a stub)', !e.args.includes(GIMP_CLIENT_PLACEHOLDER));
+  ok('raw-url gimp upgraded to uv command', changed === true && e.command === 'uv' && e.command === spec.command);
+  ok('raw-url gimp args → uv run --with mcp==1.2.0 <local client path>', eqArgs(e.args, spec.args) &&
+     e.args[0] === 'run' && e.args[e.args.length - 1] === LOCAL_CLIENT);
+  ok('broken raw-github URL is gone', !e.args.some((a) => /raw\.githubusercontent\.com/.test(a)));
   ok('gimp enabled state preserved (stayed disabled)', e.enabled === false);
 }
 
+// 3b. The OLD <…> placeholder python stub is likewise upgraded (resolver present).
+{
+  const root = mkRoot();
+  writeMcp(root, {
+    gimp: { command: 'python', args: [GIMP_CLIENT_PLACEHOLDER], enabled: true, _meta: { kind: 'user' } },
+  });
+  const changed = migrateCreativeMcpEntries(root, 'linux', undefined, { resolveGimpClient: () => LOCAL_CLIENT });
+  const e = readEntry(root, 'gimp');
+  ok('old placeholder stub upgraded to uv local form', changed === true && e.command === 'uv' &&
+     e.args[e.args.length - 1] === LOCAL_CLIENT);
+  ok('placeholder is gone (no longer a stub)', !e.args.includes(GIMP_CLIENT_PLACEHOLDER));
+  ok('gimp enabled preserved (stayed enabled)', e.enabled !== false);
+}
+
+// 3c. GIMP NOT installed (resolver → null): a raw-url entry is LEFT AS-IS — the
+//     migration never NEWLY writes the broken URL, and can't compute a local path.
+{
+  const root = mkRoot();
+  const RAW = 'https://raw.githubusercontent.com/libreearth/gimp-mcp/49c46dd/gimp_mcp_client.py';
+  writeMcp(root, {
+    gimp: { command: 'uv', args: ['run', '--with', 'mcp==1.2.0', RAW], _meta: { kind: 'user' } },
+  });
+  const changed = migrateCreativeMcpEntries(root, 'linux', undefined, { resolveGimpClient: () => null });
+  const e = readEntry(root, 'gimp');
+  ok('no GIMP → raw-url gimp entry left as-is (no migration reported)', changed === false && e.args[e.args.length - 1] === RAW);
+}
+
 // ---------------------------------------------------------------------------
-// 4. GIMP: a REAL client path must NEVER be clobbered by the migration.
+// 4. GIMP: a REAL concrete client path must NEVER be clobbered — both the legacy
+//    python[3] <path> form AND the current `uv run … <local path>` form.
 // ---------------------------------------------------------------------------
 {
   const root = mkRoot();
   writeMcp(root, {
     gimp: { command: 'python3', args: ['/opt/gimp-mcp/client.py'], _meta: { kind: 'user' } },
   });
-  const changed = migrateCreativeMcpEntries(root, 'linux');
+  const changed = migrateCreativeMcpEntries(root, 'linux', undefined, { resolveGimpClient: () => LOCAL_CLIENT });
   const e = readEntry(root, 'gimp');
-  ok('gimp real client path is preserved (not clobbered)', e.args[0] === '/opt/gimp-mcp/client.py');
+  ok('gimp real python client path is preserved (not clobbered)', e.args[0] === '/opt/gimp-mcp/client.py');
   ok('gimp real client path → no migration reported', changed === false);
+}
+{
+  const root = mkRoot();
+  writeMcp(root, {
+    gimp: { command: 'uv', args: ['run', '--with', 'mcp==1.2.0', '/opt/mine/gimp_mcp_client.py'], _meta: { kind: 'user' } },
+  });
+  const changed = migrateCreativeMcpEntries(root, 'linux', undefined, { resolveGimpClient: () => LOCAL_CLIENT });
+  const e = readEntry(root, 'gimp');
+  ok('gimp concrete uv-run local client preserved (idempotent, not re-pointed)',
+     changed === false && e.args[e.args.length - 1] === '/opt/mine/gimp_mcp_client.py');
 }
 
 // ---------------------------------------------------------------------------

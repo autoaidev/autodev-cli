@@ -8,6 +8,7 @@ import { writeFileSecure } from './core/secureFile';
 import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 import { migrateCreativeMcpEntries } from './core/mcpCatalogMigrate';
 import { installGimpPluginIfDetected } from './core/gimpPluginInstall';
+import { serverSpecFor, gimpClientArgOf, isConcreteGimpClientArg } from './core/mcpCatalog';
 
 // ---------------------------------------------------------------------------
 // ConfigManager — applies permission/settings files for each CLI provider
@@ -417,18 +418,43 @@ export class ConfigManager {
     }
 
     // If a `gimp` MCP server is ENABLED in the effective set, best-effort install
-    // the GIMP-side AUTO-START plugin so the socket bridge opens on GIMP launch —
-    // exactly what `mcp detect --enable gimp` does, but now also on the in-process
-    // enable path the VS Code extension uses (saveProjectUserMcp + this sync),
-    // which never called the CLI's `mcp detect`. The plugin body is EMBEDDED
-    // (gimpPluginSource.ts), so this works in the extension bundle too (no media
-    // file on disk). Fully guarded + idempotent: only when GIMP 3.x is detected,
-    // and a failure/absent GIMP must NEVER break the sync.
+    // BOTH the GIMP-side plug-in AND the user-verified MCP client — exactly what
+    // `mcp detect --enable gimp` does, but now also on the in-process enable path
+    // the VS Code extension uses (saveProjectUserMcp + this sync), which never
+    // called the CLI's `mcp detect`. Both bodies are EMBEDDED (gimpPluginSource.ts
+    // / gimpClientSource.ts), so this works in the extension bundle too (no media
+    // file on disk). After a successful install we re-point the gimp entry at the
+    // installed client's absolute path (unless it already carries a concrete local
+    // path — a user override / already-installed path — which we never clobber),
+    // persisting to .mcp.json AND updating the in-memory `effective` set so the
+    // fan-out below writes the resolved path to every provider. Fully guarded +
+    // idempotent: only when GIMP 3.x is detected; a failure/absent GIMP must NEVER
+    // break the sync.
     if (effective['gimp']) {
       try {
         const res = installGimpPluginIfDetected();
         if (res.installed) {
-          log?.(`ConfigManager: installed auto-start GIMP MCP plugin (GIMP ${res.version}) — ${res.paths.join(', ')}`);
+          log?.(`ConfigManager: installed GIMP MCP plugin + client (GIMP ${res.version}) — plug-in: ${res.paths.join(', ')}; client: ${res.clientPaths.join(', ')}`);
+          if (res.clientPath) {
+            const cur = userMcp['gimp'];
+            const curArg = cur ? gimpClientArgOf(cur) : undefined;
+            // Only re-point when the entry does NOT already carry a concrete local
+            // client (placeholder / raw-github URL / bare command → upgrade it).
+            if (!isConcreteGimpClientArg(curArg)) {
+              const spec = serverSpecFor('gimp', process.platform, { gimpClientPath: res.clientPath });
+              const base = cur ?? effective['gimp']!;
+              const repointed: McpJsonEntry = {
+                ...base,
+                command: spec.command,
+                args: spec.args ?? [],
+                _meta: { ...(base._meta || {}), catalogId: 'gimp' },
+              };
+              userMcp['gimp'] = repointed;
+              try { saveProjectUserMcp(root, userMcp); } catch (e) { log?.(`ConfigManager: failed persisting gimp client re-point: ${e}`); }
+              effective['gimp'] = repointed;
+              log?.(`ConfigManager: pointed gimp MCP server at the installed client — ${res.clientPath}`);
+            }
+          }
         }
         for (const w of res.warnings) { log?.(`ConfigManager: GIMP plugin: ${w}`); }
       } catch (e) {

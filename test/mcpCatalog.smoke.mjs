@@ -10,6 +10,7 @@
 
 import { buildCatalog } from '../out/commands/mcp.js';
 import { DEFAULT_MCP_SERVERS } from '../out/mcpManager.js';
+import { GIMP_CLIENT_PLACEHOLDER } from '../out/core/mcpCatalog.js';
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + msg); } else { console.log('  ✓ ' + msg); } };
@@ -76,15 +77,16 @@ const nonEmptyServer = (s) =>
      !(blender.server.args[0] === 'blender-mcp'),
     'blender server uses the Lab --from git+…lab… client (not bare community blender-mcp)');
   ok(nonEmptyServer(gimp.server), 'gimp has a non-empty server');
-  // GIMP is the git-based client run by bare `uv` (uv run --with mcp==1.2.0 <raw
-  // github url>) — NOT a disabled stub, NOT python.
+  // GIMP (catalog DISPLAY default, pre-install) = `uv run --with mcp==1.2.0
+  // <placeholder>` — NOT a stub, NOT python, and NEVER the broken raw-github URL.
   ok(gimp.server.command === 'uv' &&
      gimp.server.args[0] === 'run' &&
      gimp.server.args.includes('--with') &&
      gimp.server.args.includes('mcp==1.2.0') &&
-     gimp.server.args.some((a) => /raw\.githubusercontent\.com\/libreearth\/gimp-mcp/.test(a) && /gimp_mcp_client\.py$/.test(a)) &&
+     gimp.server.args[gimp.server.args.length - 1] === GIMP_CLIENT_PLACEHOLDER &&
+     !gimp.server.args.some((a) => /raw\.githubusercontent\.com/.test(a)) &&
      gimp.server.enabled === undefined,
-    'gimp server = uv run --with mcp==1.2.0 <pinned raw github client> (not a stub)');
+    'gimp server = uv run --with mcp==1.2.0 <placeholder> (no stub, no raw-github URL)');
 
   // Launcher form: bare `uvx` on EVERY platform (no cmd/c wrapper, no hardcoded
   // uvx path) — win32 must be identical to linux.

@@ -9,15 +9,16 @@
 //   (e) GIMP 2.10 only → not installed + warning
 //   (f) GIMP3_DIRECTORY env override honored
 //   (+) win32 Store virtualized fallback also written when a GIMP.* package exists
-//   (+) vendored plugin file exists + is PERSISTENT + calls persistent_ready
-//   (+) GPL LICENSE vendored next to it
+//   (+) vendored files: menu-triggered plugin (server) + fixed client + LICENSE
+//   (+) install writes BOTH server (plug-ins/) and client (mcp/) from embedded src
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { installGimpPlugin, installGimpPluginIfDetected, gimpMajorFromPath, vendoredPluginSourcePath } from '../out/core/gimpPluginInstall.js';
+import { installGimpPlugin, installGimpPluginIfDetected, gimpMajorFromPath, vendoredPluginSourcePath, vendoredClientSourcePath, clientPathFor, resolveGimpClientPath } from '../out/core/gimpPluginInstall.js';
 import { GIMP_PLUGIN_SOURCE, GIMP_PLUGIN_SOURCE_HASH } from '../out/core/gimpPluginSource.js';
+import { GIMP_CLIENT_SOURCE, GIMP_CLIENT_SOURCE_HASH } from '../out/core/gimpClientSource.js';
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + msg); } else { console.log('  ✓ ' + msg); } };
@@ -46,6 +47,7 @@ function makeDeps(over) {
     copyFile: (src, dst) => { copies.push({ src, dst }); },
     readFile: (p) => (Object.prototype.hasOwnProperty.call(contents, p) ? contents[p] : ''),
     readPluginSource: () => over.source || 'PLUGIN-SOURCE',
+    readClientSource: () => over.clientSource || 'CLIENT-SOURCE',
     detectGimp: () => over.detect || { installed: false, path: null, source: null },
   };
   return { deps, writes, mkdirs, chmods, copies };
@@ -62,10 +64,15 @@ function makeDeps(over) {
   });
   const res = installGimpPlugin(undefined, deps);
   const expected = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  const expClient = path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py');
   ok(res.installed === true, 'win32: installed');
   ok(res.version === '3.2', 'win32: version resolves to 3.2');
-  ok(res.paths.includes(expected), 'win32: path is %APPDATA%\\GIMP\\3.2\\plug-ins\\gimp_mcp_server\\gimp_mcp_server.py');
-  ok(writes.some((w) => w.p === expected && w.data === 'PLUGIN-SOURCE'), 'win32: wrote the vendored source');
+  ok(res.paths.includes(expected), 'win32: server path is %APPDATA%\\GIMP\\3.2\\plug-ins\\gimp_mcp_server\\gimp_mcp_server.py');
+  ok(res.serverPath === expected, 'win32: serverPath = primary plug-in path');
+  ok(res.clientPath === expClient, 'win32: clientPath is %APPDATA%\\GIMP\\3.2\\mcp\\gimp_mcp_client.py');
+  ok(res.clientPaths.includes(expClient), 'win32: client path recorded');
+  ok(writes.some((w) => w.p === expected && w.data === 'PLUGIN-SOURCE'), 'win32: wrote the vendored server source');
+  ok(writes.some((w) => w.p === expClient && w.data === 'CLIENT-SOURCE'), 'win32: wrote the vendored client source');
 }
 
 // ── (b) both 3.0 and 3.2 (and 3.10) present → picks highest minor ───────────
@@ -90,8 +97,11 @@ function makeDeps(over) {
   });
   const res = installGimpPlugin(undefined, deps);
   const expected = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
-  ok(res.paths[0] === expected, 'linux: path under ~/.config/GIMP/3.2/plug-ins/gimp_mcp_server/');
-  ok(chmods.some((c) => c.p === expected && c.mode === 0o755), 'linux: chmod 0o755 called on the .py');
+  const expClient = path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py');
+  ok(res.paths[0] === expected, 'linux: server path under ~/.config/GIMP/3.2/plug-ins/gimp_mcp_server/');
+  ok(res.clientPath === expClient, 'linux: client path under ~/.config/GIMP/3.2/mcp/');
+  ok(chmods.some((c) => c.p === expected && c.mode === 0o755), 'linux: chmod 0o755 called on the server .py');
+  ok(chmods.some((c) => c.p === expClient && c.mode === 0o755), 'linux: chmod 0o755 called on the client .py');
   ok(res.warnings.length === 0, 'linux: no warnings when a 3.x dir exists');
 }
 
@@ -194,31 +204,53 @@ function makeDeps(over) {
   const res = installGimpPlugin(undefined, deps);
   const real = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
   const virt = path.join(packagesDir, pkgName, 'LocalCache', 'Roaming', 'GIMP', '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
-  ok(res.paths.includes(real), 'win32 Store: real %APPDATA% path written');
-  ok(res.paths.includes(virt), 'win32 Store: virtualized package path ALSO written');
-  ok(res.paths.length === 2, 'win32 Store: exactly the 2 target paths');
+  const realClient = path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py');
+  const virtClient = path.join(packagesDir, pkgName, 'LocalCache', 'Roaming', 'GIMP', '3.2', 'mcp', 'gimp_mcp_client.py');
+  ok(res.paths.includes(real), 'win32 Store: real %APPDATA% server path written');
+  ok(res.paths.includes(virt), 'win32 Store: virtualized package server path ALSO written');
+  ok(res.paths.length === 2, 'win32 Store: exactly the 2 server target paths');
+  ok(res.clientPaths.includes(realClient) && res.clientPaths.includes(virtClient) && res.clientPaths.length === 2,
+    'win32 Store: client mirrored to both the real and virtualized mcp/ dirs');
+  ok(res.serverPath === real && res.clientPath === realClient, 'win32 Store: primary paths = the real %APPDATA% ones');
 }
 
-// ── (+) vendored plugin file exists + PERSISTENT + persistent_ready + LICENSE ─
+// ── (+) vendored files: user-verified MENU-TRIGGERED plugin + client + LICENSE ─
 {
   const src = vendoredPluginSourcePath();
   ok(fs.existsSync(src), 'vendored media/gimp/gimp_mcp_server.py exists');
   const body = fs.readFileSync(src, 'utf8');
-  ok(/PERSISTENT/.test(body), 'vendored plugin registers as PERSISTENT');
-  ok(/persistent_ready/.test(body), 'vendored plugin calls persistent_ready');
-  ok(/plug-in-mcp-server-autostart/.test(body), 'vendored plugin query proc = plug-in-mcp-server-autostart');
-  ok(!/add_menu_path|set_menu_label/.test(body), 'vendored plugin adds NO menu path / label (auto-start)');
-  ok(/Derived from libreearth\/gimp-mcp @49c46dd/.test(body), 'vendored plugin carries GPL provenance header');
+  // The user's verified plug-in is MENU-TRIGGERED (PDBProcType.PLUGIN), NOT the
+  // failed PERSISTENT/auto-start variant we removed.
+  ok(/PDBProcType\.PLUGIN/.test(body), 'vendored plugin registers as a PLUGIN (menu-triggered)');
+  ok(/do_set_i18n/.test(body), 'vendored plugin defines do_set_i18n (required to register on 3.2)');
+  ok(/ProcedureSensitivityMask\.ALWAYS/.test(body), 'vendored plugin sets ALWAYS sensitivity (enabled with no image open)');
+  ok(/GLib\.MainLoop\(\)/.test(body), 'vendored plugin uses GLib.MainLoop() to keep the process alive');
+  ok(/add_menu_path\('<Image>\/Tools\/MCP'\)/.test(body), 'vendored plugin adds the Tools/MCP menu path');
+  ok(/Filters\/Development/.test(body), 'vendored plugin adds the Filters/Development menu path');
+  ok(/'plug-in-mcp-server'/.test(body), 'vendored plugin query proc = plug-in-mcp-server');
+  ok(/'list_images': 'get_images'/.test(body), 'vendored plugin maps list_images→get_images');
+  ok(!/PERSISTENT|persistent_ready/.test(body), 'vendored plugin is NOT the removed PERSISTENT/auto-start variant');
+  ok(/Derived from libreearth\/gimp-mcp/.test(body), 'vendored plugin carries GPL provenance header');
+
+  const csrc = vendoredClientSourcePath();
+  ok(fs.existsSync(csrc), 'vendored media/gimp/gimp_mcp_client.py exists');
+  const cbody = fs.readFileSync(csrc, 'utf8');
+  ok(/getpeername/.test(cbody), 'vendored client reconnects via getpeername');
+  ok(/recv\(65536\)/.test(cbody), 'vendored client reads > 1024 bytes');
+  ok(/Gimp\.get_images/.test(cbody), 'vendored client uses get_images');
+  ok(/Derived from libreearth\/gimp-mcp/.test(cbody), 'vendored client carries GPL provenance header');
+
   const lic = path.join(REPO, 'media', 'gimp', 'LICENSE');
   ok(fs.existsSync(lic) && /GNU GENERAL PUBLIC LICENSE/.test(fs.readFileSync(lic, 'utf8')), 'GPL LICENSE vendored at media/gimp/LICENSE');
 }
 
-// ── (+) EMBEDDED source: install writes GIMP_PLUGIN_SOURCE (bundle-safe) ─────
-// Do NOT override readPluginSource → the real default (embedded string) is used.
+// ── (+) EMBEDDED sources: install writes GIMP_PLUGIN_SOURCE + GIMP_CLIENT_SOURCE ─
+// Do NOT override readPluginSource/readClientSource → the real embedded strings.
 {
   const home = '/home/u';
   const gimpBase = path.join(home, '.config', 'GIMP');
   const py = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  const clientPy = path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py');
   const writes = [];
   const chmods = [];
   const deps = {
@@ -231,15 +263,19 @@ function makeDeps(over) {
     copyFile: () => {},
     readFile: () => '',
     detectGimp: () => ({ installed: false, path: null, source: null }),
-    // readPluginSource intentionally omitted → uses embedded GIMP_PLUGIN_SOURCE.
+    // readPluginSource/readClientSource omitted → embedded strings used.
   };
   const res = installGimpPlugin(undefined, deps);
   ok(res.installed === true, 'embedded: installs');
-  ok(writes.length === 1 && writes[0].p === py, 'embedded: wrote exactly the target .py');
-  ok(writes[0].data === GIMP_PLUGIN_SOURCE, 'embedded: written content === GIMP_PLUGIN_SOURCE');
-  ok(/plug-in-mcp-server-autostart/.test(GIMP_PLUGIN_SOURCE), 'embedded: source carries the auto-start query proc');
-  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'embedded: chmod 0o755 on the .py');
-  ok(typeof GIMP_PLUGIN_SOURCE_HASH === 'string' && GIMP_PLUGIN_SOURCE_HASH.length === 12, 'embedded: exposes a 12-hex content hash');
+  ok(writes.length === 2, 'embedded: wrote exactly 2 files (server + client)');
+  ok(writes.some((w) => w.p === py && w.data === GIMP_PLUGIN_SOURCE), 'embedded: server === GIMP_PLUGIN_SOURCE');
+  ok(writes.some((w) => w.p === clientPy && w.data === GIMP_CLIENT_SOURCE), 'embedded: client === GIMP_CLIENT_SOURCE');
+  ok(/PDBProcType\.PLUGIN/.test(GIMP_PLUGIN_SOURCE), 'embedded: server source is the menu-triggered plugin');
+  ok(/getpeername/.test(GIMP_CLIENT_SOURCE), 'embedded: client source is the fixed reconnecting client');
+  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'embedded: chmod 0o755 on the server .py');
+  ok(chmods.some((c) => c.p === clientPy && c.mode === 0o755), 'embedded: chmod 0o755 on the client .py');
+  ok(typeof GIMP_PLUGIN_SOURCE_HASH === 'string' && GIMP_PLUGIN_SOURCE_HASH.length === 12, 'embedded: server exposes a 12-hex content hash');
+  ok(typeof GIMP_CLIENT_SOURCE_HASH === 'string' && GIMP_CLIENT_SOURCE_HASH.length === 12, 'embedded: client exposes a 12-hex content hash');
 }
 
 // ── (+) IDEMPOTENT: identical existing content → skip write, no .bak ─────────
@@ -247,27 +283,52 @@ function makeDeps(over) {
   const home = '/home/u';
   const gimpBase = path.join(home, '.config', 'GIMP');
   const py = path.join(gimpBase, '3.2', 'plug-ins', 'gimp_mcp_server', 'gimp_mcp_server.py');
+  const clientPy = path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py');
   const { deps, writes, copies, chmods } = makeDeps({
     platform: 'linux', home, env: {},
     dirs: { [gimpBase]: ['3.2'] },
-    files: [py],                       // target already exists…
-    contents: { [py]: 'PLUGIN-SOURCE' }, // …with byte-identical content
-    source: 'PLUGIN-SOURCE',
+    files: [py, clientPy],                                         // both already exist…
+    contents: { [py]: 'PLUGIN-SOURCE', [clientPy]: 'CLIENT-SOURCE' }, // …byte-identical
+    source: 'PLUGIN-SOURCE', clientSource: 'CLIENT-SOURCE',
   });
   const res = installGimpPlugin(undefined, deps);
   ok(res.installed === true, 'idempotent: reports installed (path present)');
-  ok(res.paths[0] === py, 'idempotent: returns the target path');
-  ok(writes.length === 0, 'idempotent: NO write when content is identical');
+  ok(res.serverPath === py && res.clientPath === clientPy, 'idempotent: returns the target paths');
+  ok(writes.length === 0, 'idempotent: NO write when both files are identical');
   ok(copies.length === 0, 'idempotent: NO .bak when content is identical');
-  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'idempotent: still ensures chmod 0o755');
+  ok(chmods.some((c) => c.p === py && c.mode === 0o755), 'idempotent: still ensures chmod 0o755 (server)');
+  ok(chmods.some((c) => c.p === clientPy && c.mode === 0o755), 'idempotent: still ensures chmod 0o755 (client)');
 }
 
-// ── (+) gen script output matches the media .py ─────────────────────────────
+// ── (+) gen script output matches the media .py (both files) ─────────────────
 {
   const py = fs.readFileSync(vendoredPluginSourcePath(), 'utf8');
   ok(GIMP_PLUGIN_SOURCE === py, 'gen: GIMP_PLUGIN_SOURCE === media/gimp/gimp_mcp_server.py (in sync)');
-  const wantHash = createHash('sha256').update(py, 'utf8').digest('hex').slice(0, 12);
-  ok(GIMP_PLUGIN_SOURCE_HASH === wantHash, 'gen: GIMP_PLUGIN_SOURCE_HASH matches sha256(.py)');
+  ok(GIMP_PLUGIN_SOURCE_HASH === createHash('sha256').update(py, 'utf8').digest('hex').slice(0, 12),
+    'gen: GIMP_PLUGIN_SOURCE_HASH matches sha256(server .py)');
+  const cpy = fs.readFileSync(vendoredClientSourcePath(), 'utf8');
+  ok(GIMP_CLIENT_SOURCE === cpy, 'gen: GIMP_CLIENT_SOURCE === media/gimp/gimp_mcp_client.py (in sync)');
+  ok(GIMP_CLIENT_SOURCE_HASH === createHash('sha256').update(cpy, 'utf8').digest('hex').slice(0, 12),
+    'gen: GIMP_CLIENT_SOURCE_HASH matches sha256(client .py)');
+}
+
+// ── (+) resolveGimpClientPath: pure resolver gated on detection ──────────────
+{
+  const home = '/home/u';
+  const gimpBase = path.join(home, '.config', 'GIMP');
+  const { deps } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    detect: { installed: true, path: '/usr/bin/gimp-3.2', source: 'path' },
+  });
+  const p = resolveGimpClientPath(undefined, deps);
+  ok(p === path.join(gimpBase, '3.2', 'mcp', 'gimp_mcp_client.py'), 'resolveGimpClientPath: returns the primary client path when GIMP 3.x detected');
+  const { deps: deps2 } = makeDeps({
+    platform: 'linux', home, env: {},
+    dirs: { [gimpBase]: ['3.2'] },
+    detect: { installed: false, path: null, source: null },
+  });
+  ok(resolveGimpClientPath(undefined, deps2) === null, 'resolveGimpClientPath: null when GIMP absent (no path baked in)');
 }
 
 // ── (+) SYNC path: installGimpPluginIfDetected gates on GIMP 3.x detection ───

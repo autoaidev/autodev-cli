@@ -10,7 +10,7 @@ import { ConfigManager } from '../configManager';
 import { DEFAULT_MCP_SERVERS } from '../mcpManager';
 import { detectApp, detectBinOnPath, type BinDetectDeps, type DetectAppResult } from '../core/binDetect';
 import {
-  getCatalog, serverSpecFor, catalogEntry, pythonInstallHint,
+  getCatalog, serverSpecFor, catalogEntry, GIMP_MCP_PIN,
   type CreativeAppId,
 } from '../core/mcpCatalog';
 import {
@@ -281,40 +281,42 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
     return 0;
   }
 
-  // gimp — experimental, but runnable now: the default writes the git-based client
-  // that `uv` fetches + launches (no manual clone). --gimp-client stays an OPTIONAL
-  // override for a user's local checkout (run via python).
-  log.warn('⚠  GIMP MCP is EXPERIMENTAL — upstream is a prototype; expect rough edges.');
-  const gimpClient = (opts.gimpClient && opts.gimpClient.trim()) || undefined;
-  const server = serverSpecFor('gimp', platform, { gimpClientPath: gimpClient });
+  // gimp — experimental. Install BOTH the GIMP-side plug-in AND the user-verified
+  // client FIRST so we can point the MCP config at the client's absolute path.
+  // --gimp-client stays an OPTIONAL override for a user's own checkout.
+  log.warn('⚠  GIMP MCP is EXPERIMENTAL — a prototype; expect rough edges.');
+  const gimpClientOverride = (opts.gimpClient && opts.gimpClient.trim()) || undefined;
+
+  // Install both files (best-effort). A failure must not block the config write.
+  let installedClientPath: string | undefined;
+  try {
+    const res = installGimpPlugin();
+    if (res.installed && res.clientPath) { installedClientPath = res.clientPath; }
+    printGimpInstall(res);
+  } catch (e) {
+    log.warn(`⚠  Could not install the GIMP plugin/client: ${(e as Error).message}`);
+    log.gray('   You can retry with:  autodev mcp gimp-install-plugin');
+  }
+
+  // Point the MCP config at the installed client (or the user's override). When
+  // neither is known (GIMP absent), serverSpecFor emits the display placeholder.
+  const clientPath = gimpClientOverride || installedClientPath;
+  const server = serverSpecFor('gimp', platform, { gimpClientPath: clientPath });
   server._meta = { ...(server._meta || {}), catalogId: 'gimp' };
   const user = loadProjectUserMcp(root);
   user[entry.serverName] = server;
   saveProjectUserMcp(root, user);
   sync(root);
 
-  if (gimpClient) {
-    log.success(`Configured GIMP MCP client "${entry.serverName}" → local ${gimpClient}`);
-    if (!prereqInstalled('python')) {
-      log.warn('⚠  No python/python3 on PATH (needed to run your local client):');
-      log.plain(`    ${pythonInstallHint(platform)}`);
-    }
+  if (clientPath) {
+    log.success(`Configured GIMP MCP server "${entry.serverName}" → uv run ${GIMP_MCP_PIN} ${clientPath}`);
   } else {
-    log.success(`Configured GIMP MCP server "${entry.serverName}" (runs from git via uv).`);
-    if (!prereqInstalled('uv')) {
-      log.warn('⚠  `uv` is NOT on PATH — the server is written but will not start until you install uv:');
-      log.plain(`    ${entry.prerequisites[0]!.installHint}`);
-    }
+    log.success(`Configured GIMP MCP server "${entry.serverName}".`);
+    log.gray('   (client path unknown until GIMP 3.x is present — re-run after installing GIMP)');
   }
-  // Auto-install the GIMP-side AUTO-START plugin so the user copies nothing and
-  // the socket opens on GIMP launch (no menu click). Best-effort: a failure here
-  // must not fail the client-config write above.
-  try {
-    const res = installGimpPlugin();
-    printGimpInstall(res);
-  } catch (e) {
-    log.warn(`⚠  Could not auto-install the GIMP plugin: ${(e as Error).message}`);
-    log.gray('   You can retry with:  autodev mcp gimp-install-plugin');
+  if (!prereqInstalled('uv')) {
+    log.warn('⚠  `uv` is NOT on PATH — the server is written but will not start until you install uv:');
+    log.plain(`    ${entry.prerequisites[0]!.installHint}`);
   }
 
   log.section('Manual steps');
@@ -326,9 +328,11 @@ function enableApp(root: string, app: CreativeAppId, opts: { gimpClient?: string
 /** Pretty-print an installGimpPlugin() result (shared by --enable + standalone). */
 function printGimpInstall(res: GimpInstallResult): void {
   if (res.installed) {
-    log.success(`Installed the AUTO-START GIMP MCP plugin (GIMP ${res.version}).`);
-    for (const p of res.paths) { log.plain(`    ${p}`); }
-    log.plain('  Restart GIMP — the MCP server auto-starts on launch (localhost:9876). No menu click needed.');
+    log.success(`Installed the GIMP MCP plugin + client (GIMP ${res.version}).`);
+    for (const p of res.paths) { log.plain(`    plug-in: ${p}`); }
+    for (const p of res.clientPaths) { log.plain(`    client:  ${p}`); }
+    log.plain("  In GIMP: Tools → MCP → Start MCP Server (or Filters → Development), and KEEP the");
+    log.plain("  'GIMP MCP Server' window open — it holds the plug-in alive on localhost:9876.");
   } else {
     log.warn('⚠  The GIMP MCP plugin was NOT installed.');
   }

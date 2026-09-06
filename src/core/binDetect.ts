@@ -92,7 +92,10 @@ export function detectBinOnPath(bin: string, deps?: Partial<BinDetectDeps>): str
   return null;
 }
 
-export type AppSource = 'path' | 'program-files' | 'app-bundle' | 'flatpak' | 'snap' | 'known-dir';
+// 'store' = a Microsoft Store / execution-alias install on Windows
+// (%LOCALAPPDATA%\Microsoft\WindowsApps stub, or the ACL-locked
+// %ProgramFiles%\WindowsApps package VFS tree).
+export type AppSource = 'path' | 'program-files' | 'app-bundle' | 'flatpak' | 'snap' | 'known-dir' | 'store';
 
 export interface DetectAppResult {
   installed: boolean;
@@ -135,6 +138,44 @@ function winProgramRoots(d: BinDetectDeps): string[] {
   return [...roots];
 }
 
+/**
+ * The Microsoft Store execution-alias stub dir:
+ *   %LOCALAPPDATA%\Microsoft\WindowsApps
+ * This dir is on the user's PATH by default and holds 0-byte alias stubs
+ * (e.g. gimp-3.exe, blender.exe). A 0-byte stub still passes fileExists,
+ * so finding a launcher here means the app is installed via the Store.
+ */
+function winAppsAliasDir(d: BinDetectDeps): string | null {
+  const local = d.env.LOCALAPPDATA;
+  return local ? path.join(local, 'Microsoft', 'WindowsApps') : null;
+}
+
+/**
+ * Best-effort scan of the ACL-restricted %ProgramFiles%\WindowsApps store dir
+ * for a packaged app's real exe, e.g.
+ *   ...\GIMP.<hash>_3.2.44.0_x64__<pub>\VFS\ProgramFilesX64\GIMP\bin\gimp-3.2.exe
+ * WindowsApps is ACL-locked and listing it may throw (EACCES/EPERM) — every
+ * directory read is wrapped so a denial is swallowed and detection falls
+ * through to the alias-stub probe. Never throws.
+ */
+function winStorePackageExes(pkgRe: RegExp, binLeaves: string[], exeRe: RegExp, d: BinDetectDeps): string[] {
+  const out: string[] = [];
+  for (const root of winProgramRoots(d)) {
+    const wa = path.join(root, 'WindowsApps');
+    let pkgs: string[];
+    try { pkgs = d.listDir(wa).filter((n) => pkgRe.test(n)); } catch { pkgs = []; }
+    for (const pkg of pkgs) {
+      for (const leaf of binLeaves) {
+        const binDir = leaf ? path.join(wa, pkg, ...leaf.split('/')) : path.join(wa, pkg);
+        let exes: string[];
+        try { exes = d.listDir(binDir).filter((n) => exeRe.test(n)); } catch { exes = []; }
+        for (const exe of exes) { out.push(path.join(binDir, exe)); }
+      }
+    }
+  }
+  return out;
+}
+
 function detectBlender(d: BinDetectDeps): DetectAppResult {
   // 1) PATH (all platforms) — highest confidence.
   const onPath = detectBinOnPath('blender', d);
@@ -161,6 +202,19 @@ function detectBlender(d: BinDetectDeps): DetectAppResult {
     for (const root of winProgramRoots(d)) {
       cands.push({ path: path.join(root, 'Steam', 'steamapps', 'common', 'Blender', 'blender.exe'), source: 'known-dir' });
     }
+    // Microsoft Store / execution-alias stub on PATH:
+    //   %LOCALAPPDATA%\Microsoft\WindowsApps\blender.exe (0-byte, but exists)
+    const aliasDir = winAppsAliasDir(d);
+    if (aliasDir) {
+      cands.push({ path: path.join(aliasDir, 'blender.exe'), source: 'store' });
+      for (const exe of globChildren(aliasDir, /^blender.*\.exe$/i, d)) {
+        cands.push({ path: exe, source: 'store' });
+      }
+    }
+    // Best-effort: ACL-restricted store package VFS tree (try/catch → swallowed).
+    for (const exe of winStorePackageExes(/Blender/i, ['', 'VFS/ProgramFilesX64/Blender'], /^blender\.exe$/i, d)) {
+      cands.push({ path: exe, source: 'store' });
+    }
   } else if (d.platform === 'darwin') {
     cands.push({ path: '/Applications/Blender.app/Contents/MacOS/Blender', source: 'app-bundle' });
     const home = d.homedir();
@@ -175,7 +229,9 @@ function detectBlender(d: BinDetectDeps): DetectAppResult {
 }
 
 function detectGimp(d: BinDetectDeps): DetectAppResult {
-  const binNames = ['gimp', 'gimp-3.0', 'gimp-2.99', 'gimp-2.10'];
+  // Newest-first. Includes GIMP 3.x versioned launcher names used by the
+  // Microsoft Store / CLI execution aliases (gimp-3, gimp-3.2, …).
+  const binNames = ['gimp-3.2', 'gimp-3.1', 'gimp-3.0', 'gimp-3', 'gimp-2.99', 'gimp-2.10', 'gimp'];
   // 1) PATH (all platforms).
   for (const b of binNames) {
     const onPath = detectBinOnPath(b, d);
@@ -184,6 +240,18 @@ function detectGimp(d: BinDetectDeps): DetectAppResult {
 
   const cands: Candidate[] = [];
   if (d.platform === 'win32') {
+    // Microsoft Store / execution-alias stub on PATH (0-byte, but exists):
+    //   %LOCALAPPDATA%\Microsoft\WindowsApps\gimp-3.exe
+    const aliasDir = winAppsAliasDir(d);
+    if (aliasDir) {
+      for (const b of binNames) {
+        cands.push({ path: path.join(aliasDir, b + '.exe'), source: 'store' });
+      }
+      // Anything shaped like gimp-*.exe that we can glob in that dir.
+      for (const exe of globChildren(aliasDir, /^gimp.*\.exe$/i, d)) {
+        cands.push({ path: exe, source: 'store' });
+      }
+    }
     // C:\Program Files\GIMP 2\bin\gimp-2.10.exe  (version dirs + version'd exe)
     for (const root of winProgramRoots(d)) {
       for (const gimpDir of globChildren(root, /^GIMP/i, d)) {
@@ -192,6 +260,12 @@ function detectGimp(d: BinDetectDeps): DetectAppResult {
           cands.push({ path: exe, source: 'program-files' });
         }
       }
+    }
+    // Best-effort: ACL-restricted store package VFS tree, e.g.
+    //   ...\GIMP.<hash>_..._x64__<pub>\VFS\ProgramFilesX64\GIMP\bin\gimp-3.2.exe
+    // (try/catch inside → EACCES/EPERM on the locked dir is swallowed).
+    for (const exe of winStorePackageExes(/^GIMP/i, ['VFS/ProgramFilesX64/GIMP/bin'], /^gimp.*\.exe$/i, d)) {
+      cands.push({ path: exe, source: 'store' });
     }
   } else if (d.platform === 'darwin') {
     cands.push({ path: '/Applications/GIMP.app/Contents/MacOS/gimp', source: 'app-bundle' });

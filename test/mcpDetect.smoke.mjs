@@ -114,6 +114,75 @@ function makeFs(files, dirs) {
   ok(macRes.installed === true && macRes.source === 'app-bundle', 'gimp detected via /Applications bundle (mac)');
 }
 
+// ── (c2) Microsoft Store / execution-alias installs on win32 ────────────────
+// GIMP 3.x from the Store leaves a 0-byte alias stub on PATH at
+// %LOCALAPPDATA%\Microsoft\WindowsApps\gimp-3.exe and NO Program Files\GIMP dir.
+{
+  const localAppData = 'C:\\Users\\user\\AppData\\Local';
+  const aliasDir = path.join(localAppData, 'Microsoft', 'WindowsApps');
+  const gimpAlias = path.join(aliasDir, 'gimp-3.exe'); // 0-byte stub, but exists
+  const storeFs = makeFs([gimpAlias]);
+  const res = detectApp('gimp', {
+    platform: 'win32',
+    // PATH deliberately does NOT include WindowsApps, so the ONLY way this is
+    // found is the explicit alias-dir probe (proving the new behavior).
+    env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: localAppData, PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user', ...storeFs,
+  });
+  ok(res.installed === true, 'gimp Store alias (gimp-3.exe) detected on win32');
+  ok(res.path === gimpAlias, 'gimp Store path is the %LOCALAPPDATA%\\Microsoft\\WindowsApps\\gimp-3.exe stub');
+  ok(res.source === 'store', 'gimp Store source = store');
+
+  // Same fake fs but NO gimp anywhere → not installed.
+  const emptyRes = detectApp('gimp', {
+    platform: 'win32', env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: localAppData, PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user', ...makeFs([]),
+  });
+  ok(emptyRes.installed === false && emptyRes.path === null && emptyRes.source === null, 'gimp not-installed (win32, no Store/classic) → false/null/null');
+
+  // Classic Program Files GIMP still detected (regression guard).
+  const pf = 'C:\\Program Files';
+  const gbin = path.join(pf, 'GIMP 2', 'bin');
+  const gexe = path.join(gbin, 'gimp-2.10.exe');
+  const classicFs = makeFs([gexe], { [pf]: ['GIMP 2'], [gbin]: ['gimp-2.10.exe'] });
+  const classicRes = detectApp('gimp', {
+    platform: 'win32', env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', PROGRAMFILES: pf },
+    homedir: () => 'C:\\Users\\user', ...classicFs,
+  });
+  ok(classicRes.installed === true && classicRes.path === gexe && classicRes.source === 'program-files',
+    'classic Program Files\\GIMP 2 still detected (source program-files)');
+
+  // ACL-locked WindowsApps package glob must not throw even when listDir denies.
+  const throwingDeps = {
+    platform: 'win32', env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: localAppData, PROGRAMFILES: pf },
+    homedir: () => 'C:\\Users\\user',
+    fileExists: () => false,
+    // Only the ACL-locked %ProgramFiles%\WindowsApps throws; the user-owned
+    // %LOCALAPPDATA%\Microsoft\WindowsApps alias dir lists normally.
+    listDir: (p) => { if (String(p).includes('Program Files') && String(p).includes('WindowsApps')) { throw new Error('EACCES'); } return []; },
+  };
+  let threw = false;
+  let aclRes;
+  try { aclRes = detectApp('gimp', throwingDeps); } catch { threw = true; }
+  ok(!threw, 'ACL-locked WindowsApps listDir throwing does NOT break gimp detection');
+  ok(aclRes && aclRes.installed === false, 'gimp with throwing WindowsApps + nothing present → not installed');
+}
+
+// Blender parity: Store execution-alias stub blender.exe on win32.
+{
+  const localAppData = 'C:\\Users\\user\\AppData\\Local';
+  const aliasDir = path.join(localAppData, 'Microsoft', 'WindowsApps');
+  const blenderAlias = path.join(aliasDir, 'blender.exe');
+  const storeFs = makeFs([blenderAlias]);
+  const res = detectApp('blender', {
+    platform: 'win32',
+    env: { PATH: 'C:\\Windows\\System32', PATHEXT: '.EXE', LOCALAPPDATA: localAppData, PROGRAMFILES: 'C:\\Program Files' },
+    homedir: () => 'C:\\Users\\user', ...storeFs,
+  });
+  ok(res.installed === true && res.path === blenderAlias && res.source === 'store',
+    'blender Store alias (blender.exe) detected on win32 with source=store');
+}
+
 // ── (d) serverSpecFor platform-awareness + gimp stub ────────────────────────
 {
   const LAB_FROM = 'git+https://projects.blender.org/lab/blender_mcp.git@v1.0.0#subdirectory=mcp';

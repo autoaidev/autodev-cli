@@ -8,6 +8,6 @@ Zero `[ ]`/`[~]` → Verifier green → bump version → `git commit -m "chore: 
 No magic values · explicit types · single responsibility · fail loudly · no dead code · match conventions · secure by default · tests encode WHY not WHAT · surgical changes · simplicity first.
 
 ## 13. Principles
-Plan before code · re-plan on change · read first · batch not single · mark progressively · delegate by type · subagents for implementation only · no partial work · learn from corrections · small commits · checkpoint after steps · assumptions ≠ facts · think big / hand off scoped · surface conflicts · own the outcome.
+Plan before code · re-plan on change · read first · batch not single · mark progressively · delegate by type · subagents for implementation only · no partial work · learn from corrections · small commits · checkpoint after steps · assumptions ≠ facts · think big / hand off scoped · surface conflicts · shape multi-stage/fan-out work as a deterministic workflow not ad-hoc spawns · own the outcome.
 
 > **CLASSIFY → MARK [~] → DISPATCH → VERIFY → MARK [x] → COMMIT → NEXT**

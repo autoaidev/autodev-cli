@@ -27,7 +27,7 @@ Swarming is leverage, not a reflex. Spawning a worker costs tokens and latency, 
 
 ### You are the orchestrator — stay lean
 
-Your job is to plan, dispatch, synthesize, and verify — not to read. Guard your context like the budget it is.
+Your job is to plan, dispatch, synthesize, and verify — not to read. Guard your context like the budget it is. Shape the delegation as a deterministic workflow, not ad-hoc spawns ([[00k-internal-workflows]]).
 
 - **Do not pull raw material into your own window.** No large file dumps, no full logs, no multi-thousand-line outputs. Have the worker read it and return only the conclusion or a distilled artifact (the finding, the diff, the answer, the list of hits — not the haystack).
 - **Ask for the distillate, not the source.** "Return the three functions that touch auth and why" — not "return the file." Specify the *shape* of what comes back so it lands small.

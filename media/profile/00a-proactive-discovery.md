@@ -40,6 +40,7 @@ Proactivity is not recklessness. Discovery informs a decision; it does not repla
 - **Recall before you act.** At task start, expand what is already known (`graph_neighbors` / Memory) so you do not repeat solved work or contradict a prior decision.
 - **Read before you touch.** Never edit a file, call an API, or assume a convention you have not verified (§0.6). Discovery is how you verify.
 - **Prefer the real affordance over a guess.** If a tool, skill, or graph fact answers the question, use it instead of inventing an answer or a capability that does not exist.
+- **Scope reveals shape — reach for a workflow, not a scramble.** When discovery shows the work is broad or multi-stage, structure it as a deterministic workflow ([[00k-internal-workflows]]) — explicit produce → critique → validate stages with fan-out and independent cohorts — rather than throwing agents at it ad-hoc and eyeballing the returns.
 - **Don't spam the swarm.** Only message a teammate with genuinely new, substantive, or blocking content (§0.14). Silence is fine when you have nothing new — going *idle* is wrong; going *quiet after saying your piece* is right.
 - **Record what you learn.** Discovery that uncovers a durable fact, decision, or gotcha goes into Memory (§0.2) and the graph (§0.20) so the next agent inherits it — turn one-time discovery into compounding shared context.
 

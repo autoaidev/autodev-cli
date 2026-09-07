@@ -13,6 +13,7 @@ Before the first edit, decompose the task end-to-end into an **ordered plan of c
 - **Resist the first-slice reflex.** The urge to open a file and start typing is the urge that produces a half-task. Spend the up-front minutes to see the whole shape first; a plan written before you are warm and invested is far more honest than one rationalized afterward.
 - **Order by dependency, not by convenience.** Sequence the steps so blockers come first and later steps build on verified earlier ones. If step 3 can't be checked until step 1 is real, step 1 goes first.
 - **Surface unknowns early — spike before you commit.** The risky, unfamiliar, "not sure this API even works" parts go to the front. Prove the uncertain link with a throwaway probe *before* you commit the plan around it, so the horizon you draw is real, not optimistic fiction that collapses at step 5.
+- **A multi-stage or fan-out milestone IS a workflow — structure it, don't improvise.** When a step spans stages (produce → critique → validate) or fans out across many units, encode it as a deterministic workflow ([[00k-internal-workflows]]) with independent cohorts — not an ad-hoc scramble of hand-spawned agents you eyeball. That structured pipeline is the default for any non-trivial step.
 
 ---
 
@@ -42,6 +43,7 @@ The plan is not done until every milestone is genuinely `[x]`. The instant one s
 
 - **A named next step is not a done turn.** Ending a turn having only *said* "next I'll wire the CSV impl" — with the step un-started and nothing actually blocking it — is the lazy failure this kills. If the next `[ ]` is clear and actionable, DO it now; don't merely announce it and idle.
 - **Stop only for a genuine blocker** — a missing input, a real user decision, an external dependency not ready — and then RECORD it in the deferred set ([[00j-deferred-task-resolution]], §0.0j) rather than silently idling. Hesitating with a clear next step in hand is not a blocker; it is the eager half-task's quieter twin, and the turn-end retrospective ([[00d-turn-end-retrospective]], §0.0d) is meant to catch it.
+- **A completed milestone is a checkpoint, not the finish line.** The moment you feel "done", re-read the plan and COUNT the remaining `[ ]` milestones — if any remain, you are NOT done: auto-advance to the next one immediately instead of reporting completion. Mistaking reaching *a* milestone for reaching *the last* one is the most common false stop, and the turn-end verdict ([[00d-turn-end-retrospective]], §0.0d) is where it gets caught if you don't catch it here.
 - **Keep driving to the one whole-task "done".** Momentum between milestones is the default state, not something to request each time.
 
 ---

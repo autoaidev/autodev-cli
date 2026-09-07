@@ -25,6 +25,16 @@ Before you yield — this is a turn-end action, run alongside the retrospective 
 
 ---
 
+### Can you start it? Then don't defer it — fan out a workflow NOW
+
+Deferring is not a way to make progress. Before you park anything, ask one question: is this blocked by a GENUINE external dependency — a missing input, a real user decision, an upstream that isn't ready — or do I already have the tools and information to start it?
+
+- **If you can start it, you don't defer it.** A big or multi-stage pending item is not an excuse to park — it is the signal to structure it as a workflow and EXECUTE: fan out a workflow + subagents on it NOW ([[00k-internal-workflows]], §0.0k; [[00f-swarm-orchestration]], §0.0f). The answer to *"this is large"* is a deterministic pipeline (produce → critique → validate), not a re-listed to-do line pushed to a future turn.
+- **The deferred set is reserved strictly for the externally-blocked.** *"I'll do it later"* when nothing blocks you is a stall wearing a to-do's clothing — disguised deferral, the twin of the named-but-un-started next step ([[00e-long-horizon-planning]] momentum, §0.0e). If you have the affordances to start, the correct move is to start, not to park.
+- **The one legitimate defer is a true blocker — and it still gets RECORDED.** A genuinely blocked task stays `[ ]` only with its block reason AND unblock condition written down for the next sweep (below); it is never silently dropped.
+
+---
+
 ### Stay deferred only if genuinely blocked — record the unblock condition
 
 A task may survive the sweep as `[ ]` **only** if it is truly blocked — a missing input, an external dependency not ready, or a decision only a human/peer can make ([[00d-turn-end-retrospective]] blockers, §0.0d). *"Awkward"*, *"boring"*, or *"I'd rather not"* are not blocks; they are the exact excuses this pillar exists to override.

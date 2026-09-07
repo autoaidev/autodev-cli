@@ -37,6 +37,37 @@ The critique stage is not a rubber stamp; it is an attempt to BREAK the work. Th
 
 ---
 
+### Workflow templates — reach for one, instantiate it
+
+Named shapes to INSTANTIATE, not scripts to obey — pick the closest, adapt the stages to the task. Each is the produce → critique → validate → synthesize skeleton specialized for a job.
+
+- **Review** — enumerate the dimensions (correctness / edge / security / perf / style) → fan out one finder per dimension → adversarially verify EACH finding independently → synthesize the survivors into one ranked verdict.
+- **Understand / Research** — fan out parallel readers over the codebase/docs (a multi-modal sweep, each searching a different way) → deep-read the hot spots that surface → synthesize ONE coherent map, not N disconnected returns.
+- **Design panel** — spawn N independent approaches to the SAME problem (no shared context, so they diverge) → independent judges score each against a rubric → synthesize from the winner, grafting the runners-up's best parts ([[00m-autoplan]]).
+- **Migrate / Sweep** — discover every site that needs the change → transform each in ISOLATION (one worker per site, no cross-talk) → verify each transformed site independently. Coverage = every discovered site has a verified return.
+- **Audit** — a larger finder pool than a Review (breadth is the point) → a 3–5-vote adversarial pass on every candidate → synthesize only what survived the vote. Reserve for "comprehensive / exhaustive" asks.
+
+### Quality patterns to compose
+
+Named tools you snap into a stage — mix them to match the failure you fear.
+
+- **Adversarial verify** — hand each candidate finding to N fresh skeptics prompted to REFUTE it; keep only what survives. A finding no adversary could break is signal; one that evaporates was noise.
+- **Perspective-diverse verify** — when a finding can fail multiple ways, use DISTINCT lenses (correctness vs security vs does-it-run), not N clones of one prompt — clones share blind spots.
+- **Loop-until-dry** — for discovery of unknown size, keep spawning finders until K consecutive rounds surface nothing new; a dynamic stop beats a fixed count that either quits early or wastes spawns.
+- **Multi-modal sweep** — parallel finders each search a DIFFERENT way (grep, symbol/type search, tests, docs, git history) so no single method's blind spot hides a case.
+- **Completeness critic** — a final agent whose only job is *"what's MISSING?"* — the anti-shallow backstop that catches the dimension every producer skipped ([[00b-self-verifiable-work]]).
+
+### How much workflow — scale to the task
+
+Match the pipeline's weight to the ask; don't run a heavyweight audit for a quick check.
+
+- **Quick check** — a couple of finders + a single-vote verify + a one-line synthesis. Cheap, fast, still independent.
+- **Thorough / comprehensive / audit** — a larger finder pool + a 3–5-vote adversarial pass + an explicit synthesis stage, loop-until-dry where the size is unknown.
+- **The anti-pattern it replaces** — ad-hoc spawn + eyeball the returns: no stages, no independent check, unreproducible. A word like *"thorough", "exhaustive", "audit", "make sure"* is the signal to instantiate a heavier template, not to spawn harder.
+- **Momentum still applies** — a workflow advances the task, it does not stall it; pick the lightest shape that covers the work and keep moving ([[00e-long-horizon-planning]]).
+
+---
+
 ### Wire the workflow into the living docs and the deferred set
 
 A workflow is not ephemeral — its structure and outputs persist, so it is reproducible next cycle.

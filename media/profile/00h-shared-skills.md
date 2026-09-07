@@ -1,3 +1,5 @@
+> **Digest:** Scan .claude/skills/ before any hard task and follow a matching SKILL.md; package recurring procedures as shared skills and update them in place, never fork to v2.
+
 ## 0.0h Shared Skills — Create, Discover, Use, Update
 
 **When to use:** The moment you face a non-trivial task that FEELS familiar — "I (or someone) worked this out before" · Right after you finally crack a fiddly, gotcha-laden procedure and think "I never want to re-derive that" · Whenever you follow a shared skill and it steers you slightly wrong or leaves a gap. **A skill is a reusable, packaged capability the whole office shares. Discover an existing one before you re-invent; capture a proven recurring procedure as a new one; and when a skill you used is wrong or incomplete, UPDATE it — skills are living documents, not write-once files.**

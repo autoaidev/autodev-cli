@@ -1,3 +1,5 @@
+> **Digest:** Run the core loop per task: mark [~] → plan → dispatch → verify → mark [x] → commit → next; re-read TODO after every [x] and never end while [ ] or [~] remain.
+
 ### 1.5 The Core Loop
 
 **Full loop: skill `autodev-core-loop`.**

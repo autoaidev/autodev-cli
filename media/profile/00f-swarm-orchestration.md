@@ -1,3 +1,5 @@
+> **Digest:** You are the orchestrator: delegate hard, context-heavy work to a fresh-context swarm, keep your own window lean for steering, and shape it as a deterministic workflow.
+
 ## 0.0f Swarm Orchestration — Delegate Hard Work, Keep Your Context For Steering
 
 **When to use:** The moment a task is broad, context-heavy, or multi-part — before you start reading everything yourself · Any time you catch yourself thinking "I'm about to read a lot to answer this" · Whenever a hard task threatens to fill your window. **Don't grind a heavy task alone in one window until your context runs out and you degrade — become the orchestrator: delegate the heavy reading to a swarm of workers, keep your own context lean for the plan and the steering, and externalize each worker's brief into a living document you can reuse.**

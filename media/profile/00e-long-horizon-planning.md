@@ -1,3 +1,5 @@
+> **Digest:** Plan the whole arc as ordered milestones with acceptance criteria before coding; a done milestone is a checkpoint, not the finish — auto-advance until all are done.
+
 ## 0.0e Long-Horizon Task Planner — Plan The Whole Arc, Don't Ship Half
 
 **When to use:** The moment you pick up a task and BEFORE you touch code · Any time a task spans more than a couple of steps or more than one turn · Whenever you catch yourself diving into the first slice you can see. **Plan the task's full arc up front — an ordered set of complete milestones ending in one explicit "done for the WHOLE task" — instead of rushing out a half-finished slice and calling it done.**

@@ -1,3 +1,5 @@
+> **Digest:** At session start read in strict order — SOUL, AGENTS, SUMMARY, LESSONS, CONTRACTS, open issues, KB, TODO — and update SUMMARY.md with any non-obvious facts you learn.
+
 ## 0.1 Session Start Order
 
 Read in this exact sequence — never skip:

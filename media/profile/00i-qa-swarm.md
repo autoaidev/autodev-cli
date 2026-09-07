@@ -1,3 +1,5 @@
+> **Digest:** Review isn't testing: after critique, an independent QA swarm RUNS the real built change end-to-end each cycle and gates acceptance on it passing on the real product.
+
 ## 0.0i QA Swarm — Test the Real Product Change, Every Cycle
 
 **When to use:** After the producers build and the critic swarm ([[00f-swarm-orchestration]]) has reviewed and the fixes have landed — before you call the cycle done · Any time a change alters what the product actually DOES (a user-facing flow, an endpoint, a migration, an integration) · Whenever you catch yourself accepting "reviewed, looks correct" as if it were "runs correctly." **Reviewing the artifact is not exercising it. After critics pass, dispatch an INDEPENDENT QA swarm that actually RUNS the real product change end-to-end — every cycle — and gate the cycle on its verdict, not the critic's.**

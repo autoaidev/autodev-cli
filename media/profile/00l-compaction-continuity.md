@@ -1,3 +1,5 @@
+> **Digest:** Treat compaction as a handoff to your future self: before it snapshot in-flight state to PRE_COMPACT.md, after it read that file first and resume the loop from there.
+
 ## 0.0l Compaction Continuity — Survive The Context Boundary
 
 **When to use:** Whenever you sense the context window is filling and a summarize/compaction is imminent · The instant a compaction signal or `PreCompact` hook fires · At the START of any turn that resumes in a fresh or freshly-compacted window. **Treat the compaction boundary as a handoff to your future self: BEFORE it, snapshot the minimum needed to resume into `PRE_COMPACT.md` (only if something important is in flight); AFTER it, READ `PRE_COMPACT.md` FIRST and continue the loop from where it left off.**

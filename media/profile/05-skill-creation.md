@@ -1,3 +1,5 @@
+> **Digest:** Turn a hard problem into a reusable .claude/skills/<slug>/SKILL.md when it took 3+ tries or a teammate would repeat it, then list the slug in AGENTS.md.
+
 ## 0.5 Skill Creation — Hard Problems Become Reusable Skills
 
 **Create a skill when:** solution took 3+ failed attempts · another agent would repeat the mistake · fix encodes a project constraint invisible from code · external API had undocumented behaviour · Reviewer returns `CHANGES-REQUIRED` 2+ times for the same issue · agent gets stuck needing Orchestrator intervention.

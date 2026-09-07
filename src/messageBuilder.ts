@@ -140,6 +140,13 @@ export interface ProfileMeta {
  * Returns metadata and the body with frontmatter stripped.
  */
 export function parseFrontmatter(content: string): { meta: ProfileMeta; body: string } {
+  // A profile pillar may carry a one-line "> **Digest:** …" blockquote prepended
+  // as its first bytes (a front-loaded core directive for truncated ~200-char
+  // reads). Skip it so any YAML frontmatter that follows is still detected/parsed.
+  if (content.startsWith('> **Digest:**')) {
+    const nl = content.indexOf('\n');
+    content = nl === -1 ? '' : content.slice(nl + 1).replace(/^\r?\n/, '');
+  }
   if (!content.startsWith('---')) {
     return { meta: {}, body: content };
   }

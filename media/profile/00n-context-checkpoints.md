@@ -1,3 +1,5 @@
+> **Digest:** On 'save progress' append a new .autodev/checkpoints/ file (never overwrite); on 'resume' load the newest current-branch checkpoint and continue from what's left.
+
 ## 0.0n Context Checkpoints — Save & Restore Your Working State
 
 **When to use:** The user says *"save progress/state/my work/context"*, or you want to bank where you are → run **Context-Save** · The user says *"resume where I left off / restore context / where was I / pick up where I left off"* → run **Context-Restore** · Also across sessions, across git worktrees, and at the compaction boundary ([[00l-compaction-continuity]], §0.0l). **A checkpoint is a durable, browsable, timestamped snapshot of your working state so ANY future session or worktree can resume without losing a beat.**

@@ -1,3 +1,5 @@
+> **Digest:** Log durable typed facts in .autodev/graph/ — claims with source, artifacts with version, evals with rubric; recall via graph_neighbors first, and supersede, never delete.
+
 ## 0.20 Project Graph — Durable Shared Memory (`.autodev/graph/`)
 
 **The agent forgets, the graph does not.** A typed, sourced, versioned graph of the

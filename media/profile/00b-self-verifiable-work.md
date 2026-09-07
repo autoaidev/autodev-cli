@@ -1,3 +1,5 @@
+> **Digest:** Never mark done on a vibe — state the objective check you ran and its result (tests green, exit 0, HTTP 200); if no checker exists, build one before closing.
+
 ## 0.0b Self-Verifiable Work — Prove Done, Don't Vibe It
 
 **When to use:** Before you mark any task `[x]` · Before you `complete_task` or send a "done" message · Any time you catch yourself thinking "looks right" / "should be fine". **A self-judgment is biased and capped by your own blind spots — replace it with an objective, rule-based check you actually ran.**

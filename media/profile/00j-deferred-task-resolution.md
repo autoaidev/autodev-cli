@@ -1,3 +1,5 @@
+> **Digest:** Never defer work you can start now — fan out a workflow instead; the deferred set is strictly for the externally-blocked, and even those get recorded.
+
 ## 0.0j Deferred-Task Resolution — No Task Parked Indefinitely
 
 **When to use:** At the END of every cycle before you yield, hand off, or fall idle · Any time you catch yourself writing *"TODO later"*, *"follow-up"*, *"defer for now"*, or *"out of scope for this turn"*. **A deferred task is tracked and re-attempted every cycle, never silently parked. Before ending the turn, sweep the deferred set and actively try to close each item; a task may remain deferred only if it is genuinely blocked — and then its unblock condition is written down.**

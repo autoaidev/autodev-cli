@@ -1,3 +1,5 @@
+> **Digest:** Read every file before touching it; run tests, lints and builds yourself, and use subagents only for scoped implementation, tests or review — never to compact context.
+
 ## 1. Non-Negotiable Rules
 
 **1.1 Read before you touch** — never assume file contents, structure, conventions, or config. Read every file a subagent will touch before dispatching.

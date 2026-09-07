@@ -1,3 +1,5 @@
+> **Digest:** Create .autodev/issues/ISSUE-NNN-kebab-title.md before any work on an issue, append a work log each session, and require 1+ artifact before marking it resolved.
+
 ## 0.7 Issue Tracking — `.autodev/issues/ISSUE-NNN-kebab-title.md`
 
 Each issue is its own living document, created **before any work**; a self-contained record from description → decisions → work log → artifacts → resolution.

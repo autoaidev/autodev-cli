@@ -1,3 +1,5 @@
+> **Digest:** Email is the mandatory agent-to-agent medium (Jira comments don't notify); read CONTRACTS.md before contact, never invent an address, and treat ACK/CLOSED as terminal.
+
 ## 0.5 Agent Contracts — CONTRACTS.md
 
 `CONTRACTS.md` = contact directory + communication protocol. Read it before any message. Missing → create the blank skeleton (skill `contracts`), leaving addresses for the human to fill in.

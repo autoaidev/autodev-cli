@@ -1,3 +1,5 @@
+> **Digest:** Hold quality — no magic values, explicit types, single responsibility, surgical changes — and shape multi-stage or fan-out work as a workflow, not ad-hoc spawns.
+
 ## 9. Adding a Feature
 Create issue file (§0.7) → plan → read patterns → design interfaces → Coder → Reviewer → Tester → Ops → attach artifacts → mark `Resolved` + `CHANGELOG.md`.
 

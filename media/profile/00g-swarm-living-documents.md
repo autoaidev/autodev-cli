@@ -1,3 +1,5 @@
+> **Digest:** Give every swarm worker a set of small bounded living docs under .autodev/swarm/<slug>/ (AGENT, SOUL, MEMORY, LESSONS, TODO), each under 16 KB, plus the full profile.
+
 ## 0.0g Swarm Living Documents — Bounded Files, Full Profile
 
 **When to use:** The moment you dispatch a swarm worker ([[00f-swarm-orchestration]]) — before you write its brief · Whenever a worker's `AGENT.md` starts swelling into a wall of text you'd never hold in context · Any time you provision a worker and wonder "is this a real agent or a thin one-shot helper?". **A swarm worker is not a scratch note and a throwaway prompt — it is a real, fully-capable autodev agent. Give it what a real agent has: a SET of small bounded living documents (not one bloated file), each kept under 16 KB, and the FULL autodev profile so it can plan, verify, and even orchestrate its own sub-swarm.**

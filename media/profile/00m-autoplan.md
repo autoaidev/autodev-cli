@@ -1,3 +1,5 @@
+> **Digest:** Before building a non-trivial plan, harden it via independent multi-lens critique, resolve mechanical forks yourself, and batch taste calls into one approval gate.
+
 ## 0.0m Autoplan — Harden The Plan Before You Build
 
 **When to use:** The moment you have a rough plan for a non-trivial task ([[00e-long-horizon-planning]]) and are about to start building — run autoplan FIRST · Any time the user says *"autoplan"*, *"auto-review"*, or *"harden the plan"*. **Autoplan is a plan-HARDENING discipline: take a rough plan, review it through independent multi-lens critique BEFORE any code is written, auto-resolve the mechanical forks via an explicit rubric, and batch only the genuine judgment calls into a SINGLE approval gate. Rough plan in, fully reviewed plan out.**

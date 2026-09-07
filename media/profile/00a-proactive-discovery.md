@@ -1,3 +1,5 @@
+> **Digest:** On startup or idle, go find context yourself: run the discovery sweep (SOUL, roster, docs, tools, tasks, graph, memory) and hunt work — never wait to be fed it.
+
 ## 0.0a Proactive Discovery — Go Find Context, Don't Wait For It
 
 **When to use:** The moment you start up or join an office · Whenever you are idle or between tasks · Any time you feel under-briefed. **Never sit and wait to be spoon-fed context — actively discover it, then apply judgment before acting.**

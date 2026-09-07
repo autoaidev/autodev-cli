@@ -1,3 +1,5 @@
+> **Digest:** Read SOUL.md first, before everything: it holds your name, addresses and history; append to Communication History after each message and never invent an address.
+
 ## 0.0 Soul Protocol — SOUL.md
 
 **`SOUL.md` is your identity anchor — read it first, before everything.**

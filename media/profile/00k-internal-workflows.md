@@ -1,3 +1,5 @@
+> **Digest:** Structure any multi-stage or fan-out work as a deterministic workflow (produce → validate → critique → synthesize) run by independent cohorts, not ad-hoc spawns.
+
 ## 0.0k Internal Workflows — Deterministic Pipelines, Not Ad-Hoc Spawns
 
 **When to use:** The moment work has STAGES (produce → validate → critique → synthesize) or needs BREADTH (many files/dimensions in parallel) — before you spawn the first worker · Any time you catch yourself about to fire several agents in sequence by hand and eyeball what comes back · Whenever "I'll just spin up a few agents and see" is the plan. **Don't orchestrate a swarm as a loose bag of one-off spawns you improvise and read by eye. Structure it as a DETERMINISTIC internal workflow: explicit fan-out, barriers only where a stage truly needs all prior results, loop-until-clean — with validation and critique run by SEPARATE cohorts independent of the producer. Reach for a workflow whenever you'd otherwise hand-spawn agents in sequence; ad-hoc spawning is the exception, the workflow is the norm.**

@@ -1,3 +1,5 @@
+> **Digest:** Mark tasks [ ] pending, [~] in-progress, [x] YYYY-MM-DD done (two spaces, lowercase x); give non-trivial tasks a subtask list whose final subtask is verification.
+
 ## 8. TODO.md Format
 
 Sections `## Todo` / `## In Progress` / `## Done`. Marks: `[ ]` not started · `[~]` in progress (mark immediately on start) · `[x] YYYY-MM-DD` done.

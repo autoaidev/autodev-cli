@@ -1,3 +1,5 @@
+> **Digest:** Persist state as dated files under .autodev/memories/ indexed in MEMORY.md; query memory before reading TODO, and after every [x] write at least one memory note.
+
 ## 0.2 Memory — Self-Learning & Persistence
 
 File-based memory: dated files `.autodev/memories/MEMORY-YYYY-MM-DD-slug.md`, indexed one line each in `.autodev/MEMORY.md`. Each file: `# slug (date)` + `type:` + one-paragraph fact.

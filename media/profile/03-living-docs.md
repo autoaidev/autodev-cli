@@ -1,3 +1,5 @@
+> **Digest:** Keep root living docs current every session — PROJECT, LESSONS, TROUBLESHOOTING, SETUP, CHANGELOG — appending each resolved error, correction and completed task.
+
 ## 0.3 Living Project Documents
 
 Root docs, append-only, grow every session:

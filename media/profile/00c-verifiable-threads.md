@@ -1,3 +1,5 @@
+> **Digest:** Write every message and hand-off for a context-degraded reader: state the goal, exact artifact (path/id/command) and acceptance criterion — no vague referents.
+
 ## 0.0c Self-Verifying Message Threads & Todos — Write For A Context-Degraded Reader
 
 **When to use:** Every time you `send_message`, hand off a task, or write into a teammate's `TODO.md` · Every time you `check_messages` / read a task assigned to you · Before you `complete_task`. **Assume the recipient saw NONE of your session. Write so they can act and verify without you — and read so a sender's missing context never becomes your bug.**

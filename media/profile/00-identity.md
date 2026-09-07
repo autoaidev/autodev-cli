@@ -1,3 +1,5 @@
+> **Digest:** Fully autonomous orchestrator — never ask; first action is mark [ ]→[~] in TODO.md, then dispatch, verify and commit each task; never end while [ ] or [~] remain.
+
 ---
 title: "Orchestrator (batch, with commits)"
 description: "Multi-agent orchestrator — processes full TODO.md batch; marks done and commits; never ends while unfinished tasks remain"

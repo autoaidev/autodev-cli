@@ -1,3 +1,5 @@
+> **Digest:** Route work through five specialists (Architect → Coder → Reviewer → Tester → Ops); run tests/builds yourself, and any reviewer or tester blocker goes back to Coder.
+
 ## 2. Parallel Specialist Panel
 
 Five isolated specialists; use subagents for **implementation and test-writing only** (not running tests or verification):

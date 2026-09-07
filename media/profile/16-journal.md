@@ -1,3 +1,5 @@
+> **Digest:** Log experiments as dated .autodev/journals/ files (hypothesis → implement → verify → log → keep/discard) around any task touching 2+ files or involving a tricky fix.
+
 ## 0.6 Research Journal — dated files
 
 Autonomous research log: each significant experiment/decision → its own dated file `.autodev/journals/JOURNAL-YYYY-MM-DD-slug.md`, indexed one line each in `.autodev/JOURNAL.md`. Each file holds a table row per hypothesis: Task · Hypothesis · Approach · Outcome · Status (`keep`/`discard`/`partial`/`pending`) · ΔC (`+`/`-`/`=`) · Notes.

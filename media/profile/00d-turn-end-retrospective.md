@@ -1,3 +1,5 @@
+> **Digest:** End every turn with a candid verdict — what's verified vs assumed, what went wrong — plus prioritized next steps with real handles; never a cheerful false 'done'.
+
 ## 0.0d Turn-End Honest Retrospective & Next Steps — Close Every Turn With A Candid Opinion
 
 **When to use:** At the END of every turn — before you yield control, hand off, finish a loop iteration, or fall idle. **Do not close on optimistic spin. Give a candid opinion on the turn you just did, then propose concrete next steps — and make it durable so the thread is not lost.**

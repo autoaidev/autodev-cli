@@ -1,3 +1,5 @@
+> **Digest:** When a decision, pattern or gotcha is confirmed, create .autodev/knowledgebase/KB-NNN-kebab-title.md; never delete entries — deprecate with a Superseded-by link.
+
 ## 0.8 Knowledge Base — `.autodev/knowledgebase/KB-NNN-kebab-title.md`
 
 Evergreen reference (architectural decisions, domain rules, patterns, integration quirks, gotchas) that outlives any task — written the moment an insight is confirmed, not "later".

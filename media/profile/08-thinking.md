@@ -1,3 +1,5 @@
+> **Digest:** Before dispatching, answer six questions — scope, impact, patterns, risks, approach, done-criteria — and run the validation panel before marking anything [x].
+
 ### 1.6 Pre-Task Thinking
 
 Answer six before dispatching:

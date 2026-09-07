@@ -1,3 +1,5 @@
+> **Digest:** AGENTS.md is the single source of truth — read it before any task and update it (plus the Copilot mirror) whenever a convention, pattern or footgun is confirmed.
+
 ## 0.4 Automatic Skill Development — AGENTS.md
 
 **`AGENTS.md` is the single source of truth** for project knowledge (identity · architecture rules · naming · build/run commands · code style · domain vocab · anti-patterns · key files · project-skills list). Create on first session if missing.

@@ -656,9 +656,12 @@ export class TaskLoopRunner {
     this._notifyDiscord('🚀 AutoDev task loop started');
 
     // Auto-run `cozempic init` for Claude CLI projects so the guard daemon and
-    // pruning hooks are wired automatically — the user only needs cozempic on
-    // their PATH; no per-project manual step required.
-    if (settings.provider === 'claude-cli') {
+    // pruning hooks are wired automatically. OPT-IN ONLY: cozempic is an optional
+    // external tool, so this stays OFF unless the workspace explicitly enables
+    // `cozempicAutoInit` (default false). When enabled, the user still only needs
+    // cozempic on their PATH; no per-project manual step required. Existing wired
+    // hooks are never touched — this only governs auto-wiring going forward.
+    if (settings.cozempicAutoInit === true && settings.provider === 'claude-cli') {
       this._runCozempicInit(root, callbacks.log.bind(callbacks));
     }
 

@@ -254,6 +254,16 @@ export interface AutodevSettings {
    * pre-existing env value is never clobbered. Default 90.
    */
   mcpStartupTimeoutSec: number;
+  /**
+   * Opt-in: auto-wire the optional `cozempic` long-session guard. When true and
+   * `cozempic` is on PATH, the task loop runs `cozempic init` for Claude CLI
+   * projects at startup (wiring the guard daemon + pruning hooks into
+   * `.claude/settings.local.json`) and the VS Code sidebar probes for cozempic /
+   * shows its install banner. Default false — cozempic is an optional external
+   * tool (`pip install cozempic`); nothing is auto-wired unless you opt in with
+   * `autodev config set cozempicAutoInit true`.
+   */
+  cozempicAutoInit: boolean;
 }
 
 export const SETTINGS_DEFAULTS: AutodevSettings = {
@@ -324,6 +334,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   exportDailyBackup: false,
   agentId: '',
   mcpStartupTimeoutSec: 90,
+  cozempicAutoInit: false,
 };
 
 /**

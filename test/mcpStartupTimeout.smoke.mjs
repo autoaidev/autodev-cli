@@ -21,6 +21,7 @@ const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + ms
 // ── default ─────────────────────────────────────────────────────────────────
 ok(MCP_STARTUP_TIMEOUT_DEFAULT_SEC === 90, 'default constant = 90s');
 ok(SETTINGS_DEFAULTS.mcpStartupTimeoutSec === 90, 'SETTINGS_DEFAULTS.mcpStartupTimeoutSec === 90');
+ok(SETTINGS_DEFAULTS.cozempicAutoInit === false, 'SETTINGS_DEFAULTS.cozempicAutoInit === false (opt-in, off by default)');
 ok(resolveMcpStartupTimeoutSec() === 90, 'resolve() with no settings → 90');
 ok(resolveMcpStartupTimeoutSec({}) === 90, 'resolve({}) → 90');
 ok(resolveMcpStartupTimeoutSec({ mcpStartupTimeoutSec: 0 }) === 90, 'resolve(0) → 90 (0 = unset)');

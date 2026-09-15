@@ -1,4 +1,5 @@
 > **Digest:** Give every swarm worker a set of small bounded living docs under .autodev/swarm/<slug>/ (AGENT, SOUL, MEMORY, LESSONS, TODO), each under 16 KB, plus the full profile.
+<!-- autodev-keywords: swarm worker docs; living documents; .autodev/swarm; AGENT.md; worker brief; 16 KB cap; split file; SOUL MEMORY LESSONS TODO -->
 
 ## 0.0g Swarm Living Documents — Bounded Files, Full Profile
 

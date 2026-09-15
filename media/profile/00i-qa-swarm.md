@@ -1,4 +1,5 @@
 > **Digest:** Review isn't testing: after critique, an independent QA swarm RUNS the real built change end-to-end each cycle and gates acceptance on it passing on the real product.
+<!-- autodev-keywords: qa swarm; run it; end-to-end test; real product; independent tester; test plan; pass fail evidence; gate on qa -->
 
 ## 0.0i QA Swarm — Test the Real Product Change, Every Cycle
 

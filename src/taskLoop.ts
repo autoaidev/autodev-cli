@@ -6,6 +6,7 @@ import { execSync } from 'child_process';
 import { parseTodo, pickNextTask, countRemaining, Task, pruneTodoToArchive, shortId } from './todo';
 import { todoWriter } from './todoWriteManager';
 import { buildPrompt } from './prompt';
+import { rebuildProfile } from './messageBuilder';
 import { writeMessageFile } from './messageBuilder';
 import { WebhookClient, WebhookEvent, sendDiscordBotMessage } from './webhook';
 import { loadSettingsForRoot, AutodevSettings, hasExplicitSetting, settingsWritePath } from './core/settingsLoader';
@@ -432,6 +433,18 @@ export class TaskLoopRunner {
     const git = resolveGitInfo(root);
     this._gitRepo   = git.gitRepo;
     this._gitBranch = git.gitBranch;
+
+    // Build the agent profile ONCE at loop start (moved off the per-message
+    // path): regenerate `.autodev/PROGRAM.md`, deploy all bundled `.claude/skills/`
+    // (incl. the master `autodev` skill) + per-MCP skills, and re-inject the
+    // AGENTS/CLAUDE/Copilot refs. buildMessage no longer does this every turn —
+    // it only rebuilds as a fallback if PROGRAM.md is missing at dispatch.
+    // rebuildProfile also runs on explicit profile/settings change (Save & Rebuild).
+    try {
+      rebuildProfile(root);
+    } catch (err) {
+      callbacks.log(`⚠️ profile rebuild at loop start failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // Wire per-provider MCP configs at startup so the A2A tools are always
     // available for whatever provider this agent runs — not just after an

@@ -1,4 +1,5 @@
 > **Digest:** Before dispatching, answer six questions — scope, impact, patterns, risks, approach, done-criteria — and run the validation panel before marking anything [x].
+<!-- autodev-keywords: thinking; decomposition; six questions; scope impact risks; validation panel; before dispatch; done criteria -->
 
 ### 1.6 Pre-Task Thinking
 

@@ -1,4 +1,5 @@
 > **Digest:** Log durable typed facts in .autodev/graph/ — claims with source, artifacts with version, evals with rubric; recall via graph_neighbors first, and supersede, never delete.
+<!-- autodev-keywords: project graph; .autodev/graph; durable facts; graph_neighbors; graph_add_node; claim source; artifact version; supersede -->
 
 ## 0.20 Project Graph — Durable Shared Memory (`.autodev/graph/`)
 

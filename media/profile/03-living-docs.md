@@ -1,4 +1,5 @@
 > **Digest:** Keep root living docs current every session — PROJECT, LESSONS, TROUBLESHOOTING, SETUP, CHANGELOG — appending each resolved error, correction and completed task.
+<!-- autodev-keywords: living docs; PROJECT.md; LESSONS.md; TROUBLESHOOTING.md; SETUP.md; CHANGELOG.md; keep docs current; resolved error -->
 
 ## 0.3 Living Project Documents
 

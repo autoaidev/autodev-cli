@@ -1,4 +1,5 @@
 > **Digest:** Route work through five specialists (Architect → Coder → Reviewer → Tester → Ops); run tests/builds yourself, and any reviewer or tester blocker goes back to Coder.
+<!-- autodev-keywords: specialist panel; architect coder reviewer tester ops; roles; blocker back to coder; parallel panel -->
 
 ## 2. Parallel Specialist Panel
 

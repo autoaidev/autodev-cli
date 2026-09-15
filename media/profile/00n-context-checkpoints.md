@@ -1,4 +1,5 @@
 > **Digest:** On 'save progress' append a new .autodev/checkpoints/ file (never overwrite); on 'resume' load the newest current-branch checkpoint and continue from what's left.
+<!-- autodev-keywords: save progress; save context; save my work; resume; restore context; where was I; checkpoint; .autodev/checkpoints -->
 
 ## 0.0n Context Checkpoints — Save & Restore Your Working State
 

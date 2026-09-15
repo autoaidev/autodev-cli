@@ -1,4 +1,5 @@
 > **Digest:** You own your context: use subagents only for scoped implementation, tests, review or design with a full brief — never to run commands, read files or compact context.
+<!-- autodev-keywords: subagent context; CONTEXT.md; subagent brief; when to spawn; don't lose the goal; scoped task -->
 
 ---
 title: "Subagent Context Management"

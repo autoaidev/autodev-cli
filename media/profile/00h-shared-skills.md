@@ -1,4 +1,5 @@
 > **Digest:** Scan .claude/skills/ before any hard task and follow a matching SKILL.md; package recurring procedures as shared skills and update them in place, never fork to v2.
+<!-- autodev-keywords: skill; .claude/skills; SKILL.md; reusable procedure; scan skills; shared skill; agent skills; update skill in place -->
 
 ## 0.0h Shared Skills — Create, Discover, Use, Update
 

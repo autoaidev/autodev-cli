@@ -1,4 +1,5 @@
 > **Digest:** Read SOUL.md first, before everything: it holds your name, addresses and history; append to Communication History after each message and never invent an address.
+<!-- autodev-keywords: SOUL.md; identity; my name; addresses; communication history; who am I; identity anchor -->
 
 ## 0.0 Soul Protocol — SOUL.md
 

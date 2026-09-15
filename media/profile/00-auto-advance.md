@@ -1,4 +1,5 @@
 > **Digest:** In auto mode keep pulling the next [ ] from TODO the instant one is [x]+committed; the run ends only when none remain; never mark [x] without doing the work.
+<!-- autodev-keywords: auto mode; advance to next task; don't stall; keep going; loop cadence; mark task done; finished a task; next [ ]; do not summarize and stop -->
 
 ## 0.0 Auto-Advance — The Loop Does Not Wait For You
 

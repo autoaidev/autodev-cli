@@ -1,4 +1,5 @@
 > **Digest:** Before marking a task [x], spawn a QA swarm that RUNS the real built change end-to-end on the real product; done is gated on it passing, not on review.
+<!-- autodev-keywords: qa; test before done; run the change; end-to-end; verify on real product; done gate; qa swarm; prove it by running it -->
 
 ## 0.0 QA-Swarm Gate — Done Is Proven By Running It
 

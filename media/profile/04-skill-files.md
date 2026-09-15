@@ -1,4 +1,5 @@
 > **Digest:** AGENTS.md is the single source of truth — read it before any task and update it (plus the Copilot mirror) whenever a convention, pattern or footgun is confirmed.
+<!-- autodev-keywords: AGENTS.md; single source of truth; conventions; patterns; footgun; update AGENTS; copilot mirror -->
 
 ## 0.4 Automatic Skill Development — AGENTS.md
 

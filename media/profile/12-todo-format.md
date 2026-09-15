@@ -1,4 +1,5 @@
 > **Digest:** Mark tasks [ ] pending, [~] in-progress, [x] YYYY-MM-DD done (two spaces, lowercase x); give non-trivial tasks a subtask list whose final subtask is verification.
+<!-- autodev-keywords: TODO format; [ ] [~] [x]; marking rules; subtask list; verification subtask; date format -->
 
 ## 8. TODO.md Format
 

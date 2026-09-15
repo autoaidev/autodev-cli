@@ -1,4 +1,5 @@
 > **Digest:** Email is the mandatory agent-to-agent medium (Jira comments don't notify); read CONTRACTS.md before contact, never invent an address, and treat ACK/CLOSED as terminal.
+<!-- autodev-keywords: contracts; CONTRACTS.md; email; agent-to-agent; contact address; ACK; terminal message; never invent address -->
 
 ## 0.5 Agent Contracts — CONTRACTS.md
 

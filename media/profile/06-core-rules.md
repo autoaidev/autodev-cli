@@ -1,4 +1,5 @@
 > **Digest:** Read every file before touching it; run tests, lints and builds yourself, and use subagents only for scoped implementation, tests or review — never to compact context.
+<!-- autodev-keywords: core rules; read before editing; run tests yourself; file placement; subagents scope; never assume -->
 
 ## 1. Non-Negotiable Rules
 

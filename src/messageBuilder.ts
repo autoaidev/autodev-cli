@@ -390,6 +390,11 @@ export function rebuildProfile(root: string): void {
   const customRefs = settings?.customProfileRefs ?? [];
   const { body: profileBody, sectionPaths } = assembleProfileBody(enabledSections, root, customRefs);
   const finalProfileBody = applyProtocolSections(profileBody, settings);
+  // Skill deployment lives on the PROFILE BUILD, not the per-message path: deploy
+  // ALL bundled skills (incl. the master `.claude/skills/autodev/`) and the
+  // per-MCP skill files here, so a running Claude agent picks them up. buildMessage
+  // no longer copies skills every turn — this is the single place they are written.
+  applyAllSkills(root);
   applyMcpSkills(root, settings);
 
   const profileFilePath = path.join(root, AGENT_PROFILE_FILE);
@@ -412,44 +417,30 @@ export function buildMessage(
 ): { prompt: string; messageFile: string } {
   autodevDir(root);
 
-  // Load workspace settings (MCP servers, enabled profile sections, etc.)
-  let settings: ReturnType<typeof loadSettingsForRoot> | undefined;
-  try { settings = loadSettingsForRoot(root); } catch { /* ignore */ }
-
-  // Read the noCommit flag from the identity section frontmatter
+  // Read the noCommit flag from the identity section frontmatter (media source).
   const identityFile = path.join(__dirname, '..', 'media', 'profile', '00-identity.md');
   const { meta } = parseFrontmatter(readOrEmpty(identityFile));
 
-  // Assemble the profile index from the enabled section files
-  const enabledSections = settings?.enabledProfileSections ?? [];
-  const customRefs = settings?.customProfileRefs ?? [];
-  const { body: profileBody, sectionPaths } = assembleProfileBody(enabledSections, root, customRefs);
-
-  // Inject protocol sections (email, jira, ...) for any MCP currently enabled
-  // in the workspace settings. Toggling an MCP off cleanly removes its block
-  // on the next regeneration.
-  const finalProfileBody = applyProtocolSections(profileBody, settings);
-
-  // Copy all general skills from media/skills/ to .claude/skills/
-  if (root) { applyAllSkills(root); }
-  
-  // Deploy / remove Claude skill files for enabled / disabled MCPs
-  if (root) { applyMcpSkills(root, settings); }
-
-  // Always write the profile file so the LLM can @-reference it
+  // PROGRAM.md + skill deployment live on the PROFILE BUILD (rebuildProfile — run
+  // once at loop start and on explicit Save & Rebuild), NOT on this per-message
+  // path. buildMessage no longer rewrites PROGRAM.md, re-deploys skills, or
+  // re-injects the AGENTS/CLAUDE/Copilot refs every turn.
+  //
+  // SAFETY: writeCombinedFile reads PROGRAM.md at dispatch, so it must exist. If
+  // it is missing (first turn before start ran, or a deleted file), build it once
+  // here — idempotent: when it already exists we do NOT rewrite it.
   const profileFilePath = path.join(root, AGENT_PROFILE_FILE);
-  fs.writeFileSync(profileFilePath, finalProfileBody, 'utf8');
-  injectAgentProfileRef(root, sectionPaths);
-  syncCopilotInstructions(root, finalProfileBody);
+  if (!fs.existsSync(profileFilePath)) {
+    try { rebuildProfile(root); } catch { /* dispatch will surface a clear error */ }
+  }
   // Guarantee the SOUL.md identity anchor exists BEFORE we build the reminders
   // below (firstTurnSystemReminder / soulUpdatedReminder both point the agent
-  // at it). Without this, extension-launched agents — which never run the
-  // office persona connect that creates SOUL.md — are told to "read SOUL.md
-  // first" against a file that does not exist. Idempotent; never clobbers an
-  // existing identity/persona. Creating it here (before soulUpdatedReminder)
-  // means the .soul-seen marker records the skeleton's mtime silently on turn 1.
+  // at it). Idempotent; never clobbers an existing identity/persona. (rebuildProfile
+  // also ensures it, but keep this for the case PROGRAM.md exists yet SOUL.md does
+  // not.) Creating it here (before soulUpdatedReminder) means the .soul-seen marker
+  // records the skeleton's mtime silently on turn 1.
   ensureSoulSkeleton(root);
-  // Build the task trigger message — profile is loaded by agents via AGENTS.md → @.autodev/AGENT_PROFILE.md
+  // Build the task trigger message — profile is loaded by agents via AGENTS.md → @.autodev/PROGRAM.md
   const todoPath = path.join(todoDir, 'TODO.md');
   const taskMessage = buildTaskInstruction(task, todoPath, root, meta.noCommit);
 
@@ -475,11 +466,11 @@ export function buildMessage(
   const messageBody = [...reminders, taskMessage].join('\n\n---\n\n');
   const messageFile = writeMessageFile(root, messageBody);
 
-  // The combined `prompt` string mirrors the same ordering for the (currently
-  // unused) UI-provider path; profile is appended by writeCombinedFile at dispatch.
+  // The combined `prompt` string mirrors the messageFile ordering for the
+  // (currently unused) UI-provider path. The profile body is NOT inlined here —
+  // it lives in PROGRAM.md on disk and is appended by writeCombinedFile at
+  // dispatch (profile build owns PROGRAM.md; this path owns only the reminders +
+  // task text).
   const parts: string[] = [...reminders, taskMessage];
-  if (includeProfile && finalProfileBody.trim()) {
-    parts.push(`# Project Instructions (AUTODEV.md)\n\n${finalProfileBody.trim()}`);
-  }
   return { prompt: parts.join('\n\n---\n\n'), messageFile };
 }

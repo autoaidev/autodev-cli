@@ -1,4 +1,5 @@
 > **Digest:** Treat compaction as a handoff to your future self: before it snapshot in-flight state to PRE_COMPACT.md, after it read that file first and resume the loop from there.
+<!-- autodev-keywords: compaction; context window full; PRE_COMPACT.md; resume after compaction; handoff to future self; in-flight state; continuity -->
 
 ## 0.0l Compaction Continuity — Survive The Context Boundary
 

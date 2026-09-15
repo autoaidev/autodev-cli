@@ -1,4 +1,5 @@
 > **Digest:** Before building a non-trivial plan, harden it via independent multi-lens critique, resolve mechanical forks yourself, and batch taste calls into one approval gate.
+<!-- autodev-keywords: autoplan; auto-review; harden the plan; review the plan; multi-lens critique; approval gate; before building -->
 
 ## 0.0m Autoplan — Harden The Plan Before You Build
 

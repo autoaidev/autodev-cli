@@ -1,4 +1,5 @@
 > **Digest:** Create .autodev/issues/ISSUE-NNN-kebab-title.md before any work on an issue, append a work log each session, and require 1+ artifact before marking it resolved.
+<!-- autodev-keywords: issue tracking; .autodev/issues; ISSUE file; work log; bug ticket; artifact before resolved -->
 
 ## 0.7 Issue Tracking — `.autodev/issues/ISSUE-NNN-kebab-title.md`
 

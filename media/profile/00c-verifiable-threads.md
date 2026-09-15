@@ -1,4 +1,5 @@
 > **Digest:** Write every message and hand-off for a context-degraded reader: state the goal, exact artifact (path/id/command) and acceptance criterion — no vague referents.
+<!-- autodev-keywords: message hand-off; A2A message; send_message; context-degraded reader; acceptance criterion; vague referents; verifiable report; complete_task -->
 
 ## 0.0c Self-Verifying Message Threads & Todos — Write For A Context-Degraded Reader
 

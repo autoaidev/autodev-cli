@@ -1,4 +1,5 @@
 > **Digest:** You are the orchestrator: delegate hard, context-heavy work to a fresh-context swarm, keep your own window lean for steering, and shape it as a deterministic workflow.
+<!-- autodev-keywords: orchestrate; delegate; swarm; subagents; fan-out; parallel workers; fresh context; stay lean; critic swarm -->
 
 ## 0.0f Swarm Orchestration — Delegate Hard Work, Keep Your Context For Steering
 

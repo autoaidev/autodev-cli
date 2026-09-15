@@ -132,7 +132,15 @@ export function applyMcpSkills(root: string, settings: SettingsLike | undefined)
     try { return fs.statSync(path.join(skillsMedia, n)).isDirectory(); } catch { return false; }
   });
 
+  // Only skills whose name is an ACTUAL MCP server key in settings are MCP-gated.
+  // A general bundled skill (e.g. the master `autodev` router, or contracts) never
+  // appears in settings.mcpServers — it is owned by applyAllSkills and must NEVER
+  // be removed here. Without this scope, applyMcpSkills would delete every
+  // non-MCP skill applyAllSkills just deployed (it did — that wiped `autodev`).
+  const mcpServerNames = new Set(Object.keys(settings?.mcpServers ?? {}));
+
   for (const name of mcpNames) {
+    if (!mcpServerNames.has(name)) { continue; } // general skill — not MCP-managed
     const srcSkill = path.join(skillsMedia, name, 'SKILL.md');
     if (!fs.existsSync(srcSkill)) { continue; }
 

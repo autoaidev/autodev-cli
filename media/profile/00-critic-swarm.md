@@ -1,4 +1,5 @@
 > **Digest:** Before marking a task [x], spawn an INDEPENDENT critic swarm to adversarially review the work — keep only what survives; the producer never self-approves.
+<!-- autodev-keywords: before marking done; review; critique; adversarial review; refute; find bugs; independent critic; producer never self-approves -->
 
 ## 0.0 Critic-Swarm Gate — Refute Before You Mark [x]
 

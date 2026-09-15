@@ -1,4 +1,5 @@
 > **Digest:** Log experiments as dated .autodev/journals/ files (hypothesis → implement → verify → log → keep/discard) around any task touching 2+ files or involving a tricky fix.
+<!-- autodev-keywords: journal; research log; hypothesis; experiment; .autodev/journals; keep or discard; tricky fix -->
 
 ## 0.6 Research Journal — dated files
 

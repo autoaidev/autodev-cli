@@ -1,4 +1,5 @@
 > **Digest:** Plan the whole arc as ordered milestones with acceptance criteria before coding; a done milestone is a checkpoint, not the finish — auto-advance until all are done.
+<!-- autodev-keywords: plan; planning; break down; roadmap; milestones; acceptance criteria; whole arc; define done; long horizon -->
 
 ## 0.0e Long-Horizon Task Planner — Plan The Whole Arc, Don't Ship Half
 

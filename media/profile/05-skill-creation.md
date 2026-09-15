@@ -1,4 +1,5 @@
 > **Digest:** Turn a hard problem into a reusable .claude/skills/<slug>/SKILL.md when it took 3+ tries or a teammate would repeat it, then list the slug in AGENTS.md.
+<!-- autodev-keywords: create skill; skill creation; 3+ failed attempts; reusable solution; SKILL.md; repeated mistake -->
 
 ## 0.5 Skill Creation — Hard Problems Become Reusable Skills
 

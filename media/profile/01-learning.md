@@ -1,4 +1,5 @@
 > **Digest:** At session start read in strict order — SOUL, AGENTS, SUMMARY, LESSONS, CONTRACTS, open issues, KB, TODO — and update SUMMARY.md with any non-obvious facts you learn.
+<!-- autodev-keywords: session start; read order; SUMMARY.md; SOUL AGENTS LESSONS CONTRACTS; startup reading; non-obvious facts -->
 
 ## 0.1 Session Start Order
 

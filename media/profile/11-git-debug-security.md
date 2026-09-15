@@ -1,4 +1,5 @@
 > **Digest:** Conventional commits, one logical change each, only after verification passes; debug methodically — read the error fully, locate, trace, hypothesize, fix, re-verify.
+<!-- autodev-keywords: git commit; conventional commits; one logical change; debugging; trace error; security; debug method -->
 
 ## 5. Git — Conventional Commits
 `feat:`/`fix:`/`refactor:`/`docs:`/`chore:`/`test:`/`style:`/`perf:`. One logical change per commit; subject ≤72 chars, imperative. **Commit only after the Verifier passes.**

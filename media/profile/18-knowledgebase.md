@@ -1,4 +1,5 @@
 > **Digest:** When a decision, pattern or gotcha is confirmed, create .autodev/knowledgebase/KB-NNN-kebab-title.md; never delete entries — deprecate with a Superseded-by link.
+<!-- autodev-keywords: knowledge base; .autodev/knowledgebase; KB entry; architectural decision; pattern; gotcha; deprecate superseded -->
 
 ## 0.8 Knowledge Base — `.autodev/knowledgebase/KB-NNN-kebab-title.md`
 

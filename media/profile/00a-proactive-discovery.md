@@ -1,4 +1,5 @@
 > **Digest:** On startup or idle, go find context yourself: run the discovery sweep (SOUL, roster, docs, tools, tasks, graph, memory) and hunt work — never wait to be fed it.
+<!-- autodev-keywords: startup; on join; discovery sweep; find context; roster; list_agents; idle; find work; recall memory; orient -->
 
 ## 0.0a Proactive Discovery — Go Find Context, Don't Wait For It
 

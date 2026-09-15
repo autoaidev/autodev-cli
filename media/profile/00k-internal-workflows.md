@@ -1,4 +1,5 @@
 > **Digest:** Structure any multi-stage or fan-out work as a deterministic workflow (produce → validate → critique → synthesize) run by independent cohorts, not ad-hoc spawns.
+<!-- autodev-keywords: workflow; multi-stage; fan-out; produce validate critique synthesize; deterministic; template; independent cohorts; not ad-hoc spawns -->
 
 ## 0.0k Internal Workflows — Deterministic Pipelines, Not Ad-Hoc Spawns
 

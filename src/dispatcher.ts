@@ -14,6 +14,7 @@ import { sendOpencodeSdkPrompt } from './providers/opencodeSdkProvider';
 import { sendGrokTuiPrompt } from './providers/grokTuiProvider';
 import { isOpenCodeHooksInstalled, installOpenCodeHooks } from './openCodeHooksManager';
 import { teeCommand, withExitFile, wrapWithSyntheticHooks, writeCombinedFile } from './core/commandHelpers';
+import { rebuildProfile } from './messageBuilder';
 import { providerRegistry } from './core/provider/ProviderRegistry';
 import { DispatchRequest } from './core/provider/contract';
 
@@ -177,6 +178,13 @@ export async function sendPromptToAi(
     // Build the combined profile+message file once and assemble the immutable
     // dispatch DTO. The resolved IProvider strategy decides what to do with it
     // (build a shell command, or spawn in-process) — no per-provider switch.
+    // SAFETY: writeCombinedFile reads PROGRAM.md when includeProfile — PROGRAM.md is
+    // written on the profile build (loop start / Save & Rebuild), no longer every
+    // turn. If it is somehow missing here (SDK path that never ran buildMessage, or
+    // a deleted file), build it once so writeCombinedFile never throws. Idempotent.
+    if (includeProfile && !fs.existsSync(agentProfileFile)) {
+      try { rebuildProfile(root); } catch { /* writeCombinedFile will surface a clear error */ }
+    }
     const combinedFile = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
     const provider = providerRegistry.get(providerId);
     const req: DispatchRequest = {

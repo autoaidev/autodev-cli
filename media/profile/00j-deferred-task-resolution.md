@@ -1,4 +1,5 @@
 > **Digest:** Never defer work you can start now — fan out a workflow instead; the deferred set is strictly for the externally-blocked, and even those get recorded.
+<!-- autodev-keywords: defer; TODO later; follow-up; out of scope; blocked; deferred set; parked backlog; unblock condition -->
 
 ## 0.0j Deferred-Task Resolution — No Task Parked Indefinitely
 

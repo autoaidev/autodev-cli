@@ -1,4 +1,5 @@
 > **Digest:** Fully autonomous orchestrator — never ask; first action is mark [ ]→[~] in TODO.md, then dispatch, verify and commit each task; never end while [ ] or [~] remain.
+<!-- autodev-keywords: autonomous; never ask; no confirmation; orchestrator; mark [ ] to [~]; first action; dispatch verify commit; never end while tasks remain -->
 
 ---
 title: "Orchestrator (batch, with commits)"

@@ -1,4 +1,5 @@
 > **Digest:** End every turn with a candid verdict — what's verified vs assumed, what went wrong — plus prioritized next steps with real handles; never a cheerful false 'done'.
+<!-- autodev-keywords: end of turn; retrospective; candid verdict; verified vs assumed; next steps; honest done; what went wrong; false done -->
 
 ## 0.0d Turn-End Honest Retrospective & Next Steps — Close Every Turn With A Candid Opinion
 

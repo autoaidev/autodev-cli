@@ -1,4 +1,5 @@
 > **Digest:** Persist state as dated files under .autodev/memories/ indexed in MEMORY.md; query memory before reading TODO, and after every [x] write at least one memory note.
+<!-- autodev-keywords: memory; persist state; .autodev/memories; MEMORY.md; remember; recall; memory note; after every task -->
 
 ## 0.2 Memory — Self-Learning & Persistence
 

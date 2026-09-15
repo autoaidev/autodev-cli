@@ -1,4 +1,5 @@
 > **Digest:** Never mark done on a vibe — state the objective check you ran and its result (tests green, exit 0, HTTP 200); if no checker exists, build one before closing.
+<!-- autodev-keywords: mark done; objective check; tests green; exit 0; HTTP 200; evidence; build a checker; verify work; not on a vibe -->
 
 ## 0.0b Self-Verifiable Work — Prove Done, Don't Vibe It
 

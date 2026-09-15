@@ -7,9 +7,14 @@
 //   R1b  program.md ABSENT  → firstTurnSystemReminder() returns '' (no broken
 //        pointer / no reference).
 //   R1c  Subsequent turn (includeProfile=false) → no reminder injected even
-//        though buildMessage re-writes program.md.
+//        though buildMessage ensures program.md exists.
 //   R2   rebuildProfile() regenerates program.md but NEVER touches a pre-existing
 //        SOUL.md (identity/persona is safe across rebuilds).
+//   R4   PROFILE-BUILD OWNS PROGRAM.md + SKILLS: rebuildProfile writes program.md
+//        AND deploys the master .claude/skills/autodev/SKILL.md; a SUBSEQUENT
+//        buildMessage dispatch must NOT rewrite program.md (mtime unchanged) — the
+//        per-turn PROGRAM.md/skill rebuild was moved off the message path. The
+//        only per-turn write is a one-time fallback when program.md is missing.
 // Run: node test/programReminder.smoke.mjs   (after npm run build)
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -59,7 +64,8 @@ ok('buildMessage: first turn injects the reminder ahead of the task', () => {
   assert.ok(prompt.includes('<system-reminder>'), 'first-turn prompt should contain the reminder');
   assert.match(prompt, /PROGRAM\.md/);
   assert.match(prompt, /SOUL\.md/);
-  // buildMessage writes program.md itself, so the gate is satisfied.
+  // program.md is absent on a fresh root, so buildMessage's fallback builds it once
+  // (before computing the reminder), satisfying the existence gate.
   assert.ok(fs.existsSync(path.join(d, '.autodev', 'PROGRAM.md')), 'program.md should be written');
   // Reminder must come before the task-begin marker.
   assert.ok(
@@ -173,6 +179,47 @@ ok('ensureSoulSkeleton: idempotent — never clobbers an existing SOUL.md', () =
   // And a full buildMessage must likewise preserve the hand-written identity.
   buildMessage(task, d, d, true);
   assert.strictEqual(fs.readFileSync(soulPath, 'utf8'), userSoul, 'buildMessage must not clobber a pre-existing SOUL.md');
+});
+
+// ── R4: profile build owns PROGRAM.md + skills; a later dispatch does not rewrite. ──
+ok('rebuildProfile deploys the master autodev skill', () => {
+  const d = tmpRoot();
+  rebuildProfile(d);
+  const skill = path.join(d, '.claude', 'skills', 'autodev', 'SKILL.md');
+  assert.ok(fs.existsSync(skill), 'rebuildProfile must deploy .claude/skills/autodev/SKILL.md');
+  const s = fs.readFileSync(skill, 'utf8');
+  assert.match(s, /^---\nname: autodev\n/, 'deployed skill frontmatter must name it autodev');
+  assert.match(s, /\.autodev\/profile\//, 'deployed skill must route to .autodev/profile/ files');
+});
+
+ok('buildMessage: a subsequent dispatch does NOT rewrite PROGRAM.md (mtime stable)', () => {
+  const d = tmpRoot();
+  rebuildProfile(d);                                   // profile build writes program.md
+  const prog = path.join(d, '.autodev', 'PROGRAM.md');
+  assert.ok(fs.existsSync(prog), 'precondition: program.md exists after rebuild');
+  // Pin mtime to a known past value; a rewrite by buildMessage would move it.
+  fs.utimesSync(prog, new Date(1000_000), new Date(1000_000));
+  buildMessage(task, d, d, false);                     // dispatch turn — must NOT rebuild
+  assert.strictEqual(
+    fs.statSync(prog).mtimeMs, 1000_000,
+    'PROGRAM.md must be untouched by a dispatch once the profile build wrote it',
+  );
+  // And skills likewise are not re-deployed per turn (they were deployed at build).
+  assert.ok(
+    fs.existsSync(path.join(d, '.claude', 'skills', 'autodev', 'SKILL.md')),
+    'master skill deployed at profile build remains present',
+  );
+});
+
+ok('buildMessage: fallback builds PROGRAM.md once when missing, then leaves it', () => {
+  const d = tmpRoot();
+  const prog = path.join(d, '.autodev', 'PROGRAM.md');
+  assert.ok(!fs.existsSync(prog), 'precondition: no program.md');
+  buildMessage(task, d, d, false);                     // fallback builds it
+  assert.ok(fs.existsSync(prog), 'fallback must build program.md when missing');
+  fs.utimesSync(prog, new Date(1000_000), new Date(1000_000));
+  buildMessage(task, d, d, false);                     // next turn — no rewrite
+  assert.strictEqual(fs.statSync(prog).mtimeMs, 1000_000, 'fallback must not rewrite an existing program.md');
 });
 
 console.log(`\nprogramReminder smoke: ${pass} passed`);

@@ -1,4 +1,5 @@
 > **Digest:** Orient first (entry point, UI, test runner, modules, config); before every commit verify with local tests, lint/build, browser if UI, and a security scan.
+<!-- autodev-keywords: orient codebase; entry point; test runner; verify before commit; lint build; security scan; browser check -->
 
 ## 3. Codebase Orientation
 Before dispatching, record: entry point(s) · browser UI? (→§4.3) · browser test suite (runner+cmd) · local test suite (runner+cmd) · core modules · config.

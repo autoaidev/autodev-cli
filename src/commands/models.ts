@@ -33,16 +33,25 @@ export interface ModelCatalogEntry {
   models: Array<{ id: string; label: string; contextLimit: number }>;
 }
 
-/** Build the catalog array (reused by the app IPC via `--json`). */
-export function buildModelCatalog(): ModelCatalogEntry[] {
-  return FAMILIES.map((m) => {
-    const models = m.list();
-    return {
-      family: m.family,
-      default: models[0]?.id ?? '',
-      models,
-    };
-  });
+/**
+ * Build the catalog array (reused by the app IPC via `--json`).
+ *
+ * Uses each family's `listLive()`, which pulls REAL models from the provider
+ * when possible (grok: GET https://api.x.ai/v1/models) and falls back to the
+ * static ProviderModels list on any failure — so the emitted shape is always
+ * the same { family, default, models:[{id,label,contextLimit}] }.
+ */
+export async function buildModelCatalog(): Promise<ModelCatalogEntry[]> {
+  return Promise.all(
+    FAMILIES.map(async (m) => {
+      const models = await m.listLive();
+      return {
+        family: m.family,
+        default: models[0]?.id ?? '',
+        models,
+      };
+    }),
+  );
 }
 
 const fmtCtx = (n: number): string =>
@@ -53,8 +62,8 @@ export function modelsCommand(program: Command): void {
     .command('models')
     .description('List the model catalog every provider family supports (id, label, context)')
     .option('--json', 'Output JSON (the shape the app consumes)')
-    .action((opts: { json?: boolean }) => {
-      const catalog = buildModelCatalog();
+    .action(async (opts: { json?: boolean }) => {
+      const catalog = await buildModelCatalog();
       if (opts.json) {
         process.stdout.write(JSON.stringify(catalog, null, 2) + '\n');
         return;

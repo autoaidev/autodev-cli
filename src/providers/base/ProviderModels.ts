@@ -78,6 +78,14 @@ export abstract class ProviderModels {
   abstract readonly family: string;
   abstract list(): ModelInfo[];
 
+  /**
+   * Live catalog for this family. Default = the static `list()`; providers that
+   * can pull their REAL models from an API override this (see GrokProviderModels).
+   * Must always resolve to a non-empty list — implementations fall back to
+   * `list()` on any failure so the picker never goes empty.
+   */
+  async listLive(): Promise<ModelInfo[]> { return this.list(); }
+
   resolve(id?: string): ModelInfo | undefined {
     if (!id) { return undefined; }
     const lower = id.toLowerCase();

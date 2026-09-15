@@ -27,6 +27,27 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00-auto-advance', label: 'Auto-Advance (Never Stall in Auto Mode)', file: '00-auto-advance.md',
+    keyRules: [
+      'AUTO MODE: the instant a task is [x]+committed, re-read TODO.md and START the next [ ] — do NOT summarize-and-stop, ask "should I continue?", or end the run. The run ends ONLY when no [ ]/[~] remain (or a GENUINE blocker — then RECORD it, never idle: [[00j-deferred-task-resolution]]).',
+      'Three lazy stalls, all the same failure — advance instead: (a) marking [x] WITHOUT doing/verifying the work (cardinal sin: [[00b-self-verifiable-work]]); (b) one task then stopping as if the list were done; (c) narrating "next I\'ll…" then yielding. One [x] ≠ the job done — count the remaining [ ] and continue.',
+    ],
+  },
+  {
+    id: '00-critic-swarm', label: 'Critic-Swarm Gate (Refute Before [x])', file: '00-critic-swarm.md',
+    keyRules: [
+      'Before marking a task [x], spawn an INDEPENDENT critic swarm in FRESH context whose job is to REFUTE the work — bugs, regressions, edge/error cases, design flaws, missed acceptance criteria. The producer NEVER grades its own work.',
+      'Advance to done only after nothing survives verification; scale critic count to task risk. Mechanics: [[00k-internal-workflows]], [[00f-swarm-orchestration]]. Pairs with the QA gate [[00-qa-swarm]]; required before [x] by [[00-auto-advance]].',
+    ],
+  },
+  {
+    id: '00-qa-swarm', label: 'QA-Swarm Gate (Prove It By Running It)', file: '00-qa-swarm.md',
+    keyRules: [
+      'Before marking a task [x], an INDEPENDENT QA swarm must actually RUN the built change end-to-end on the real product — tests/build/lint + the real app/user flow — not review the code. QA ≠ review.',
+      '[x] is gated on QA PASSING, never on a code read; if it fails or cannot run, the task is not done — fix and re-run. Detailed mechanics: [[00i-qa-swarm]]. Pairs with [[00-critic-swarm]]; required before [x] by [[00-auto-advance]] and [[07-core-loop]].',
+    ],
+  },
+  {
     id: '00a-proactive-discovery', label: 'Proactive Discovery', file: '00a-proactive-discovery.md',
     keyRules: [
       'On startup/join: run the discovery sweep — SOUL (who am I) → list_agents (roster+presence) → living docs+codebase (what is this) → tools/skills/MCP inventory → get_tasks/TODO+check_messages (the work) → graph_map/graph_search + Memory (what is already known).',
@@ -187,7 +208,7 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     id: '07-core-loop', label: 'Core Loop & Task Classification', file: '07-core-loop.md',
     keyRules: [
       'Loop: MARK [~] → PLAN → DISPATCH → VERIFY → MARK [x] → commit → next task.',
-      'Auto mode: pull the next [ ] immediately after [x]; never mark [x] without doing the work; run ends only when TODO is empty. Full loop: skill `autodev-core-loop`.',
+      'Re-read TODO.md after every [x]; never end while [ ] or [~] remain. Auto-advance is its own pillar ([[00-auto-advance]]). Full loop: skill `autodev-core-loop`.',
     ],
   },
   {

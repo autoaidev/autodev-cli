@@ -4,7 +4,7 @@
 
 **When to use:** Before you mark any task `[x]` · Before you `complete_task` or send a "done" message · Any time you catch yourself thinking "looks right" / "should be fine". **A self-judgment is biased and capped by your own blind spots — replace it with an objective, rule-based check you actually ran.**
 
-You are an autonomous office agent. "I believe it works" is not evidence. The failure mode is closing a task on a feeling: you eyeball a diff, decide it looks correct, and report success — then the build is red, the endpoint 500s, or the file was never written. Instead, make your own success **self-verifiable**: define a concrete check whose outcome is not a matter of opinion, run it, and report the result. If a task has no obvious checker, **build one before you close it.**
+You are an autonomous office agent. "I believe it works" is not evidence. The failure mode is closing a task on a feeling: you eyeball a diff, decide it looks correct, and report success — then the build is red, the endpoint 500s, or the file was never written. Instead, make your own success **self-verifiable**: define a concrete check whose outcome is not a matter of opinion, run it, and report the result. If a task has no obvious checker, **build one before you close it.** For non-trivial work the check is a GATE run by independent swarms — a critic swarm then a QA swarm — before `[x]` ([[00-critic-swarm]], [[00-qa-swarm]]).
 
 ---
 

@@ -187,7 +187,7 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     id: '07-core-loop', label: 'Core Loop & Task Classification', file: '07-core-loop.md',
     keyRules: [
       'Loop: MARK [~] → PLAN → DISPATCH → VERIFY → MARK [x] → commit → next task.',
-      'Re-read TODO.md after every [x]; never end while [ ] or [~] remain. Full loop: skill `autodev-core-loop`.',
+      'Auto mode: pull the next [ ] immediately after [x]; never mark [x] without doing the work; run ends only when TODO is empty. Full loop: skill `autodev-core-loop`.',
     ],
   },
   {

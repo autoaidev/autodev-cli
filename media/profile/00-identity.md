@@ -14,7 +14,7 @@ thinking_budget: extensive
 
 ## ⚡ FULLY AUTONOMOUS MODE
 - NEVER ask questions — decide and act. On ambiguity: pick the simplest valid choice. On error: debug, replan, re-dispatch — don't stop.
-- **FIRST ACTION:** mark `[ ]` → `[~]` BEFORE any other work. After `[x]`: pick the next `[ ]` immediately.
+- **FIRST ACTION:** mark `[ ]` → `[~]` BEFORE any other work. After `[x]`: pick the next `[ ]` immediately — the loop auto-advances, it does not wait for you ([[07-core-loop]]).
 - NEVER end while `[ ]`/`[~]` remain.
 
 ## 0. Orchestrator Role

@@ -6,6 +6,7 @@ import { autodevDir } from './sessionState';
 import { applyProtocolSections, applyMcpSkills, applyAllSkills } from './protocolSections';
 import { assembleProfileBody } from './profileBuilder';
 import { loadSettingsForRoot } from './core/settingsLoader';
+import { ensureSoulSkeleton } from './connect';
 
 // ---------------------------------------------------------------------------
 // File path constants — all files live under <workspace>/.autodev/
@@ -395,6 +396,12 @@ export function rebuildProfile(root: string): void {
   fs.writeFileSync(profileFilePath, finalProfileBody, 'utf8');
   injectAgentProfileRef(root, sectionPaths);
   syncCopilotInstructions(root, finalProfileBody);
+  // PROGRAM.md we just wrote (and AGENTS.md/CLAUDE.md) point the agent at
+  // SOUL.md as its identity anchor. Guarantee the file exists so that pointer
+  // always resolves — even for agents launched straight from the extension
+  // task loop, which never run the office persona connect that used to be the
+  // only creator of SOUL.md. Idempotent; never overwrites an existing SOUL.md.
+  ensureSoulSkeleton(root);
 }
 
 export function buildMessage(
@@ -434,6 +441,14 @@ export function buildMessage(
   fs.writeFileSync(profileFilePath, finalProfileBody, 'utf8');
   injectAgentProfileRef(root, sectionPaths);
   syncCopilotInstructions(root, finalProfileBody);
+  // Guarantee the SOUL.md identity anchor exists BEFORE we build the reminders
+  // below (firstTurnSystemReminder / soulUpdatedReminder both point the agent
+  // at it). Without this, extension-launched agents — which never run the
+  // office persona connect that creates SOUL.md — are told to "read SOUL.md
+  // first" against a file that does not exist. Idempotent; never clobbers an
+  // existing identity/persona. Creating it here (before soulUpdatedReminder)
+  // means the .soul-seen marker records the skeleton's mtime silently on turn 1.
+  ensureSoulSkeleton(root);
   // Build the task trigger message — profile is loaded by agents via AGENTS.md → @.autodev/AGENT_PROFILE.md
   const todoPath = path.join(todoDir, 'TODO.md');
   const taskMessage = buildTaskInstruction(task, todoPath, root, meta.noCommit);

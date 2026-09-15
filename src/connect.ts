@@ -84,6 +84,37 @@ function minimalSoulHeader(): string {
 }
 
 /**
+ * Ensure a SOUL.md identity anchor exists at the workspace root.
+ *
+ * PROGRAM.md and the first-turn system reminder both instruct the agent to
+ * "read SOUL.md first", but SOUL.md was previously created ONLY as a side effect
+ * of an office persona connect (`applyPersonaToSoul`). An agent launched straight
+ * from the VS Code extension's task loop never connects, so SOUL.md never existed
+ * and its identity anchor 404'd — exactly the reported "SOUL.md is not coming".
+ *
+ * Writing the neutral skeleton here (idempotent — ONLY when SOUL.md is absent)
+ * guarantees the referenced file resolves regardless of launch path, and never
+ * clobbers a persona/identity the agent or office already wrote. Best-effort;
+ * never throws.
+ *
+ * @returns true if the skeleton was created, false if it already existed / on error.
+ */
+export function ensureSoulSkeleton(root: string): boolean {
+  try {
+    if (!root) { return false; }
+    const soulPath = path.join(root, 'SOUL.md');
+    if (fs.existsSync(soulPath)) { return false; }
+    const dir = path.dirname(soulPath);
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+    fs.writeFileSync(soulPath, `${minimalSoulHeader()}\n`, 'utf8');
+    return true;
+  } catch {
+    // A SOUL.md write failure must never break a profile rebuild / dispatch.
+    return false;
+  }
+}
+
+/**
  * Apply a resolved persona to the workspace's persistent identity file
  * (`<root>/SOUL.md`), per the project rule that identity/persona lives in
  * SOUL.md and NOT in the regenerated PROGRAM.md.

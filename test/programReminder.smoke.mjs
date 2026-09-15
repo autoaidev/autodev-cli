@@ -19,6 +19,7 @@ import path from 'node:path';
 const { buildMessage, firstTurnSystemReminder, rebuildProfile } =
   await import('../out/messageBuilder.js');
 const { writeCombinedFile } = await import('../out/core/commandHelpers.js');
+const { ensureSoulSkeleton } = await import('../out/connect.js');
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -130,6 +131,48 @@ ok('rebuildProfile: pre-existing SOUL.md is never clobbered', () => {
   // A second rebuild must still leave the identity intact.
   rebuildProfile(d);
   assert.strictEqual(fs.readFileSync(soulPath, 'utf8'), soulBody, 'SOUL.md must survive repeated rebuilds');
+});
+
+// ── R3: SOUL.md is ENSURED on dispatch — the identity anchor PROGRAM.md and the
+// first-turn reminder point at must actually exist, even for an agent launched
+// straight from the extension task loop (which never runs the office persona
+// connect that used to be the only creator of SOUL.md). Root cause of the
+// reported "SOUL.md is not coming". ──
+ok('buildMessage: first turn ensures a SOUL.md skeleton exists at the workspace root', () => {
+  const d = tmpRoot();
+  assert.ok(!fs.existsSync(path.join(d, 'SOUL.md')), 'precondition: no SOUL.md yet');
+  buildMessage(task, d, d, true);
+  const soulPath = path.join(d, 'SOUL.md');
+  assert.ok(fs.existsSync(soulPath), 'SOUL.md must be created by the dispatch');
+  const soul = fs.readFileSync(soulPath, 'utf8');
+  assert.match(soul, /# SOUL\.md/, 'SOUL.md must carry the identity-anchor header');
+  assert.match(soul, /## My Identity/, 'SOUL.md skeleton must have the identity section');
+});
+
+ok('buildMessage: even a subsequent turn (includeProfile=false) ensures SOUL.md', () => {
+  const d = tmpRoot();
+  buildMessage(task, d, d, false);
+  assert.ok(fs.existsSync(path.join(d, 'SOUL.md')), 'SOUL.md must exist regardless of profile inclusion');
+});
+
+ok('rebuildProfile: creates SOUL.md when absent', () => {
+  const d = tmpRoot();
+  assert.ok(!fs.existsSync(path.join(d, 'SOUL.md')), 'precondition: no SOUL.md yet');
+  rebuildProfile(d);
+  assert.ok(fs.existsSync(path.join(d, 'SOUL.md')), 'rebuildProfile must ensure the identity anchor');
+});
+
+ok('ensureSoulSkeleton: idempotent — never clobbers an existing SOUL.md', () => {
+  const d = tmpRoot();
+  const soulPath = path.join(d, 'SOUL.md');
+  const userSoul = '# SOUL.md\n\n## My Identity\nName: Nova\n\n## Communication History\n- keep me\n';
+  fs.writeFileSync(soulPath, userSoul);
+  const created = ensureSoulSkeleton(d);
+  assert.strictEqual(created, false, 'must report no-op when SOUL.md already exists');
+  assert.strictEqual(fs.readFileSync(soulPath, 'utf8'), userSoul, 'existing SOUL.md must be byte-for-byte preserved');
+  // And a full buildMessage must likewise preserve the hand-written identity.
+  buildMessage(task, d, d, true);
+  assert.strictEqual(fs.readFileSync(soulPath, 'utf8'), userSoul, 'buildMessage must not clobber a pre-existing SOUL.md');
 });
 
 console.log(`\nprogramReminder smoke: ${pass} passed`);

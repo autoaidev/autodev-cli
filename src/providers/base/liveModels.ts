@@ -48,6 +48,69 @@ export interface LiveModelOptions {
   fetchImpl?: FetchLike;
 }
 
+// ── chat/completion filter ───────────────────────────────────────────────────
+// The picker should only surface TEXT chat/completion models. A provider's
+// `/v1/models` can also list media-generation (image/video), audio (tts/whisper)
+// and embedding models — those aren't usable as an agent's chat model.
+//
+// Name heuristic: ids matching these are excluded. Vision-INPUT chat models
+// (e.g. grok-vision) do NOT match any token here, so they are kept.
+const NON_CHAT_ID_RE = /(imagine|image|video|whisper|embedding|embed)/i;
+// `tts` only as a whole token (so it can't swallow an unrelated substring).
+const TTS_ID_RE = /(^|[-_/])tts([-_/]|$)/i;
+
+/**
+ * Name-only heuristic: is this model id a TEXT chat/completion model?
+ * Used for entries (and static lists) that carry no modality field.
+ */
+export function isChatModelId(id: string): boolean {
+  const s = String(id ?? '').trim().toLowerCase();
+  if (!s) return false;
+  if (NON_CHAT_ID_RE.test(s)) return false;
+  if (TTS_ID_RE.test(s)) return false;
+  return true;
+}
+
+/**
+ * Prefer the API's own modality/type field when a `/v1/models` entry carries one.
+ * Returns true when the entry is definitively NON-chat (image/video/audio/embedding),
+ * false when definitively chat/text, and undefined when the entry says nothing —
+ * in which case the caller falls back to the name heuristic.
+ */
+function nonChatByModality(o: Record<string, unknown>): boolean | undefined {
+  const outs = o['output_modalities'] ?? o['output_modality'] ?? o['modalities'];
+  const arr = Array.isArray(outs) ? outs : (typeof outs === 'string' ? [outs] : null);
+  if (arr && arr.length) {
+    const mods = arr.map((x) => String(x).toLowerCase());
+    const hasText = mods.includes('text');
+    const hasMedia = mods.some((m) => ['image', 'video', 'audio', 'embedding'].includes(m));
+    if (hasText) return false;               // emits text → it's a chat/completion model
+    if (hasMedia) return true;               // emits only media → not a chat model
+  }
+  const type = o['type'] ?? o['modality'];
+  if (typeof type === 'string') {
+    const t = type.toLowerCase();
+    if (/(image|video|audio|embed|tts|whisper|speech)/.test(t)) return true;
+    if (/(chat|text|completion|language)/.test(t)) return false;
+  }
+  return undefined;
+}
+
+/** Is this live `/v1/models` entry a chat model? Modality field wins; else name heuristic. */
+export function isChatEntry(id: string, o?: Record<string, unknown>): boolean {
+  if (o) {
+    const byModality = nonChatByModality(o);
+    if (byModality === true) return false;
+    if (byModality === false) return true;
+  }
+  return isChatModelId(id);
+}
+
+/** Drop non-chat (media/audio/embedding) entries from a catalog list. */
+export function filterChatModels(models: ModelInfo[]): ModelInfo[] {
+  return models.filter((m) => isChatModelId(m.id));
+}
+
 /** "grok-4.6" → "Grok 4.6"; "grok-4.20-0309-non-reasoning" → "Grok 4.20 0309 Non Reasoning". */
 export function deriveModelLabel(id: string): string {
   const cleaned = String(id ?? '').trim();
@@ -77,14 +140,18 @@ export function mapLiveEntries(
   for (const raw of data) {
     let id = '';
     let ctxRaw = 0;
+    let obj: Record<string, unknown> | undefined;
     if (raw && typeof raw === 'object') {
-      const o = raw as Record<string, unknown>;
-      id = String(o['id'] ?? '').trim();
-      ctxRaw = Number(o['context_length'] ?? o['context_window'] ?? o['contextLimit'] ?? 0);
+      obj = raw as Record<string, unknown>;
+      id = String(obj['id'] ?? '').trim();
+      ctxRaw = Number(obj['context_length'] ?? obj['context_window'] ?? obj['contextLimit'] ?? 0);
     } else if (typeof raw === 'string') {
       id = raw.trim();
     }
     if (!id) continue;
+    // Keep only TEXT chat/completion models — drop image/video/audio/embedding.
+    // The API's own modality field wins when present; otherwise the name heuristic.
+    if (!isChatEntry(id, obj)) continue;
     const key = id.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -134,7 +201,10 @@ async function doFetch(opts: LiveModelOptions, token: string): Promise<ModelInfo
  * Only SUCCESSFUL live results are cached; a fallback never poisons the cache.
  */
 export async function fetchLiveModels(opts: LiveModelOptions): Promise<ModelInfo[]> {
-  if (!opts.token || !String(opts.token).trim()) return opts.staticModels.slice();
+  // The static fallback is filtered the same way as the live list so the picker
+  // never surfaces a media/embedding model regardless of which path is taken.
+  const staticChat = filterChatModels(opts.staticModels);
+  if (!opts.token || !String(opts.token).trim()) return staticChat;
 
   const now = opts.now ?? (() => Date.now());
   const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
@@ -146,7 +216,7 @@ export async function fetchLiveModels(opts: LiveModelOptions): Promise<ModelInfo
     CACHE.set(opts.family, { ts: now(), models: live });
     return live.slice();
   }
-  return opts.staticModels.slice();
+  return staticChat;
 }
 
 /** Test-only: reset the per-process cache between cases. */

@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ModelInfo } from './types';
+import { filterChatModels } from './liveModels';
 
 /** Exact raw-id → friendly-name overrides (fast path for the common Claude ids). */
 const FRIENDLY_OVERRIDES: Record<string, string> = {
@@ -84,7 +85,7 @@ export abstract class ProviderModels {
    * Must always resolve to a non-empty list — implementations fall back to
    * `list()` on any failure so the picker never goes empty.
    */
-  async listLive(): Promise<ModelInfo[]> { return this.list(); }
+  async listLive(): Promise<ModelInfo[]> { return filterChatModels(this.list()); }
 
   resolve(id?: string): ModelInfo | undefined {
     if (!id) { return undefined; }

@@ -20,6 +20,8 @@ import {
   fetchLiveModels,
   mapLiveEntries,
   deriveModelLabel,
+  isChatModelId,
+  filterChatModels,
   __clearLiveModelCache,
 } from '../out/providers/base/liveModels.js';
 import { GrokProviderModels } from '../out/providers/grok/ProviderModels.js';
@@ -90,6 +92,63 @@ ok('deriveModelLabel title-cases hyphen/underscore/slash parts', () => {
   assert.equal(deriveModelLabel('grok-4.6'), 'Grok 4.6');
   assert.equal(deriveModelLabel('grok-code'), 'Grok Code');
   assert.equal(deriveModelLabel('sxs-kimi-k2-5'), 'Sxs Kimi K2 5');
+});
+
+// ── (a2) chat-only filter: media / audio / embedding models are excluded ─────
+ok('live fetch DROPS grok-imagine image/video (+ audio/embed) media models', async () => {
+  // Mirrors the REAL xAI /v1/models payload: 10 chat + 5 grok-imagine media.
+  const models = await fetchLiveModels({
+    family: 'grok', staticModels: STATIC, url: 'x', token: 'tok', defaultContextLimit: 256_000,
+    fetchImpl: mockFetch([
+      { id: 'grok-4.6', context_length: 500_000 },
+      { id: 'grok-4.20-multi-agent-0309', context_length: 1_000_000 },
+      { id: 'grok-build-0.1', context_length: 256_000 },
+      { id: 'grok-imagine-image', context_length: 16_000 },
+      { id: 'grok-imagine-image-2.0', context_length: 64_000 },
+      { id: 'grok-imagine-image-quality', context_length: 16_000 },
+      { id: 'grok-imagine-video' },
+      { id: 'grok-imagine-video-1.5' },
+      { id: 'grok-tts-1' },
+      { id: 'whisper-large' },
+      { id: 'text-embedding-3' },
+    ]),
+  });
+  const ids = models.map((m) => m.id);
+  assert.deepEqual(ids, ['grok-4.6', 'grok-4.20-multi-agent-0309', 'grok-build-0.1'],
+    'only chat/completion models survive; all media/audio/embedding ids dropped');
+  for (const bad of ['grok-imagine-image', 'grok-imagine-video', 'grok-tts-1', 'whisper-large', 'text-embedding-3']) {
+    assert.ok(!ids.includes(bad), `${bad} must be excluded`);
+  }
+});
+
+ok('isChatModelId keeps chat/vision ids, rejects media/audio/embedding', () => {
+  for (const keep of ['grok-4.6', 'grok-code', 'grok-build-0.1', 'grok-4.20-0309-reasoning',
+                      'grok-vision', 'sxs-kimi-k2-5', 'claude-opus-4-8', 'gpt-4o']) {
+    assert.equal(isChatModelId(keep), true, `${keep} is a chat model`);
+  }
+  for (const drop of ['grok-imagine-image', 'grok-imagine-video-1.5', 'grok-imagine-image-quality',
+                      'grok-tts-1', 'tts-1', 'whisper-large', 'text-embedding-3', 'embed-english']) {
+    assert.equal(isChatModelId(drop), false, `${drop} is NOT a chat model`);
+  }
+});
+
+ok('modality field WINS over the name heuristic when present', () => {
+  // An id that looks like media but the API marks text-output → kept.
+  const kept = mapLiveEntries(
+    [{ id: 'weird-image-namer', output_modalities: ['text'] }], STATIC, 256_000);
+  assert.deepEqual(kept.map((m) => m.id), ['weird-image-namer'], 'text output_modalities keeps it');
+  // An innocuously named id the API marks image-output → dropped.
+  const dropped = mapLiveEntries(
+    [{ id: 'grok-4.6', output_modalities: ['image'] }], STATIC, 256_000);
+  assert.deepEqual(dropped, [], 'image-only output_modalities drops it despite a chat-looking id');
+});
+
+ok('filterChatModels drops media from a plain catalog list', () => {
+  const out = filterChatModels([
+    { id: 'grok-4.6', label: 'Grok 4.6', contextLimit: 500_000 },
+    { id: 'grok-imagine-image', label: 'x', contextLimit: 16_000 },
+  ]);
+  assert.deepEqual(out.map((m) => m.id), ['grok-4.6']);
 });
 
 // ── (b) fallback to static on every failure mode ─────────────────────────────

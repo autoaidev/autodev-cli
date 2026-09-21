@@ -229,6 +229,55 @@ export function removeProjectUserMcp(root: string, name: string): boolean {
   return true;
 }
 
+/**
+ * Guarantee that every server in `effective` is PRESENT and ENABLED in .mcp.json.
+ *
+ * Why: grok does NOT read the project `.grok/config.toml` autodev fans MCP servers
+ * into — its config sources are the GLOBAL `~/.grok/config.toml`, `~/.claude.json`,
+ * and the project `.mcp.json`. So any server that lands in `.grok/config.toml` but
+ * is missing / disabled in `.mcp.json` is invisible to grok from the workspace.
+ * `syncProjectMcpServers` already writes builtins (replaceProjectBuiltinMcp) and
+ * user entries into `.mcp.json`, so parity normally holds — this is the explicit,
+ * idempotent belt-and-braces reconcile that makes it a hard invariant and can never
+ * regress: after it runs, `.mcp.json` ⊇ the grok/effective set, all enabled.
+ *
+ * MERGE, never clobber: an existing entry keeps its command/url/headers/env/_meta
+ * (so A2A bearer tokens and credentials survive) — we only ADD a missing server or
+ * FLIP a present-but-disabled one back to enabled (it is in the enabled/effective
+ * set). `builtinNames` decides the `_meta.kind` tag for a freshly-added entry so the
+ * sidebar can still tell builtin from user.
+ *
+ * @returns the list of server names that were added or re-enabled (empty = already in parity).
+ */
+export function ensureProjectMcpServersPresent(
+  root: string,
+  effective: McpJsonEntries,
+  builtinNames: Set<string>,
+): string[] {
+  const all = _readAll(root);
+  const touched: string[] = [];
+  for (const [name, raw] of Object.entries(effective)) {
+    if (!raw || (typeof raw.command !== 'string' && !isRemoteMcp(raw))) { continue; }
+    const existing = all[name];
+    if (existing) {
+      // Present already — only fix a stale enabled:false (it IS in the enabled set).
+      if (existing.enabled === false) {
+        const { enabled: _drop, ...rest } = existing;
+        all[name] = rest;
+        touched.push(name);
+      }
+      continue;
+    }
+    // Absent — add it, tagged builtin/user, preserving its shape + any credentials.
+    const kind: 'user' | 'builtin' = builtinNames.has(name) ? 'builtin' : 'user';
+    const meta = { ...(raw._meta || {}), managedBy: 'autoaidev', name, kind };
+    all[name] = { ..._normalizeMcp(raw), alwaysLoad: true, _meta: meta };
+    touched.push(name);
+  }
+  if (touched.length > 0) { _writeAll(root, all); }
+  return touched;
+}
+
 /** Replace every built-in entry with the supplied set, leaving user entries alone. */
 export function replaceProjectBuiltinMcp(root: string, builtins: McpJsonEntries): void {
   const all = _readAll(root);

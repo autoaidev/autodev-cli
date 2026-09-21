@@ -35,7 +35,18 @@ function _mcpDir(): string {
 }
 
 function _skillsMediaDir(): string {
-  return path.join(__dirname, '..', 'media', 'skills');
+  // Resolve the skills media across the SAME contexts as profileMediaDir()
+  // (profileBuilder.ts) — otherwise a bundled VS Code extension / Windows layout
+  // where the media lives at a non-default relative path silently resolves to a
+  // missing dir (skills never deploy) or, worse, feeds a downstream throw. Mirror
+  // the 3-candidate fallback chain so media/skills resolves everywhere.
+  const candidates = [
+    path.join(__dirname, '..', 'media', 'skills'),
+    path.join(__dirname, '..', 'node_modules', 'autodev-cli', 'media', 'skills'),
+    path.join(__dirname, 'media', 'skills'),
+  ];
+  for (const c of candidates) { if (fs.existsSync(c)) { return c; } }
+  return candidates[0];
 }
 
 /** Strip every existing `<!-- AUTODEV:mcp-protocol:*:begin -->...end -->` block. */
@@ -103,11 +114,13 @@ export function applyAllSkills(root: string): void {
     const destDir  = path.join(root, '.claude', 'skills', name);
     const destSkill = path.join(destDir, 'SKILL.md');
 
-    // Always deploy the skill file
-    if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true });
-    }
+    // Always deploy the skill file. mkdir is INSIDE the try — a corrupt/unexpected
+    // layout (e.g. a file where a dir is expected on Windows) must never throw out
+    // of skill deployment and block the profile rebuild.
     try {
+      if (!fs.existsSync(destDir)) {
+        fs.mkdirSync(destDir, { recursive: true });
+      }
       const src = fs.readFileSync(srcSkill, 'utf8');
       fs.writeFileSync(destSkill, src, 'utf8');
     } catch { /* ignore write errors */ }
@@ -148,11 +161,12 @@ export function applyMcpSkills(root: string, settings: SettingsLike | undefined)
     const destSkill = path.join(destDir, 'SKILL.md');
 
     if (_isEnabled(settings, name)) {
-      // Deploy the skill file
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true });
-      }
+      // Deploy the skill file. mkdir is INSIDE the try so an unexpected layout can
+      // never throw out of here and block the profile rebuild.
       try {
+        if (!fs.existsSync(destDir)) {
+          fs.mkdirSync(destDir, { recursive: true });
+        }
         const src = fs.readFileSync(srcSkill, 'utf8');
         fs.writeFileSync(destSkill, src, 'utf8');
       } catch { /* ignore write errors */ }

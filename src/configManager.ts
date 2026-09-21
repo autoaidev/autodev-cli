@@ -5,7 +5,7 @@ import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpMana
 import { loadSettingsForRoot } from './core/settingsLoader';
 import { resolveMcpStartupTimeoutSec } from './core/mcpStartupTimeout';
 import { writeFileSecure } from './core/secureFile';
-import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
+import { loadProjectUserMcp, loadProjectAllMcp, saveProjectUserMcp, replaceProjectBuiltinMcp, ensureProjectMcpServersPresent, isRemoteMcp, type McpJsonEntry, type McpJsonEntries } from './core/projectMcp';
 import { migrateCreativeMcpEntries } from './core/mcpCatalogMigrate';
 import { installGimpPluginIfDetected } from './core/gimpPluginInstall';
 import { serverSpecFor, gimpClientArgOf, isConcreteGimpClientArg } from './core/mcpCatalog';
@@ -580,6 +580,21 @@ export class ConfigManager {
         cfg['mcpServers'] = srv;
       }, log, 'Copilot MCP (pruned stale global entries)');
     }
+
+    // Grok reads the project `.mcp.json` — NOT the `.grok/config.toml` we fan the
+    // MCP servers into (grok's config sources are the GLOBAL ~/.grok/config.toml,
+    // ~/.claude.json, and project .mcp.json). Guarantee that every server we're
+    // about to write to `.grok/config.toml` (the effective set) is also PRESENT +
+    // ENABLED in `.mcp.json`, so grok finds them from the workspace. Builtins +
+    // user entries already land there above; this is the explicit, idempotent
+    // parity reconcile (merge-only — never clobbers a command/url/header/token).
+    const builtinNamesForMcp = new Set<string>(Object.keys(builtinsForJson));
+    try {
+      const added = ensureProjectMcpServersPresent(root, effective, builtinNamesForMcp);
+      if (added.length > 0) {
+        log?.(`ConfigManager: reconciled .mcp.json parity for grok — added/enabled ${added.join(', ')}`);
+      }
+    } catch (e) { log?.(`ConfigManager: .mcp.json parity reconcile failed: ${e}`); }
 
     // Grok project config: ./.grok/config.toml — [mcp_servers.<name>] blocks.
     // Remote servers carry a nested [mcp_servers.<name>.headers] table for the

@@ -7,6 +7,7 @@ import { applyProtocolSections, applyMcpSkills, applyAllSkills } from './protoco
 import { assembleProfileBody } from './profileBuilder';
 import { loadSettingsForRoot } from './core/settingsLoader';
 import { ensureSoulSkeleton } from './connect';
+import { removeCozempicHooks } from './cozempicHooks';
 
 // ---------------------------------------------------------------------------
 // File path constants — all files live under <workspace>/.autodev/
@@ -390,23 +391,70 @@ export function rebuildProfile(root: string): void {
   const customRefs = settings?.customProfileRefs ?? [];
   const { body: profileBody, sectionPaths } = assembleProfileBody(enabledSections, root, customRefs);
   const finalProfileBody = applyProtocolSections(profileBody, settings);
+
+  // ── CRITICAL WRITES FIRST ────────────────────────────────────────────────
+  // Order matters: PROGRAM.md + SOUL.md are load-bearing (the dispatcher reads
+  // PROGRAM.md at every turn; AGENTS.md/CLAUDE.md point at SOUL.md). They MUST be
+  // written BEFORE the optional skill/MCP deployment, so that a skill/MCP failure
+  // (a bundled-extension / Windows media-layout throw, a corrupt .claude tree)
+  // can NEVER prevent them. Previously skills ran first and any throw there left
+  // PROGRAM.md missing while SOUL.md still appeared via the loop's buildMessage
+  // path — exactly the reported bug.
+  //
+  // Guarantee a NON-EMPTY PROGRAM.md even in the pathological case where
+  // assembleProfileBody found no media (empty body): write at least the
+  // SOUL/PROGRAM pointer header so the file is never blank.
+  const profileFilePath = path.join(root, AGENT_PROFILE_FILE);
+  const bodyToWrite = finalProfileBody && finalProfileBody.trim().length > 0
+    ? finalProfileBody
+    : minimalProgramHeader();
+  fs.writeFileSync(profileFilePath, bodyToWrite, 'utf8');
+  // SOUL.md identity anchor — idempotent; never overwrites an existing SOUL.md.
+  // Guaranteed to exist even for agents launched straight from the extension task
+  // loop (which never run the office persona connect that used to create it).
+  ensureSoulSkeleton(root);
+  injectAgentProfileRef(root, sectionPaths);
+  syncCopilotInstructions(root, bodyToWrite);
+
+  // ── OPTIONAL DEPLOYMENT LAST (each isolated) ─────────────────────────────
   // Skill deployment lives on the PROFILE BUILD, not the per-message path: deploy
   // ALL bundled skills (incl. the master `.claude/skills/autodev/`) and the
-  // per-MCP skill files here, so a running Claude agent picks them up. buildMessage
-  // no longer copies skills every turn — this is the single place they are written.
-  applyAllSkills(root);
-  applyMcpSkills(root, settings);
+  // per-MCP skill files here. Wrapped so a failure never rolls back the writes
+  // above. (Both functions are also internally guarded; this is belt-and-braces.)
+  try { applyAllSkills(root); } catch { /* skills are best-effort; PROGRAM.md/SOUL.md already written */ }
+  try { applyMcpSkills(root, settings); } catch { /* per-MCP skills best-effort */ }
 
-  const profileFilePath = path.join(root, AGENT_PROFILE_FILE);
-  fs.writeFileSync(profileFilePath, finalProfileBody, 'utf8');
-  injectAgentProfileRef(root, sectionPaths);
-  syncCopilotInstructions(root, finalProfileBody);
-  // PROGRAM.md we just wrote (and AGENTS.md/CLAUDE.md) point the agent at
-  // SOUL.md as its identity anchor. Guarantee the file exists so that pointer
-  // always resolves — even for agents launched straight from the extension
-  // task loop, which never run the office persona connect that used to be the
-  // only creator of SOUL.md. Idempotent; never overwrites an existing SOUL.md.
-  ensureSoulSkeleton(root);
+  // Cozempic reconcile: making cozempic opt-in only stopped NEW installs; a
+  // workspace previously wired keeps its hooks until we remove them. When the box
+  // is unchecked (cozempicAutoInit !== true) strip the already-installed cozempic
+  // hooks so unchecking + Save & Rebuild actually cleans them. When enabled, the
+  // task-loop install gate (_runCozempicInit) owns the install side — do nothing here.
+  try {
+    if (settings?.cozempicAutoInit !== true) { removeCozempicHooks(root); }
+  } catch { /* best-effort */ }
+}
+
+/** Minimal non-empty PROGRAM.md fallback — used only if the assembled body is
+ *  empty (no media found), so PROGRAM.md is NEVER written blank. */
+function minimalProgramHeader(): string {
+  return [
+    '# AutoDev — PROGRAM.md',
+    '',
+    '> Master index. AGENTS.md / CLAUDE.md reference only this file.',
+    '> (Profile media was unavailable at build time — this is the minimal',
+    '> pointer header; rebuild once the profile media resolves for full content.)',
+    '',
+    '---',
+    '',
+    '## Agent Identity Anchor',
+    '',
+    'file://./SOUL.md',
+    '<think>',
+    'IMPORTANT: Read SOUL.md first — it is your persistent identity anchor',
+    '(name, assigned persona, communication history). It persists across rebuilds.',
+    '</think>',
+    '',
+  ].join('\n');
 }
 
 export function buildMessage(

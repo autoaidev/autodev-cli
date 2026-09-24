@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { McpServerManager, DEFAULT_MCP_SERVERS, McpServerEntry } from './mcpManager';
+import { McpServerManager, DEFAULT_MCP_SERVERS, CORE_BUILTIN_NAMES, McpServerEntry } from './mcpManager';
 import { loadSettingsForRoot } from './core/settingsLoader';
 import { resolveMcpStartupTimeoutSec } from './core/mcpStartupTimeout';
 import { writeFileSecure } from './core/secureFile';
@@ -328,7 +328,12 @@ export class ConfigManager {
 
     const builtinByName = new Map<string, McpServerEntry>();
     for (const s of baseServers) {
-      if (disabledBuiltins.includes(s.name)) continue;
+      // Core built-ins (memory, playwright, sequential-thinking, computer-use-mcp)
+      // are NON-DISABLEABLE — they are ALWAYS seeded + enabled regardless of
+      // `disabledBuiltinMcp`. `disabledBuiltinMcp` may still suppress non-core
+      // built-ins (e.g. pixel-office, handled separately below). Since `baseServers`
+      // is exactly DEFAULT_MCP_SERVERS = the core set, this guard never skips them.
+      if (disabledBuiltins.includes(s.name) && !CORE_BUILTIN_NAMES.has(s.name)) continue;
       builtinByName.set(s.name, s);
     }
     // User entries override built-ins (so a user can re-tune a default).

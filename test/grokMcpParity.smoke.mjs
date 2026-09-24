@@ -88,4 +88,25 @@ ok('ensureProjectMcpServersPresent: adds a missing server, then is idempotent', 
   assert.deepStrictEqual(ensureProjectMcpServersPresent(d, eff, new Set(['memory', 'pixel-office'])), [], 'idempotent');
 });
 
+// ── FIX 2: the 4 core built-ins (memory/playwright/sequential-thinking/
+//    computer-use-mcp) are NON-DISABLEABLE — even with them listed in
+//    disabledBuiltinMcp, syncProjectMcpServers must still write them ENABLED as
+//    builtin entries into .mcp.json. (pixel-office remains suppressible.) ──
+ok('syncProjectMcpServers: disabledBuiltinMcp cannot drop the core built-ins', () => {
+  const d = tmpRoot();
+  fs.mkdirSync(path.join(d, '.autodev'), { recursive: true });
+  fs.writeFileSync(
+    path.join(d, '.autodev', 'settings.json'),
+    JSON.stringify({ disabledBuiltinMcp: ['memory', 'sequential-thinking'] }, null, 2),
+  );
+  ConfigManager.syncProjectMcpServers(d, () => {});
+
+  const mcp = JSON.parse(fs.readFileSync(path.join(d, '.mcp.json'), 'utf8')).mcpServers || {};
+  for (const name of ['memory', 'sequential-thinking', 'playwright', 'computer-use-mcp']) {
+    assert.ok(mcp[name], `${name} must be present in .mcp.json despite disabledBuiltinMcp`);
+    assert.notStrictEqual(mcp[name].enabled, false, `${name} must be ENABLED`);
+    assert.strictEqual(mcp[name]._meta?.kind, 'builtin', `${name} must be tagged builtin`);
+  }
+});
+
 console.log(`\ngrokMcpParity smoke: ${pass} passed`);

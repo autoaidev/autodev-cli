@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 // ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ interface HookLeaf { type?: string; command?: string; [k: string]: unknown; }
 interface HookGroup { matcher?: string; hooks?: HookLeaf[]; [k: string]: unknown; }
 
 /**
- * Remove ONLY cozempic-tagged hook entries from `<root>/.claude/settings.local.json`.
+ * Remove ONLY cozempic-tagged hook entries from a SINGLE settings file.
  *
  * - Idempotent and safe when the file, the `hooks` map, or any cozempic hooks are
  *   absent (returns false, writes nothing).
@@ -49,14 +50,14 @@ interface HookGroup { matcher?: string; hooks?: HookLeaf[]; [k: string]: unknown
  * - Prunes now-empty matcher groups and now-empty event arrays so no orphan
  *   `{ "matcher": "", "hooks": [] }` scaffolding lingers; drops the `hooks` key
  *   entirely if it ends up empty.
- * - Best-effort: never throws (a settings write failure must not break a rebuild).
+ * - Best-effort: never throws (a settings write failure must not break a rebuild);
+ *   malformed JSON → skip the file untouched.
  *
  * @returns true if the file was changed, false otherwise.
  */
-export function removeCozempicHooks(root: string): boolean {
+export function removeCozempicHooksFromFile(settingsPath: string): boolean {
   try {
-    if (!root) { return false; }
-    const settingsPath = path.join(root, '.claude', 'settings.local.json');
+    if (!settingsPath) { return false; }
     if (!fs.existsSync(settingsPath)) { return false; }
 
     const raw = fs.readFileSync(settingsPath, 'utf8');
@@ -113,4 +114,34 @@ export function removeCozempicHooks(root: string): boolean {
     // A settings write failure must never break a profile rebuild / dispatch.
     return false;
   }
+}
+
+/**
+ * Reconcile cozempic hooks out of EVERY settings file that could carry them.
+ *
+ * A user unchecking cozempic previously left the GLOBAL user settings
+ * (`~/.claude/settings.json`) untouched, so a global cozempic SessionStart hook
+ * kept firing (grok labels it "global/settings" and fails on Windows with
+ * `exit code 1`). We now strip cozempic hooks from all three locations:
+ *   1. `<root>/.claude/settings.local.json`  — project-local (install target)
+ *   2. `<root>/.claude/settings.json`         — project shared settings
+ *   3. `~/.claude/settings.json`              — GLOBAL user settings
+ *
+ * Each file is cleaned best-effort / no-throw / idempotently; non-existent or
+ * malformed files are skipped. Returns true if ANY file was changed.
+ */
+export function removeCozempicHooks(root: string): boolean {
+  const targets: string[] = [];
+  if (root) {
+    targets.push(path.join(root, '.claude', 'settings.local.json'));
+    targets.push(path.join(root, '.claude', 'settings.json'));
+  }
+  try { targets.push(path.join(os.homedir(), '.claude', 'settings.json')); } catch { /* homedir unavailable */ }
+
+  let changed = false;
+  for (const p of targets) {
+    // De-dupe: a root under HOME could collide with the global path.
+    if (removeCozempicHooksFromFile(p)) { changed = true; }
+  }
+  return changed;
 }

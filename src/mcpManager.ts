@@ -51,6 +51,18 @@ export const DEFAULT_MCP_SERVERS: McpServerEntry[] = [
   },
 ];
 
+/**
+ * Names of the NON-DISABLEABLE core built-in MCP servers — exactly the entries in
+ * `DEFAULT_MCP_SERVERS`. Per user directive, these 4 (memory, playwright,
+ * sequential-thinking, computer-use-mcp) are ALWAYS seeded + enabled in every
+ * workspace and can never be suppressed via `disabledBuiltinMcp`. NOTE:
+ * `pixel-office` is deliberately NOT in this set — it stays origin-gated and
+ * opt-out-able.
+ */
+export const CORE_BUILTIN_NAMES: ReadonlySet<string> = new Set(
+  DEFAULT_MCP_SERVERS.map((s) => s.name),
+);
+
 /** Canonical representation of a single MCP server. */
 export interface McpServerEntry {
   /** Unique server name (used as the key in every provider config). */

@@ -7,7 +7,7 @@ import {
   isRemoteMcp, type McpJsonEntry,
 } from '../core/projectMcp';
 import { ConfigManager } from '../configManager';
-import { DEFAULT_MCP_SERVERS } from '../mcpManager';
+import { DEFAULT_MCP_SERVERS, CORE_BUILTIN_NAMES } from '../mcpManager';
 import { detectApp, detectBinOnPath, type BinDetectDeps, type DetectAppResult } from '../core/binDetect';
 import {
   getCatalog, serverSpecFor, catalogEntry, GIMP_MCP_PIN,
@@ -538,6 +538,12 @@ export function mcpCommand(program: Command): void {
 
 /** Flip enabled state for a user entry, or toggle disabledBuiltinMcp for a built-in. */
 function setEnabled(root: string, name: string, enabled: boolean): void {
+  // The 4 core built-ins are non-disableable — refuse rather than write a
+  // disabledBuiltinMcp entry the sync would ignore anyway.
+  if (!enabled && CORE_BUILTIN_NAMES.has(name)) {
+    log.error(`"${name}" is a built-in server and cannot be disabled.`);
+    process.exit(1);
+  }
   if (isBuiltinName(root, name)) {
     const settings = loadSettingsForRoot(root);
     const disabled = new Set(settings.disabledBuiltinMcp ?? []);

@@ -24,6 +24,7 @@ import { extractClaudeUsage, type ClaudeUsagePayload } from '../core/claudeUsage
 import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
 import { fmtNode, renderNeighbors, renderMap, renderSearch, renderToc } from '../graphRender';
+import { createOperateStatusController, classifyHook } from '../core/operateStatus';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -558,6 +559,13 @@ export function mcpOperateCommand(program: Command): void {
       // also drives the work; no second connection, no polling loop of our own.
       let triggerWork: () => void = () => { /* set by startAutonomy */ };
 
+      // Best-effort "flip the office badge to idle" on any bridge teardown. Set by
+      // startHookForwarding (which owns the status state-machine); a no-op until
+      // then and when --no-socket disabled hook forwarding (no status was ever
+      // reported). Called from every shutdown path so an ended/dormant session
+      // never lingers as "working" in the office.
+      let reportIdleOnTeardown: () => void = () => { /* set by startHookForwarding */ };
+
       // ── VNC / RDP remote-desktop session managers ────────────────────────────
       // Reuse the exact same session machinery the autodev loop uses. They reply
       // to the office over the presence socket. Gated by --vnc/--rdp (or the
@@ -865,26 +873,22 @@ export function mcpOperateCommand(program: Command): void {
         const sessionNameForHooks = (settings.sessionName && settings.sessionName.trim()) || path.basename(cwd);
 
         // Debounced status: flip to 'working' on the first tool activity and back
-        // to 'idle' after this long with none. Only real transitions are sent (the
+        // to 'idle' after this long with none — OR immediately on a turn-END hook
+        // (Stop/session_end/StopFailure/…). Only real transitions are sent (the
         // office no-ops an unchanged status), so an active session posts one
-        // "working" per burst rather than a heartbeat spam.
-        const IDLE_AFTER_MS = 120_000;
-        let reportedStatus: 'working' | 'idle' | null = null;
-        let idleTimer: NodeJS.Timeout | null = null;
-        const reportStatus = (status: 'working' | 'idle'): void => {
-          if (reportedStatus === status) { return; }
-          reportedStatus = status;
+        // "working" per burst rather than a heartbeat spam. The state-machine
+        // lives in ../core/operateStatus (pure + unit-tested); this only injects
+        // the side effect (post set_status to the office). IDLE_AFTER_MS = 120s
+        // is preserved as the controller default.
+        const statusCtl = createOperateStatusController((status) => {
           proxy(endpoint, key, { jsonrpc: '2.0', id: `mcpop-status-${status}-${Date.now()}`, method: 'tools/call', params: { name: 'set_status', arguments: { status } } })
             .catch(() => { /* best-effort — presence still works without it */ });
-        };
-        const markWorking = (): void => {
-          reportStatus('working');
-          if (idleTimer) { clearTimeout(idleTimer); }
-          idleTimer = setTimeout(() => reportStatus('idle'), IDLE_AFTER_MS);
-          idleTimer.unref?.();
-        };
-        // Hook names that mean the session is actively doing work.
-        const WORKING_HOOKS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Notification']);
+        });
+        const markWorking = statusCtl.markWorking;
+        // Publish the teardown-idle hook to the outer scope so every shutdown path
+        // (stdin close/process exit, superseded/dormant, SIGTERM/SIGINT) can flip
+        // the badge to idle instead of leaving it stuck 'working' for 120s+.
+        reportIdleOnTeardown = statusCtl.reportIdleOnTeardown;
 
         // ── Assistant NARRATION from the session transcript ──────────────────
         // The office chat renders the agent's prose ("Let me update the backlog…")
@@ -1005,6 +1009,7 @@ export function mcpOperateCommand(program: Command): void {
             const now = Date.now();
             for (const [h, ts] of seen) { if (now - ts > DEDUPE_MS) { seen.delete(h); } }
             let sawWork = false;
+            let sawEnd = false;
             for (const line of buf.toString('utf8').split('\n')) {
               const t = line.trim();
               if (!t) { continue; }
@@ -1033,11 +1038,21 @@ export function mcpOperateCommand(program: Command): void {
                 // Redact secrets from the whole hook object (tool_input.command,
                 // tool_response, file contents, …) before it leaves the machine.
                 socket.sendFrame({ type: 'hook_event', data: redactDeep(ev) });
+                // Status side (the frame above is ALWAYS forwarded, incl. a Stop):
+                // a WORKING_HOOK keeps us 'working'; a turn-END hook (Stop/
+                // session_end/StopFailure/stop_failure, raw or normalized) ends the
+                // turn → flip to idle now, not after the 120s inactivity timer.
                 const name = (ev['hook_event_name'] as string) || (ev['hook'] as string) || (ev['event'] as string) || '';
-                if (WORKING_HOOKS.has(name)) { sawWork = true; }
+                const kind = classifyHook(name);
+                if (kind === 'working') { sawWork = true; }
+                else if (kind === 'end') { sawEnd = true; }
               } catch { /* skip malformed lines */ }
             }
             if (sawWork) { markWorking(); }
+            // A turn-END wins over working seen in the SAME batch: a burst that both
+            // started and finished a turn settles on the terminal (idle) state, and
+            // clears any idle timer markWorking just armed.
+            if (sawEnd) { statusCtl.markTurnEnd(); }
           } catch { /* ignore transient read errors */ }
           // Forward any new assistant prose from the session transcript.
           tailTranscript();
@@ -1072,6 +1087,10 @@ export function mcpOperateCommand(program: Command): void {
         try { process.kill(owner, 0); ownerAlive = true; } catch { /* dead pid */ }
         if (!ownerAlive) { try { fs.writeFileSync(lockFile, String(process.pid), 'utf8'); } catch { /* ignore */ } return; }
         superseded = true;
+        // Dormant bridge yields presence to the newer one — flip our reported
+        // status to idle so THIS instance never lingers 'working' (the winner
+        // reports its own truth going forward).
+        reportIdleOnTeardown();
         logErr(`mcp-operate: a newer bridge (pid ${owner}) owns this workspace — going dormant (dropping presence, no reconnect) to keep ONE shared socket. Process stays alive.`);
         try { socket?.destroy(); } catch { /* ignore */ }
       }, 1500);
@@ -1215,6 +1234,9 @@ export function mcpOperateCommand(program: Command): void {
       // in progress is never clipped. (inflight/closed declared above.)
       const maybeExit = (): void => {
         if (closed && inflight === 0) {
+          // Never leave the office badge stuck 'working' after this session ends
+          // (best-effort; fired before we drop the socket so the HTTP idle can go).
+          reportIdleOnTeardown();
           vncManager.stopAll();
           rdpManager.stopAll();
           socket?.destroy();
@@ -1223,6 +1245,25 @@ export function mcpOperateCommand(program: Command): void {
           process.stdout.write('', () => process.exit(0));
         }
       };
+
+      // ── Graceful signal shutdown ─────────────────────────────────────────────
+      // A supervisor (the desktop app / deployer) stops a bridge with SIGTERM;
+      // Ctrl-C sends SIGINT. Neither closes stdin, so without this a signalled
+      // bridge would exit still showing 'working' in the office. Flip the badge to
+      // idle, drop the socket, and exit after a brief flush window so the idle
+      // set_status has a chance to leave the machine. Best-effort, once.
+      let shuttingDown = false;
+      const gracefulShutdown = (): void => {
+        if (shuttingDown) { return; }
+        shuttingDown = true;
+        closed = true;
+        reportIdleOnTeardown();
+        try { socket?.destroy(); } catch { /* ignore */ }
+        const t = setTimeout(() => process.exit(0), 200);
+        t.unref?.();
+      };
+      process.once('SIGTERM', gracefulShutdown);
+      process.once('SIGINT', gracefulShutdown);
 
       // ── Single JSON-RPC request path (shared by stdio + HTTP) ────────────────
       // Process ONE inbound MCP message and return the response object to send

@@ -42,6 +42,22 @@ import { CLI_VERSION } from './version';
 
 export type LoopState = 'idle' | 'running' | 'stopping' | 'paused';
 
+/**
+ * After `_waitForTaskCompletion` resolves, decide whether the SUCCESS/completion
+ * path (`task_done` → COMPLETED, `task_progress` → WORKING, completedCount++)
+ * should run. It must NOT run for a task that PROVIDER-HARD-FAILED during the
+ * wait: the hard_fail branch resolves() (so cleanup runs) but the task did not
+ * complete — it was flagged `[~]` blocked and already reported `task_fail`
+ * (TASK_STATE_FAILED). Falling through would emit COMPLETED + WORKING and leave
+ * the office badge stuck 'working' after a failure. A fresh `[ ]` dispatch clears
+ * the blocked flag BEFORE the wait, so a genuine completion has
+ * blockedBeforeWait === false && blockedAfterWait === false and runs normally;
+ * only a task that TRANSITIONED to blocked during this wait is skipped.
+ */
+export function taskHardFailedDuringWait(blockedBeforeWait: boolean, blockedAfterWait: boolean): boolean {
+  return blockedAfterWait && !blockedBeforeWait;
+}
+
 // ---------------------------------------------------------------------------
 // Rate-limit + context-length errors
 // ---------------------------------------------------------------------------
@@ -1641,8 +1657,28 @@ export class TaskLoopRunner {
           await this._cb!.sendToAi(prompt, task.text, includeProfile, messageFile);
         }
 
+        // Snapshot the blocked flag BEFORE the wait — a fresh [ ] dispatch cleared
+        // it at :1529, so this is false on the normal path; the hard_fail branch
+        // sets it DURING the wait. Compared after the wait to detect a provider
+        // hard-failure that resolved (rather than threw).
+        const blockedBeforeWait = this._blockedTasks.has(task.id ?? task.text);
+
         // Wait for the AI to mark the task [x] done in TODO.md
         await this._waitForTaskCompletion(todoPath, task, claudeCursor);
+
+        // Provider HARD-FAILURE guard (status-truth). `_waitForTaskCompletion`
+        // resolves (not rejects) on a hard_fail so its cleanup runs, but the task
+        // did NOT complete: it was flagged [~] blocked and already reported
+        // task_fail (TASK_STATE_FAILED). Do NOT fall through into the completion
+        // path below — that would count it completed and emit task_done
+        // (COMPLETED) + task_progress (WORKING), clobbering the honest FAILED and
+        // leaving the office badge stuck 'working' after a failure. Skip to the
+        // next iteration; the FAILED frame stands until the task is retried.
+        if (taskHardFailedDuringWait(blockedBeforeWait, this._blockedTasks.has(task.id ?? task.text))) {
+          this._cb?.log(`⛔ Hard-failed task stays blocked — skipping completion path (reported failed, not done): ${discordLabel(task.text)}`);
+          this._currentTask = undefined;
+          continue;
+        }
 
         // Wait for the CLI process to fully exit before reading its stdout.
         // The exit-code file is written only after the shell command completes,

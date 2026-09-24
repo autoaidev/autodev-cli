@@ -387,10 +387,21 @@ export function rebuildProfile(root: string): void {
   let settings: ReturnType<typeof loadSettingsForRoot> | undefined;
   try { settings = loadSettingsForRoot(root); } catch { /* ignore */ }
 
-  const enabledSections = settings?.enabledProfileSections ?? [];
-  const customRefs = settings?.customProfileRefs ?? [];
-  const { body: profileBody, sectionPaths } = assembleProfileBody(enabledSections, root, customRefs);
-  const finalProfileBody = applyProtocolSections(profileBody, settings);
+  // Assemble the profile body DEFENSIVELY: assembleProfileBody / applyProtocolSections
+  // read bundled media and can throw on a Windows media-layout / path issue in an
+  // office scratch dir. If they do, we must STILL write a non-empty PROGRAM.md
+  // below (a swallowed throw here previously left PROGRAM.md uncreated → the
+  // dispatcher's readFileSync(PROGRAM.md) threw ENOENT → the TASK failed). On any
+  // failure fall back to the minimal header and empty section paths.
+  let finalProfileBody = '';
+  let sectionPaths: string[] = [];
+  try {
+    const enabledSections = settings?.enabledProfileSections ?? [];
+    const customRefs = settings?.customProfileRefs ?? [];
+    const assembled = assembleProfileBody(enabledSections, root, customRefs);
+    sectionPaths = assembled.sectionPaths;
+    finalProfileBody = applyProtocolSections(assembled.body, settings);
+  } catch { finalProfileBody = ''; sectionPaths = []; }
 
   // ── CRITICAL WRITES FIRST ────────────────────────────────────────────────
   // Order matters: PROGRAM.md + SOUL.md are load-bearing (the dispatcher reads
@@ -402,8 +413,8 @@ export function rebuildProfile(root: string): void {
   // path — exactly the reported bug.
   //
   // Guarantee a NON-EMPTY PROGRAM.md even in the pathological case where
-  // assembleProfileBody found no media (empty body): write at least the
-  // SOUL/PROGRAM pointer header so the file is never blank.
+  // assembleProfileBody found no media (empty body) OR threw above: write at least
+  // the SOUL/PROGRAM pointer header so the file is never blank/absent.
   const profileFilePath = path.join(root, AGENT_PROFILE_FILE);
   const bodyToWrite = finalProfileBody && finalProfileBody.trim().length > 0
     ? finalProfileBody

@@ -49,9 +49,16 @@ export function writeCombinedFile(root: string, agentProfileFile: string, messag
   const msgContent = fs.readFileSync(messageFile, 'utf8');
   let combined = msgContent;
   if (includeProfile) {
-    const profileContent = fs.readFileSync(agentProfileFile, 'utf8');
+    // DEFENSIVE: a missing/unreadable PROGRAM.md must NEVER fail dispatch (→ a
+    // failed task). The callers try rebuildProfile first, but if that throws (a
+    // Windows media-layout / path issue in an office scratch dir left PROGRAM.md
+    // uncreated), we must still dispatch — the agent runs without the inlined
+    // profile this turn and picks it up via the AGENTS.md → @.autodev/PROGRAM.md
+    // pointer once the next rebuild lands. Read defensively rather than throwing.
+    let profileContent = '';
+    try { profileContent = fs.readFileSync(agentProfileFile, 'utf8'); } catch { profileContent = ''; }
     // Task message FIRST so the agent sees the current task immediately.
-    combined = `${msgContent}\n\n---\n\n${profileContent}`;
+    combined = profileContent ? `${msgContent}\n\n---\n\n${profileContent}` : msgContent;
   }
   const combinedFile = path.join(msgsDir, `temp_${Date.now()}.md`);
   fs.writeFileSync(combinedFile, combined, 'utf8');

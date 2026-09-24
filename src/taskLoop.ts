@@ -66,6 +66,7 @@ import { RateLimitError, RateLimitDetector, AuthError, AuthDetector } from './ra
 import { CliExitHandler } from './cliExit';
 import { LiveNarrationStreamer, appendHookEventLine, stripAnsi } from './core/liveNarration';
 import { redactDeep } from './core/redactSecrets';
+import { providerRetryBackoffMs, shouldRetryHardFail } from './core/retryBackoff';
 
 class ContextLengthError extends Error {
   constructor(readonly rawMessage: string) {
@@ -223,6 +224,20 @@ export class TaskLoopRunner {
    *  a blocked task stays [~] + reported failed until it is retried. Cleared when
    *  a fresh [ ] dispatch of the same task begins (provider presumably recovered). */
   private _blockedTasks = new Set<string>();
+  /** Per-task PROVIDER hard-failure retry counter (id or text). Distinct from
+   *  _taskAttempts (which counts turns that RAN but did not mark the task done).
+   *  A transient hard-failure (token blip / timeout / watchdog no-output / crash
+   *  / session-error) is retried with exponential backoff up to
+   *  settings.maxProviderRetries (default 10) before the task is finally
+   *  reported failed/blocked. Reset when the task completes or gets a fresh
+   *  [ ] dispatch. `reauth_required` is never counted here (it has its own
+   *  pause/resume path). */
+  private _hardFailAttempts = new Map<string, number>();
+  /** Task keys queued for a provider-hard-failure RETRY: left [~] in-progress
+   *  and NON-blocked so the loop re-dispatches them (rather than the
+   *  stranded-[~] cleanup auto-marking them done). Consumed when the loop
+   *  re-picks the task for re-dispatch. */
+  private _pendingRetry = new Set<string>();
   /** Counts completed tasks since the last auto-compact run. */
   private _autoCompactCounter = 0;
   /** Counts completed tasks since the last session reset. */
@@ -381,6 +396,8 @@ export class TaskLoopRunner {
     this._compactedTaskLines.clear();
     this._taskAttempts.clear();
     this._blockedTasks.clear();
+    this._hardFailAttempts.clear();
+    this._pendingRetry.clear();
     this._autoCompactCounter = 0;
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
@@ -1447,12 +1464,35 @@ export class TaskLoopRunner {
       // If no [ ] task but CLI is still running and there's a [~] task in flight,
       // treat that [~] task as the current one and wait — don't interrupt the process.
       let watchingInProgress = false;
+      // True when this dispatch is a provider-hard-failure RETRY re-dispatch of a
+      // [~] task (picked by the retry hook below), NOT a genuine fresh [ ] pick.
+      // Used to keep the hard-fail counter alive across retries (a genuine fresh
+      // [ ] dispatch resets it; a retry re-dispatch must not).
+      let isRetryRedispatch = false;
       if (!task && cliIsRunning) {
         const inProgress = tasks.find(t => t.status === 'in-progress');
         if (inProgress) {
           task = inProgress;
           watchingInProgress = true;
           this._cb?.log(`⏳ CLI running, watching in-progress: ${discordLabel(task.text)}`);
+        }
+      }
+
+      // Provider hard-failure RETRY re-dispatch. A retried task was left [~]
+      // in-progress and NON-blocked (see the hard_fail branch); pickNextTask
+      // only returns [ ] tasks and the stranded-[~] cleanup would auto-mark it
+      // done — so surface it here, after its backoff elapsed, as real work to
+      // RE-SEND (watchingInProgress stays false → the dispatch path calls
+      // sendToAi). The backoff already ran inside the hard_fail branch, so this
+      // fires on the next iteration with no further wait.
+      if (!task && !cliIsRunning && this._pendingRetry.size > 0) {
+        const retryTask = tasks.find(t =>
+          t.status === 'in-progress' && this._pendingRetry.has(t.id ?? t.text));
+        if (retryTask) {
+          task = retryTask;
+          isRetryRedispatch = true;
+          this._pendingRetry.delete(retryTask.id ?? retryTask.text);
+          this._cb?.log(`⟳ Re-dispatching provider-retry task: ${discordLabel(task.text)}`);
         }
       }
 
@@ -1501,8 +1541,13 @@ export class TaskLoopRunner {
               // Exclude tasks flagged as provider hard-failures: those were left
               // [~] ON PURPOSE to signal "blocked / needs attention". Auto-marking
               // them done here would re-introduce the exact false-green we fixed.
+              // Also exclude tasks queued for a provider-hard-failure retry:
+              // those are re-dispatched (not auto-completed) by the retry hook
+              // above once their backoff elapses.
               const stranded = tasks.filter(t =>
-                t.status === 'in-progress' && !this._blockedTasks.has(t.id ?? t.text));
+                t.status === 'in-progress'
+                && !this._blockedTasks.has(t.id ?? t.text)
+                && !this._pendingRetry.has(t.id ?? t.text));
               for (const t of stranded) {
                 // Auto-mark as [x] done rather than resetting to [ ].
                 // Resetting to [ ] causes an infinite loop: the agent picks it
@@ -1541,8 +1586,11 @@ export class TaskLoopRunner {
         const taskKey = task.id ?? task.text;
         // A fresh [ ] dispatch means this task is being retried — the provider
         // has presumably recovered, so clear any prior hard-failure flag and let
-        // it complete (or fail) honestly on its own merits this time.
+        // it complete (or fail) honestly on its own merits this time. A retry
+        // re-dispatch of a [~] task (isRetryRedispatch) must KEEP its hard-fail
+        // counter so the backoff/give-up budget keeps advancing.
         this._blockedTasks.delete(taskKey);
+        if (!isRetryRedispatch) { this._hardFailAttempts.delete(taskKey); }
         const attempts = (this._taskAttempts.get(taskKey) ?? 0) + 1;
         this._taskAttempts.set(taskKey, attempts);
         // With the verify gate active, the attempt ceiling becomes the fix-round
@@ -1676,6 +1724,18 @@ export class TaskLoopRunner {
         // next iteration; the FAILED frame stands until the task is retried.
         if (taskHardFailedDuringWait(blockedBeforeWait, this._blockedTasks.has(task.id ?? task.text))) {
           this._cb?.log(`⛔ Hard-failed task stays blocked — skipping completion path (reported failed, not done): ${discordLabel(task.text)}`);
+          this._currentTask = undefined;
+          continue;
+        }
+
+        // Provider hard-failure RETRY guard (status-truth). The hard_fail branch
+        // resolves (not rejects) after scheduling a retry: the task was left [~]
+        // in-progress + NON-blocked and queued in _pendingRetry, and its backoff
+        // already elapsed inside the branch. It did NOT complete — so skip the
+        // completion path (which would emit a false task_done) and let the retry
+        // re-dispatch hook re-send it on the next iteration.
+        if (this._pendingRetry.has(task.id ?? task.text)) {
+          this._cb?.log(`⟳ Provider-retry task queued — skipping completion path (will re-dispatch): ${discordLabel(task.text)}`);
           this._currentTask = undefined;
           continue;
         }
@@ -1923,6 +1983,8 @@ export class TaskLoopRunner {
         this._periodicMgr.increment(this._iterations, this._workspaceRoot);
         this._compactedTaskLines.delete(task.line); // allow compact again if task re-appears
         this._taskAttempts.delete(task.id ?? task.text); // task done — reset attempt counter
+        this._hardFailAttempts.delete(task.id ?? task.text); // task done — reset provider-retry counter
+        this._pendingRetry.delete(task.id ?? task.text);
         this._preTaskCommit.delete(task.id ?? task.text); // gate bookkeeping (no-op without CONTROL.md)
         this._verifyMech.delete(task.id ?? task.text);
         const afterTasks = parseTodo(todoPath);
@@ -2482,6 +2544,21 @@ export class TaskLoopRunner {
     });
   }
 
+  /**
+   * Sleep up to `totalMs` for a provider-hard-failure retry backoff, polling
+   * `_state` every 250 ms so a stop()/pause aborts the wait promptly (within a
+   * quarter second) instead of holding the loop for the full backoff (up to
+   * 120 s). Returns early the moment the loop is no longer 'running'.
+   */
+  private async _backoffSleep(totalMs: number): Promise<void> {
+    const step = 250;
+    let waited = 0;
+    while (waited < totalMs && this._state === 'running') {
+      await sleep(Math.min(step, totalMs - waited));
+      waited += step;
+    }
+  }
+
   /** Return when the task text appears with [x] status in the TODO.md file. */
   private _waitForTaskCompletion(todoPath: string, task: Task, claudeCursor = 0): Promise<void> {
     const isClaudeCli = this._cb?.getActiveProvider() === 'claude-cli';
@@ -2835,21 +2912,68 @@ export class TaskLoopRunner {
         if (decision.kind === 'hard_fail') {
           // The PROVIDER hard-failed (reauth / session error / watchdog-no-output
           // / crash / model unavailable) and produced no real work. Do NOT mark
-          // the task [x] done — that would report an outage as SUCCESS. Instead
-          // flag it [~] blocked, report an honest failure to the office (task_fail
+          // the task [x] done — that would report an outage as SUCCESS.
+          const reason = decision.reason;
+          const taskKey = task.id ?? task.text;
+
+          // --- Transient failure: RETRY with exponential backoff --------------
+          // A token blip / timeout / watchdog-no-output / crash / session-error
+          // must NOT lose the task. Bump the per-task provider-retry counter and,
+          // while under budget for a retryable reason, keep the task [~]
+          // in-progress and CLAIMABLE (do NOT block it, do NOT report task_fail
+          // or a StopFailure hook), report a SOFT task_progress note so the
+          // office still reads "working" (not FAILED), wait out the backoff, then
+          // resolve so the retry re-dispatch hook re-sends the SAME task on the
+          // next iteration. `reauth_required` is excluded here — genuine
+          // auth-expiry owns its pause/resume + notify path.
+          const attempt = (this._hardFailAttempts.get(taskKey) ?? 0) + 1;
+          this._hardFailAttempts.set(taskKey, attempt);
+          const maxRetries = this._settings?.maxProviderRetries ?? 10;
+          if (shouldRetryHardFail(reason, attempt, maxRetries)) {
+            // Reset the SUCCESS-attempt counter so the re-run starts clean and is
+            // never force-marked done on its first re-dispatch. (Distinct counter.)
+            this._taskAttempts.delete(taskKey);
+            this._pendingRetry.add(taskKey);
+            await todoWriter.markInProgress(todoPath, task).catch(() => {});
+            const backoffMs = providerRetryBackoffMs(attempt);
+            const backoffSec = Math.round(backoffMs / 1000);
+            this._cb?.log(`⟳ Provider turn failed (${reason}) — retry ${attempt}/${maxRetries} in ${backoffSec}s: ${discordLabel(task.text)}`);
+            const afterRemainingRetry = countRemaining(parseTodo(todoPath));
+            this._notifyWebhook('task_progress', {
+              iteration: this._iterations,
+              total:     this._iterations + afterRemainingRetry,
+              remaining: afterRemainingRetry,
+              note:      `provider turn failed — retrying (${attempt}/${maxRetries})`,
+              reason,
+              workDir:   this._workspaceRoot,
+              gitRepo:   this._gitRepo,
+              gitBranch: this._gitBranch,
+            });
+            this._notifyDiscord(`⟳ **Provider turn failed — retrying (${attempt}/${maxRetries}) in ${backoffSec}s:**\n${discordLabel(task.text)}\n\`${reason}\``);
+            // Wait out the backoff (aborts promptly if the loop is stopped), then
+            // resolve so the loop re-picks this still-in-progress, non-blocked task.
+            await this._backoffSleep(backoffMs);
+            cleanup();
+            resolve();
+            return;
+          }
+
+          // --- Retry budget exhausted OR non-retryable (reauth) → honest fail --
+          // Flag it [~] blocked, report an honest failure to the office (task_fail
           // → TASK_STATE_FAILED, "needs attention") and record a StopFailure hook
           // so external monitors see it too. The task stays claimable/retryable.
-          const reason = decision.reason;
           this._failedCount++;
-          const taskKey = task.id ?? task.text;
           this._blockedTasks.add(taskKey);
-          // Drop the attempt counter so a later retry gets a clean run rather
-          // than being force-marked done on its first re-dispatch.
+          // Drop the success-attempt counter so a later human/fresh retry gets a
+          // clean run rather than being force-marked done on its first re-dispatch.
           this._taskAttempts.delete(taskKey);
-          this._cb?.log(`⛔ Provider hard-failure (${reason}) — NOT marking done; flagging task as blocked/needs-attention: ${discordLabel(task.text)}`);
+          this._pendingRetry.delete(taskKey);
+          const retries = attempt - 1;
+          const retriedNote = retries > 0 ? ` after ${retries} ${retries === 1 ? 'retry' : 'retries'}` : '';
+          this._cb?.log(`⛔ Provider hard-failure (${reason})${retriedNote} — NOT marking done; flagging task as blocked/needs-attention: ${discordLabel(task.text)}`);
           await todoWriter.markInProgress(todoPath, task).catch(() => {});
           const duration = Math.round((Date.now() - taskStartTime) / 1000);
-          const errText = `provider hard-failure: ${reason} (task not completed — needs attention)`;
+          const errText = `provider hard-failure: ${reason}${retriedNote} (task not completed — needs attention)`;
           this._notifyWebhook('task_fail', {
             iteration: this._iterations,
             task:      { text: task.text, id: task.id },

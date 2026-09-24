@@ -190,6 +190,15 @@ export interface AutodevSettings {
    */
   maxTaskAttempts: number;
   /**
+   * How many times a PROVIDER hard-failure (token blip, timeout, watchdog
+   * no-output, crash, session-error, "provider stopped") on the SAME task is
+   * retried with exponential backoff before the task is finally reported
+   * failed/blocked. This is distinct from maxTaskAttempts (which counts turns
+   * that RAN but did not mark the task done). Default: 10. `reauth_required`
+   * is never retried here — it has its own pause/resume path.
+   */
+  maxProviderRetries: number;
+  /**
    * Move completed [x] tasks from TODO.md into DONE.md every N
    * completed tasks (0 = disabled). Keeps the active TODO file short.
    */
@@ -322,6 +331,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   opencodeChunkTimeout: 0,
   resetSessionEveryNTurns: 0,
   maxTaskAttempts: 3,
+  maxProviderRetries: 10,
   pruneTodoEveryNTasks: 0,
   journalLearnEveryNTasks: 0,
   profileEveryNTasks: 0,

@@ -53,7 +53,7 @@ try {
 //     within a domain, PROFILE_SECTIONS order is preserved. Every section id must
 //     map to exactly one domain (asserted below). --------------------------------
 const DOMAINS = [
-  ['Core loop & auto-advance', ['00-identity', '00-auto-advance', '07-core-loop', '12-todo-format', '08-thinking']],
+  ['Core loop & auto-advance', ['00-identity', '00-auto-advance', '00-clerk', '07-core-loop', '12-todo-format', '08-thinking']],
   ['Done-gate: self-verify, critic & QA', ['00b-self-verifiable-work', '00-critic-swarm', '00-qa-swarm', '00i-qa-swarm', '00d-turn-end-retrospective']],
   ['Planning', ['00e-long-horizon-planning', '00m-autoplan', '00j-deferred-task-resolution']],
   ['Swarms & workflows', ['00f-swarm-orchestration', '00g-swarm-living-documents', '00k-internal-workflows', '09-parallel-panel', '19-subagent-context-management', '06-core-rules']],

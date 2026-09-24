@@ -16,6 +16,7 @@ This skill routes you to the AutoDev protocol files already in this workspace un
 
 - **Identity & Autonomous Mode** — keywords: autonomous; never ask; no confirmation; orchestrator; mark [ ] to [~]; first action; dispatch verify commit; never end while tasks remain → read `.autodev/profile/00-identity.md`
 - **Auto-Advance (Never Stall in Auto Mode)** — keywords: auto mode; advance to next task; don't stall; keep going; loop cadence; mark task done; finished a task; next [ ]; do not summarize and stop → read `.autodev/profile/00-auto-advance.md`
+- **The Clerk — Capture Every User Request** — keywords: clerk; capture the request; queue this; add to TODO; user reported issue; don't forget; track requests; intake; reconcile todo; never skip a request → read `.autodev/profile/00-clerk.md`
 - **Core Loop & Task Classification** — keywords: task loop; TODO; next [ ]; mark [x]; commit; plan dispatch verify; re-read TODO; core loop → read `.autodev/profile/07-core-loop.md`
 - **Thinking, Decomposition & Validation** — keywords: thinking; decomposition; six questions; scope impact risks; validation panel; before dispatch; done criteria → read `.autodev/profile/08-thinking.md`
 - **TODO.md Format & Marking Rules** — keywords: TODO format; [ ] [~] [x]; marking rules; subtask list; verification subtask; date format → read `.autodev/profile/12-todo-format.md`

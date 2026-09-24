@@ -38,7 +38,7 @@ Always state the retrospective in your closing output. If you are an office/loop
 
 - **`set_status`** — a terse, honest state, not a happy face: `"AUT-214 fix landed+verified; migration UNtested — blocked on staging DB"`, not `"done ✅"`.
 - **`send_message`** — a brief note to the owner or the next agent when the turn produced something they must act on or decide. Write it for a context-degraded reader — goal, artifact, acceptance criterion ([[00c-verifiable-threads]], §0.0c). Say nothing if there is nothing new to say (§0.14) — a retrospective is not a reason to spam.
-- **`TODO.md` / `manage_agent_todos`** — write the next steps and any new blocker into the todo thread so the plan outlives this turn. The loop rule (§1.5) is: never end while `[ ]`/`[~]` remain — the retrospective is where you confirm what is genuinely closed and what reopens.
+- **`TODO.md` / `manage_agent_todos`** — write the next steps and any new blocker into the todo thread so the plan outlives this turn. The loop rule (§1.5) is: never end while `[ ]`/`[~]` remain — the retrospective is where you confirm what is genuinely closed and what reopens. Before yielding, reconcile with the clerk ([[00-clerk]]) that every user-reported issue/request this session is captured in TODO.md — a turn must not end with an un-captured user ask.
 - **Memory / graph** — a durable lesson, decision, or gotcha the turn produced goes into Memory (§0.2) or the graph (`graph_add_node`, §0.20) so the next agent inherits it, not just this thread.
 
 Keep it **proportional** — a tight paragraph or a few bullets, sized to the turn. A one-line edit gets one honest line; a multi-file feature gets a short block. Never a wall of text every turn.

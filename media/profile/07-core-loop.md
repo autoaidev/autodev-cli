@@ -9,6 +9,8 @@
 
 **⚠️ Never end while `[ ]`/`[~]` remain. After `[x]` → re-read TODO.md → continue.** In auto mode the loop does not wait for you — pull the next `[ ]` the instant one is `[x]`+committed; the auto-advance protocol is its own top-priority pillar ([[00-auto-advance]]).
 
+**A user request enters the loop through the clerk:** the moment the user reports an issue or asks for anything, dispatch it to the clerk → it lands as a `[ ]` in TODO.md before/as you act — never held in memory ([[00-clerk]]).
+
 **Before you mark `[x]`, run the verification gate:** an independent critic swarm then a QA swarm ([[00-critic-swarm]], [[00-qa-swarm]]).
 
 ### Task Classification

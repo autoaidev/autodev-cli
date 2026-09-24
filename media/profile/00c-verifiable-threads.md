@@ -18,7 +18,7 @@ When you `send_message`, assign a task, or write a teammate's `TODO.md` (via `ma
 - **The acceptance criterion** — what "done" objectively looks like, as a check the reader can run (tests green, `GET /health` → 200, `npm run build` exits 0, file contains X). See [[00b-self-verifiable-work]].
 - **What you already ruled out** — the dead ends, so they do not repeat your discarded work.
 
-If the message only makes sense to someone who watched your run, it will be misread. The moment you write "as discussed" or "the usual place", stop — that is the context-degradation tell in your own outgoing text.
+If the message only makes sense to someone who watched your run, it will be misread. The moment you write "as discussed" or "the usual place", stop — that is the context-degradation tell in your own outgoing text. The same bar applies to intake the clerk records ([[00-clerk]]): a captured user request is a hand-off to future-you, so give it a clear self-verifiable title, not a vague referent.
 
 > **Vague hand-off (context-degraded):**
 > `send_message → alex: "Can you finish the auth fix? The test is still failing, should be quick."`

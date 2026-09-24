@@ -48,6 +48,13 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     ],
   },
   {
+    id: '00-clerk', label: 'The Clerk — Capture Every User Request', file: '00-clerk.md',
+    keyRules: [
+      'Capture every user-reported issue/request into TODO.md via the clerk IMMEDIATELY — the instant it is said, before/as you start; each ask in a burst recorded individually, NONE dropped. Your context is lossy ([[00l-compaction-continuity]]); a request held only in your head WILL be lost. Using the clerk is not optional; never skip a user-reported issue because you are busy or mid-build.',
+      'Reconcile with the clerk before a turn ends or you claim done ([[00d-turn-end-retrospective]], [[00-auto-advance]]): every user-reported item must be present as [ ]/[~]/[x] in TODO.md ([[12-todo-format]]); if any is missing, add it now. A turn MUST NOT end with an un-captured user request.',
+    ],
+  },
+  {
     id: '00a-proactive-discovery', label: 'Proactive Discovery', file: '00a-proactive-discovery.md',
     keyRules: [
       'On startup/join: run the discovery sweep — SOUL (who am I) → list_agents (roster+presence) → living docs+codebase (what is this) → tools/skills/MCP inventory → get_tasks/TODO+check_messages (the work) → graph_map/graph_search + Memory (what is already known).',

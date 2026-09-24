@@ -43,6 +43,7 @@ import * as crypto from 'crypto';
 import * as readline from 'readline';
 import * as child_process from 'child_process';
 import { randomUUID } from 'crypto';
+import { ensureGrokTrustAt } from './trustStore';
 import { eventTypeFor } from '../../hookEventNormalizer';
 import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
@@ -535,20 +536,17 @@ function ensureGrokPickerDisabled(log: (m: string) => void): void {
  * present.
  */
 function ensureGrokDirTrusted(root: string, log: (m: string) => void): void {
-  try {
-    const tf = path.join(os.homedir(), '.grok', 'trusted_folders.toml');
-    const abs = path.resolve(root);
-    let text = '';
-    try { text = fs.readFileSync(tf, 'utf8'); } catch { /* no file yet */ }
-    // Match the exact folder header so a substring path can't yield a false skip.
-    const header = `[folders."${abs}"]`;
-    if (text.includes(header)) { return; }
-    const nowSec = Math.floor(Date.now() / 1000);
-    const entry = `${text.endsWith('\n') || text === '' ? '' : '\n'}\n${header}\ntrusted = true\ndecided_at = ${nowSec}\n`;
-    fs.mkdirSync(path.dirname(tf), { recursive: true });
-    fs.appendFileSync(tf, entry, 'utf8');
+  // The folder is keyed as a DOUBLE-QUOTED TOML header `[folders."<path>"]`, so
+  // the path MUST be TOML-escaped (backslashes doubled) or a Windows path breaks
+  // grok's TOML parser. ensureGrokTrustAt owns that escape and also repairs a
+  // store the old raw-path bug corrupted. Best-effort — never throws.
+  const tf = path.join(os.homedir(), '.grok', 'trusted_folders.toml');
+  const r = ensureGrokTrustAt(tf, root);
+  if (r === 'appended') {
     log(`Grok TUI: trusted workspace dir in trusted_folders.toml (skips grok's trust gate)`);
-  } catch { /* best effort — the picker loop's trust-prompt handling is the backstop */ }
+  } else if (r === 'repaired') {
+    log(`Grok TUI: repaired a corrupt trusted_folders.toml (unescaped Windows paths) and trusted workspace dir`);
+  }
 }
 
 /** Cap a string field to `max` chars, appending an ellipsis when truncated. */

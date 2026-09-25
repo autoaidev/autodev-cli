@@ -1548,6 +1548,28 @@ export function sendGrokCliPrompt(
  * grok's in-process context accumulates across tasks. Falls back to the old
  * headless spawn (with --resume) when tmux is unavailable so nothing regresses.
  */
+/**
+ * Pure decision for how a grok turn should run, given whether tmux exists and
+ * the provider id. Extracted so the "no tmux ⇒ stateless" rule is unit-testable
+ * without spawning a process.
+ *
+ * - grok-tui + tmux    → { useTmux: true }  (persistent live pane; context accretes)
+ * - grok-tui + no tmux → { persist: false } STATELESS. The persistent model needs a
+ *   live tmux pane; headless it relies on `grok --resume`, which regressed in
+ *   grok 1.0.41 (the resumed turn never completes → 10-min watchdog → SIGKILL →
+ *   false StopFailure → retry forever). Stateless is exactly grok-cli's working
+ *   invocation, so it is the safe degrade (e.g. on Windows, which has no tmux).
+ * - grok-cli           → { persist: false } always stateless (never uses tmux).
+ */
+export function decideGrokRunMode(
+  opts: { tmuxAvailable: boolean; providerId: string },
+): { useTmux: boolean; persist: boolean } {
+  if (opts.providerId === 'grok-tui' && opts.tmuxAvailable) {
+    return { useTmux: true, persist: true };
+  }
+  return { useTmux: false, persist: false };
+}
+
 export function sendGrokTuiPrompt(
   root: string,
   promptFilePath: string,
@@ -1558,13 +1580,19 @@ export function sendGrokTuiPrompt(
   model?: string,
   showOutput?: () => void,
 ): void {
-  if (tmuxAvailable()) {
+  const mode = decideGrokRunMode({ tmuxAvailable: tmuxAvailable(), providerId: 'grok-tui' });
+  if (mode.useTmux) {
     runGrokTmuxTurn(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, model, showOutput);
     return;
   }
-  log('Grok TUI: tmux not available — falling back to headless spawn');
+  // HEADLESS (no tmux, e.g. Windows): run STATELESS, not persistent. grok's
+  // headless `--resume` is unreliable (grok 1.0.41 hangs the resumed turn), so
+  // fall back to grok-cli's proven stateless invocation. Each turn is its own
+  // session; sendGrokPrompt's session-log tailing (newestGrokSessionDir) still
+  // forwards tool/narration events and detects turn_ended when persist:false.
+  log('Grok TUI: no tmux — running stateless (persistent session requires tmux; grok headless --resume is unreliable)');
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-    model, showOutput, persist: true, sessionId: resolvedSessionId, providerId: 'grok-tui',
+    model, showOutput, persist: false, providerId: 'grok-tui',
   });
 }
 

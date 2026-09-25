@@ -168,6 +168,24 @@ export function scanGrokFirstToken(lines: Array<string | GrokEvent>): boolean {
   return false;
 }
 
+/**
+ * True if ANY of the given event lines (or objects) marks the START of a grok
+ * turn — a `turn_started` or `loop_started` record (or a `first_token`, which
+ * only exists once a turn is underway). Used by the headless grok-tui tailer as
+ * a safety net: a `turn_ended` is only THIS turn's result once we have seen this
+ * turn demonstrably START in the tailed window. A trailing `turn_ended` with no
+ * preceding start in the window is BACKLOG (a prior errored turn read from a
+ * stale offset) and must be ignored, not treated as the current turn's outcome.
+ * Pure (no I/O), so the guard is unit-testable.
+ */
+export function scanGrokTurnStart(lines: Array<string | GrokEvent>): boolean {
+  for (const raw of lines) {
+    const ev = typeof raw === 'string' ? parseGrokEventLine(raw) : raw;
+    if (ev && (ev.type === 'turn_started' || ev.type === 'loop_started' || ev.type === 'first_token')) { return true; }
+  }
+  return false;
+}
+
 export type GrokTurnEnd = 'clean' | 'error' | null;
 
 /**

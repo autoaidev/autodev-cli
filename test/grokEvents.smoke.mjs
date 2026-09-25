@@ -18,7 +18,7 @@ import assert from 'node:assert';
 
 const {
   parseGrokEventLine, classifyGrokActivity, grokEventToHook,
-  isOfficeMcpToolName, scanGrokTurnEnd, scanGrokFirstToken, isCleanTurnOutcome, grokAssistantText,
+  isOfficeMcpToolName, scanGrokTurnEnd, scanGrokFirstToken, scanGrokTurnStart, isCleanTurnOutcome, grokAssistantText,
   GROK_IDLE_PHASES,
 } = await import('../out/core/grokEvents.js');
 
@@ -192,6 +192,32 @@ ok('grokAssistantText: assistant string + block-array content; others → null',
   assert.strictEqual(grokAssistantText('{"type":"tool_result","content":"out"}'), null);
   assert.strictEqual(grokAssistantText('{"type":"assistant","content":""}'), null);
   assert.strictEqual(grokAssistantText('not json'), null);
+});
+
+// ---------------------------------------------------------------------------
+// 7. scanGrokTurnStart — the stale-read guard (1.4.182 grok resume regression).
+//     A trailing turn_ended is only THIS turn's result once the turn has been seen
+//     to START in the tailed window; a lone/leading turn_ended is BACKLOG.
+// ---------------------------------------------------------------------------
+ok('scanGrokTurnStart: turn_started / loop_started / first_token → true', () => {
+  assert.strictEqual(scanGrokTurnStart([L.turnStarted]), true);
+  assert.strictEqual(scanGrokTurnStart([L.loopStarted]), true);
+  assert.strictEqual(scanGrokTurnStart([L.firstToken]), true);
+  assert.strictEqual(scanGrokTurnStart([{ type: 'turn_started' }]), true);
+});
+ok('scanGrokTurnStart: a window with NO start marker → false (backlog turn_ended)', () => {
+  // The exact stale-read shape: a prior errored turn_ended read with no current
+  // turn start in the window. The tailer must NOT honor this as the turn result.
+  assert.strictEqual(scanGrokTurnStart([L.turnEndedErr]), false);
+  assert.strictEqual(scanGrokTurnStart([L.phaseWaiting, L.turnEndedErr]), false);
+  assert.strictEqual(scanGrokTurnStart([]), false);
+});
+ok('guard combo: start-then-end → honor; end-only → ignore', () => {
+  // Mirrors the tui.ts guard: finish only when a start was seen this window.
+  const honored = (lines) => scanGrokTurnStart(lines) && scanGrokTurnEnd(lines) !== null;
+  assert.strictEqual(honored([L.turnStarted, L.firstToken, L.turnEndedOk]), true);  // real clean finish
+  assert.strictEqual(honored([L.turnStarted, L.turnEndedErr]), true);               // real error finish
+  assert.strictEqual(honored([L.turnEndedErr]), false);                             // stale backlog → ignore
 });
 
 console.log(`\ngrokEvents smoke: ${pass} checks passed`);

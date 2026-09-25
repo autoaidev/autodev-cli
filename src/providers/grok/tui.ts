@@ -50,8 +50,8 @@ import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState'
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { killProcessTree } from '../../core/killProcessTree';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
-import { scanGrokTurnEnd, scanGrokFirstToken, grokLoopForwardHooks } from '../../core/grokEvents';
-import { newestGrokSessionDir } from './sessions';
+import { scanGrokTurnEnd, scanGrokFirstToken, scanGrokTurnStart, grokLoopForwardHooks } from '../../core/grokEvents';
+import { newestGrokSessionDir, grokSessionDirFor } from './sessions';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 import type { ProviderId } from '../../providers';
 
@@ -1265,10 +1265,21 @@ export function sendGrokPrompt(
   const modelLabel = opts.model || 'account default';
 
   const sessionArgs: string[] = [];
+  // The concrete grok session id this launch will read/append to, when known:
+  //   • resume        → opts.sessionId (`--resume <id>`)
+  //   • new-persistent → the freshly-minted `--session-id <sid>`
+  //   • stateless      → undefined (grok mints an unknown id; newest-by-mtime only)
+  // Used to seed + TAIL the FIXED session dir (grokSessionDirFor) instead of
+  // "newest-by-mtime", so a newer UNRELATED session dir on disk can never divert
+  // the tailer or reset its byte offset to 0 (→ a prior turn's stale `turn_ended`
+  // read from the start = an instant false failure). This is the primary fix for
+  // the 1.4.181 forced-resume regression.
+  let _launchSid: string | undefined;
   if (opts.persist) {
     const providerId = opts.providerId ?? 'grok-tui';
     if (opts.sessionId) {
       sessionArgs.push('--resume', opts.sessionId);
+      _launchSid = opts.sessionId;
       // Persist the id we're resuming so the NEXT turn reads it from
       // session-state.json directly — this also stamps a session that was only
       // resolved via disk-detection (getGrokLatestSessionId) into the state file,
@@ -1278,6 +1289,7 @@ export function sendGrokPrompt(
     } else {
       const sid = randomUUID();
       sessionArgs.push('--session-id', sid);
+      _launchSid = sid;
       try { saveSessionId(root, providerId, sid); } catch { /* best effort */ }
       log(`Grok: new persistent session ${sid.slice(0, 8)}… (model=${modelLabel})`);
     }
@@ -1384,16 +1396,26 @@ export function sendGrokPrompt(
   let _resumeAbandoned = false;            // probe killed this grok; a stateless relaunch owns the turn
   const _grokEmittedIds = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
   const _grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
+  // The FIXED session dir this turn reads/appends to, when a concrete id is known
+  // (resume OR new-persistent). grok writes to <base>/<encodeURIComponent(cwd)>/<id>,
+  // and grok is launched with `--cwd root` — resolve exactly as newestGrokSessionDir
+  // does (path.resolve) so the encoding matches what grok writes on disk. When set,
+  // the tailer pins THIS dir and never "newest-by-mtime" (which a newer unrelated
+  // session dir could hijack). undefined only in the stateless mode, where grok
+  // mints an unknown id and newest-by-mtime is the only way to find it.
+  const _fixedDir: string | undefined = _launchSid ? grokSessionDirFor(path.resolve(root), _launchSid) : undefined;
   // Snapshot the pre-turn session so the tailer forwards ONLY this turn's records:
   // a RESUMED session's dir already holds backlog → seed at its current end; a
-  // FRESH session mints a NEW dir that appears later → read that dir from the start.
+  // FRESH session mints a NEW dir that appears later → read that dir from the start
+  // (its files don't exist yet → size 0 → read from 0 once grok creates them).
   let _seedDir = ''; let _seedEvOff = 0; let _seedChOff = 0;
   try {
-    const d = newestGrokSessionDir(root);
+    const d = _fixedDir ?? newestGrokSessionDir(root);
     if (d) { _seedDir = d; _seedEvOff = _grokSize(path.join(d, 'events.jsonl')); _seedChOff = _grokSize(path.join(d, 'chat_history.jsonl')); }
   } catch { /* no prior session — a fresh dir reads from 0 */ }
   let _grokDir: string | null = null;
   let _evOff = 0; let _chOff = 0;
+  let _sawTurnStart = false;               // this turn's turn_started/loop_started/first_token seen in the tailed window
 
   const rl = readline.createInterface({ input: child.stdout! });
 
@@ -1437,6 +1459,27 @@ export function sendGrokPrompt(
   // so `close` writes the exit file promptly.
   const finishFromTurnEnd = (clean: boolean): void => {
     if (_endSeen || killed) { return; }
+    // Recovery: a RESUME turn that ERRORED before producing any real output (no
+    // first_token) means the resume itself is broken (grok 1.0.41's `--resume`
+    // failing fast, a poisoned/stale session, or any unrecoverable resume error).
+    // Reporting a task failure here would just re-resume the SAME broken session
+    // next turn → the infinite `retry 1/10` loop. Instead, reuse the resume
+    // hang-probe's machinery: mark the root non-resumable for this run and relaunch
+    // THIS turn stateless (decideHeadlessGrokMode then routes later turns to
+    // new-persistent). Only for a launched RESUME (opts.sessionId present, probe
+    // armed); a new-persistent/stateless error falls through to the normal report.
+    if (!clean && !_sawFirstToken && opts.sessionId && opts.onResumeHang && !_resumeAbandoned) {
+      _resumeAbandoned = true;       // close skips the exit file — the relaunch owns the turn
+      log('Grok: resume errored before any output (no first_token) — marking session non-resumable this run, falling back to stateless for this turn');
+      if (grokFilePoll) { clearInterval(grokFilePoll); }
+      if (watchdog) { clearTimeout(watchdog); }
+      if (resumeProbeTimer) { clearTimeout(resumeProbeTimer); resumeProbeTimer = null; }
+      killed = true;                 // suppress the watchdog's own kill/report
+      if (child.pid) { killProcessTree(child.pid); }
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      try { opts.onResumeHang(); } catch (e) { log(`Grok: stateless relaunch after broken resume failed: ${(e as Error)?.message ?? String(e)}`); }
+      return;
+    }
     _endSeen = true;                 // suppress close's boundary re-emit
     _forcedExit = clean ? 0 : 1;     // report the true outcome, not the SIGKILL code
     flushOutputLine();
@@ -1458,7 +1501,11 @@ export function sendGrokPrompt(
   const pumpGrokSessionFiles = (): void => {
     if (_endSeen || killed) { return; }
     let dir: string | undefined;
-    try { dir = newestGrokSessionDir(root); } catch { dir = undefined; }
+    // When a concrete session id is known, TAIL THAT FIXED DIR — a newer unrelated
+    // session dir on disk can never divert the tailer or reset its offset. Only the
+    // stateless mode (unknown id) falls back to newest-by-mtime.
+    if (_fixedDir) { dir = _fixedDir; }
+    else { try { dir = newestGrokSessionDir(root); } catch { dir = undefined; } }
     if (!dir) { return; }                 // no session dir yet — nothing to tail
     const evFile = path.join(dir, 'events.jsonl');
     const chFile = path.join(dir, 'chat_history.jsonl');
@@ -1473,6 +1520,10 @@ export function sendGrokPrompt(
     // Resume hang-probe signal: grok emitted first_token → the (resumed) prompt is
     // being answered, so the probe below leaves the turn to run normally.
     if (!_sawFirstToken && scanGrokFirstToken(ev.lines)) { _sawFirstToken = true; }
+    // Turn-start signal: THIS turn has demonstrably begun in the tailed window
+    // (turn_started/loop_started/first_token). A trailing turn_ended is only the
+    // current turn's result once we have seen the start — otherwise it is backlog.
+    if (!_sawTurnStart && scanGrokTurnStart(ev.lines)) { _sawTurnStart = true; }
     // Forward native tool calls + assistant narration (mcp__/office tools skipped,
     // deduped per-root by tool_call id, secret-redacted before it leaves the box).
     for (const h of grokLoopForwardHooks(ev.lines, ch.lines, _grokEmittedIds)) {
@@ -1491,8 +1542,14 @@ export function sendGrokPrompt(
     // instead of hanging to GROK_MAX_RUN_MS. An error/aborted outcome ends it too
     // (retryable), honoring scanGrokTurnEnd's classification.
     const te = scanGrokTurnEnd(ev.lines);
-    if (te === 'clean') { finishFromTurnEnd(true); }
-    else if (te === 'error') { finishFromTurnEnd(false); }
+    // Safety net against any residual offset skew: only honor a turn_ended once
+    // THIS turn has demonstrably started in the tailed window. A turn_ended with no
+    // preceding current-turn start is backlog (a prior errored turn read from a
+    // stale offset) → ignore it; the offset has already advanced past it.
+    if (te && (_sawTurnStart || _sawFirstToken)) {
+      if (te === 'clean') { finishFromTurnEnd(true); }
+      else { finishFromTurnEnd(false); }
+    }
   };
   const GROK_FILE_POLL_MS = envNum('AUTODEV_GROK_FILE_POLL_MS', 900);
   const grokFilePoll = GROK_FILE_POLL_MS > 0 ? setInterval(pumpGrokSessionFiles, GROK_FILE_POLL_MS) : null;

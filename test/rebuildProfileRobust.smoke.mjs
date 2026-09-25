@@ -26,6 +26,11 @@ const require = createRequire(import.meta.url);
 // site, proving rebuildProfile's own try/catch wrapper (not just the internal
 // guards) keeps the critical writes safe.
 const protocolSections = require('../out/protocolSections.js');
+// sessionState is required with a LIVE property read at the call site
+// ((0, sessionState_1.autodevDir)(root)); swapping the export here forces a throw
+// AFTER the bulletproof bootstrap write but BEFORE the full profile write — proving
+// the very-first-action write is what lands PROGRAM.md.
+const sessionState = require('../out/sessionState.js');
 const { rebuildProfile } = require('../out/messageBuilder.js');
 const { removeCozempicHooks } = require('../out/cozempicHooks.js');
 
@@ -89,6 +94,38 @@ ok('rebuildProfile: corrupt .claude layout (file, not dir) still writes PROGRAM.
   assert.doesNotThrow(() => rebuildProfile(d));
   assert.ok(fs.existsSync(prog(d)), 'PROGRAM.md must exist under a corrupt .claude layout');
   assert.ok(fs.existsSync(soul(d)), 'SOUL.md must exist under a corrupt .claude layout');
+});
+
+// ── BUG 1 (bulletproof-first): the guaranteed minimal PROGRAM.md is written as the
+//    VERY FIRST action, before autodevDir / settings / media assembly — so even if a
+//    later step (a Windows office scratch-dir media/path issue) throws BEFORE the full
+//    write, the agent still has a non-empty program index at the expected path. ──
+ok('rebuildProfile: minimal PROGRAM.md always lands after a plain rebuild (non-empty)', () => {
+  const d = tmpRoot();
+  rebuildProfile(d);
+  assert.ok(fs.existsSync(prog(d)), 'PROGRAM.md must exist at .autodev/PROGRAM.md');
+  assert.ok(fs.readFileSync(prog(d), 'utf8').trim().length > 0, 'PROGRAM.md must be non-empty');
+});
+
+ok('rebuildProfile: a throw BEFORE the full write still leaves a non-empty PROGRAM.md (bootstrap-first)', () => {
+  const d = tmpRoot();
+  const orig = sessionState.autodevDir;
+  // Throw at the FIRST post-bootstrap step. This propagates out of rebuildProfile
+  // (autodevDir is intentionally unguarded), so the full profile write never runs —
+  // only the bulletproof first-action write can have created the file.
+  sessionState.autodevDir = () => { throw new Error('boom: office scratch-dir path issue (win)'); };
+  try {
+    assert.throws(() => rebuildProfile(d), /boom: office scratch-dir/,
+      'the injected pre-write failure must propagate (proving nothing after the bootstrap ran)');
+    assert.ok(fs.existsSync(prog(d)),
+      'PROGRAM.md must STILL exist — written by the very-first bootstrap action');
+    const body = fs.readFileSync(prog(d), 'utf8');
+    assert.ok(body.trim().length > 0, 'the bootstrapped PROGRAM.md must be non-empty');
+    assert.match(body, /PROGRAM\.md/, 'the bootstrap header must carry the program-index marker');
+    assert.match(body, /SOUL\.md/, 'the bootstrap header must still point at the SOUL identity anchor');
+  } finally {
+    sessionState.autodevDir = orig;
+  }
 });
 
 // ── BUG 2: removeCozempicHooks strips ONLY cozempic entries, preserves others. ──

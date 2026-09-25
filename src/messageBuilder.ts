@@ -383,6 +383,21 @@ ${inlinedSection}`;
  * is updated immediately without waiting for a task run.
  */
 export function rebuildProfile(root: string): void {
+  // BULLETPROOF the program index: write a guaranteed minimal `.autodev/PROGRAM.md`
+  // as the VERY FIRST action — before autodevDir / settings load / media assembly /
+  // skills, any of which could throw on a Windows office scratch dir. The full
+  // content overwrites it below when assembly succeeds; if any later step throws,
+  // this minimal file survives so the agent still has its index. (A missing
+  // PROGRAM.md made grok report "the program index is missing at the expected
+  // path" and skip its protocol.) Best-effort — never throws.
+  const bootstrapPath = path.join(root, AGENT_PROFILE_FILE);
+  try {
+    fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
+    if (!fs.existsSync(bootstrapPath) || fs.statSync(bootstrapPath).size === 0) {
+      fs.writeFileSync(bootstrapPath, minimalProgramHeader(), 'utf8');
+    }
+  } catch { /* the full write below retries; if the FS is unwritable nothing helps */ }
+
   autodevDir(root);
   let settings: ReturnType<typeof loadSettingsForRoot> | undefined;
   try { settings = loadSettingsForRoot(root); } catch { /* ignore */ }

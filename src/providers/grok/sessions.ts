@@ -111,6 +111,22 @@ export function newestGrokSessionDir(cwd: string): string | undefined {
   return best;
 }
 
+/**
+ * The session id of the NEWEST grok session directory for a workspace `root` —
+ * i.e. `path.basename(newestGrokSessionDir(root))`. This is the disk-detection
+ * fallback used when `.autodev/session-state.json` has no stored grok session id
+ * (e.g. it was deleted, or grok minted the dir without our persistence catching
+ * it): the most-recently-active session on disk is what a resume should target.
+ * Honors GROK_HOME. Returns undefined when grok has never run for this cwd.
+ * Read-only; never throws.
+ */
+export function getGrokLatestSessionId(root: string): string | undefined {
+  try {
+    const d = newestGrokSessionDir(path.resolve(root));
+    return d ? path.basename(d) : undefined;
+  } catch { return undefined; }
+}
+
 export interface TranscriptMsg { role: 'user' | 'assistant' | 'system' | 'tool'; text: string; ts?: number }
 
 /** Path to grok's clean structured transcript for a session under a given cwd. */

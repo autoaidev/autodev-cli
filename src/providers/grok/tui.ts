@@ -1269,6 +1269,11 @@ export function sendGrokPrompt(
     const providerId = opts.providerId ?? 'grok-tui';
     if (opts.sessionId) {
       sessionArgs.push('--resume', opts.sessionId);
+      // Persist the id we're resuming so the NEXT turn reads it from
+      // session-state.json directly — this also stamps a session that was only
+      // resolved via disk-detection (getGrokLatestSessionId) into the state file,
+      // making the resume chain stable turn-over-turn. Idempotent.
+      try { saveSessionId(root, providerId, opts.sessionId); } catch { /* best effort */ }
       log(`Grok: resuming session ${opts.sessionId.slice(0, 8)}… (model=${modelLabel})`);
     } else {
       const sid = randomUUID();
@@ -1603,19 +1608,25 @@ export function sendGrokPrompt(
   });
 }
 
-/** grok-cli: stateless — a fresh HEADLESS grok process every task. */
+/**
+ * grok-cli: PERSISTENT — a fresh HEADLESS grok process every turn, but launched
+ * with `--resume <id>` (or a bootstrapping `--session-id`) so grok's own workspace
+ * session — and thus conversation context — carries across turns (user-requested;
+ * grok-cli used to be stateless). Uses the exact same persistent-headless path and
+ * first_token hang-probe as headless grok-tui, so a hung `grok --resume` falls back
+ * to a stateless relaunch instead of hanging the loop.
+ */
 export function sendGrokCliPrompt(
   root: string,
   promptFilePath: string,
+  resolvedSessionId: string | undefined,
   stdoutFile: string,
   exitFile: string,
   log: (msg: string) => void,
   model?: string,
   showOutput?: () => void,
 ): void {
-  sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-    model, showOutput, persist: false, providerId: 'grok-cli',
-  });
+  sendGrokPersistentHeadless(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, 'grok-cli', model, showOutput);
 }
 
 /**
@@ -1689,21 +1700,40 @@ export function sendGrokTuiPrompt(
     runGrokTmuxTurn(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, model, showOutput);
     return;
   }
-  // HEADLESS (no tmux, e.g. Windows). We want PERSISTENCE across turns, so attempt
-  // grok's persistent session (`--resume` when a session id exists). grok 1.0.41's
-  // headless `--resume` can hang the resumed turn (loaded-but-never-answers) → the
-  // 10-min watchdog, so every persistent launch is gated behind a FAST first_token
-  // hang-probe: if grok begins answering within AUTODEV_GROK_RESUME_PROBE_MS the
-  // turn runs normally (persistent, context intact); if not, sendGrokPrompt kills it
-  // and calls onResumeHang to relaunch THIS turn stateless, and we mark the root
-  // non-resumable so later turns skip the probe. The stateless path stays intact as
-  // the safety net (sendGrokPrompt's session-log tailing still forwards
-  // tool/narration events and detects turn_ended either way).
+  // No tmux (e.g. Windows) → the persistent HEADLESS path.
+  sendGrokPersistentHeadless(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, 'grok-tui', model, showOutput);
+}
+
+/**
+ * The persistent HEADLESS grok launch, shared by grok-cli and headless grok-tui.
+ * We want PERSISTENCE across turns, so attempt grok's persistent session
+ * (`--resume` when a session id exists). grok 1.0.41's headless `--resume` can hang
+ * the resumed turn (loaded-but-never-answers) → the 10-min watchdog, so every
+ * persistent launch is gated behind a FAST first_token hang-probe: if grok begins
+ * answering within AUTODEV_GROK_RESUME_PROBE_MS the turn runs normally (persistent,
+ * context intact); if not, sendGrokPrompt kills it and calls onResumeHang to
+ * relaunch THIS turn stateless, and we mark the root non-resumable so later turns
+ * skip the probe. The stateless path stays intact as the safety net (sendGrokPrompt's
+ * session-log tailing still forwards tool/narration events and detects turn_ended
+ * either way).
+ */
+function sendGrokPersistentHeadless(
+  root: string,
+  promptFilePath: string,
+  resolvedSessionId: string | undefined,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  providerId: 'grok-cli' | 'grok-tui',
+  model?: string,
+  showOutput?: () => void,
+): void {
+  const label = providerId === 'grok-cli' ? 'Grok CLI' : 'Grok TUI';
   const PROBE_MS = envNum('AUTODEV_GROK_RESUME_PROBE_MS', 90_000);
-  const persistedSid = resolvedSessionId || getSessionId(root, 'grok-tui');
+  const persistedSid = resolvedSessionId || getSessionId(root, providerId);
   const runStateless = (): void => {
     sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-      model, showOutput, persist: false, providerId: 'grok-tui',
+      model, showOutput, persist: false, providerId,
     });
   };
   // The fallback the probe invokes on a hang: mark this root non-resumable for the
@@ -1715,14 +1745,14 @@ export function sendGrokTuiPrompt(
   };
   const decision = decideHeadlessGrokMode({ hasSessionId: !!persistedSid, resumeBroken: _resumeBroken.has(root) });
   if (decision === 'stateless') {
-    log('Grok TUI: no tmux and --resume marked non-resumable this run — running stateless');
+    log(`${label}: no tmux and --resume marked non-resumable this run — running stateless`);
     runStateless();
     return;
   }
   if (decision === 'resume') {
-    log(`Grok TUI: resuming session ${persistedSid!.slice(0, 8)}… (headless)`);
+    log(`${label}: resuming session ${persistedSid!.slice(0, 8)}… (headless)`);
     sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-      model, showOutput, persist: true, sessionId: persistedSid, providerId: 'grok-tui',
+      model, showOutput, persist: true, sessionId: persistedSid, providerId,
       resumeProbeMs: PROBE_MS, onResumeHang,
     });
     return;
@@ -1730,9 +1760,9 @@ export function sendGrokTuiPrompt(
   // new-persistent — bootstrap a fresh named session so later turns have an id to
   // resume. A fresh `--session-id` isn't a `--resume`, but keep the probe as a
   // belt-and-braces safety net (and it can never exceed the watchdog).
-  log('Grok TUI: starting a new persistent session (headless)');
+  log(`${label}: starting a new persistent session (headless)`);
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-    model, showOutput, persist: true, providerId: 'grok-tui',
+    model, showOutput, persist: true, providerId,
     resumeProbeMs: PROBE_MS, onResumeHang,
   });
 }

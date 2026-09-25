@@ -12,6 +12,7 @@ import { sendClaudeTuiPrompt } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, getLatestCopilotSdkSessionId, setCopilotSettingsToken } from './providers/copilotSdkProvider';
 import { sendOpencodeSdkPrompt } from './providers/opencodeSdkProvider';
 import { sendGrokTuiPrompt } from './providers/grokTuiProvider';
+import { getGrokLatestSessionId } from './providers/grok/sessions';
 import { isOpenCodeHooksInstalled, installOpenCodeHooks } from './openCodeHooksManager';
 import { teeCommand, withExitFile, wrapWithSyntheticHooks, writeCombinedFile } from './core/commandHelpers';
 import { rebuildProfile } from './messageBuilder';
@@ -141,17 +142,18 @@ export async function sendPromptToAi(
       }
     }
 
-    // grok-tui is persistent BY DESIGN (resumes its own workspace session so
-    // context accumulates); grok-cli is stateless BY DESIGN. Both ignore the
-    // global resumeSession toggle — that's the whole point of the two variants.
-    // Every other provider honors resumeSession.
-    const wantResume = providerId === 'grok-tui' ? true
-      : providerId === 'grok-cli' ? false
-      : settings.resumeSession;
+    // BOTH grok variants are persistent (resume their own workspace session so
+    // context accumulates across turns): grok-tui always was, and grok-cli now
+    // resumes too (user-requested). Both ignore the global resumeSession toggle —
+    // grok persistence is independent of it. Every other provider honors it.
+    const isGrok = providerId === 'grok-tui' || providerId === 'grok-cli';
+    const wantResume = isGrok ? true : settings.resumeSession;
     const storedSessionId = wantResume ? getSessionId(root, providerId) : undefined;
 
     let resolvedSessionId = storedSessionId;
-    if (!resolvedSessionId && settings.resumeSession) {
+    // grok resolves its fallback regardless of settings.resumeSession (persistence
+    // is intrinsic to the two variants); everyone else only when resumeSession is on.
+    if (!resolvedSessionId && (settings.resumeSession || isGrok)) {
       if (providerId === 'claude-cli') {
         resolvedSessionId = await probeClaudeSession(root, log);
       } else if (providerId === 'copilot-cli') {
@@ -161,6 +163,11 @@ export async function sendPromptToAi(
         // sessions created before the last "New Session" clear.
         const clearedAt = getSessionClearedAt(root, 'opencode-cli');
         resolvedSessionId = await getLatestOpenCodeSessionId(root, log, clearedAt);
+      } else if (isGrok) {
+        // Disk-detection fallback: the newest grok session dir on disk for this
+        // cwd (works even when session-state.json is absent/stale, and even before
+        // grok's shared sqlite index catches up). Mirrors resolveSession().
+        resolvedSessionId = getGrokLatestSessionId(root);
       }
       if (resolvedSessionId) {
         captureAndSaveSessionId(root, providerId, resolvedSessionId);

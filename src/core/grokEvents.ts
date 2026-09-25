@@ -152,6 +152,22 @@ export function isCleanTurnOutcome(outcome: string | undefined | null): boolean 
   return CLEAN_TURN_OUTCOMES.has(String(outcome || '').toLowerCase());
 }
 
+/**
+ * True if ANY of the given event lines (or objects) is a `first_token` event —
+ * grok's signal that the model has actually STARTED generating this turn. Used by
+ * the headless grok-tui resume hang-probe: grok 1.0.41's headless `--resume` can
+ * LOAD a session (it writes turn_started/phase_changed while alive) but never
+ * answer, so the presence of `first_token` — not merely being alive — is the proof
+ * the resumed prompt is being processed. Pure (no I/O), so the probe is testable.
+ */
+export function scanGrokFirstToken(lines: Array<string | GrokEvent>): boolean {
+  for (const raw of lines) {
+    const ev = typeof raw === 'string' ? parseGrokEventLine(raw) : raw;
+    if (ev && ev.type === 'first_token') { return true; }
+  }
+  return false;
+}
+
 export type GrokTurnEnd = 'clean' | 'error' | null;
 
 /**

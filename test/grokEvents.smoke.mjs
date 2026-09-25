@@ -18,7 +18,7 @@ import assert from 'node:assert';
 
 const {
   parseGrokEventLine, classifyGrokActivity, grokEventToHook,
-  isOfficeMcpToolName, scanGrokTurnEnd, isCleanTurnOutcome, grokAssistantText,
+  isOfficeMcpToolName, scanGrokTurnEnd, scanGrokFirstToken, isCleanTurnOutcome, grokAssistantText,
   GROK_IDLE_PHASES,
 } = await import('../out/core/grokEvents.js');
 
@@ -168,6 +168,17 @@ ok('scanGrokTurnEnd: LAST turn_ended wins (resumed session, prior + current turn
 });
 ok('scanGrokTurnEnd: accepts parsed objects too (pure, no I/O)', () => {
   assert.strictEqual(scanGrokTurnEnd([{ type: 'turn_ended', outcome: 'completed' }]), 'clean');
+});
+
+// ---------------------------------------------------------------------------
+// 5b. scanGrokFirstToken — the headless resume hang-probe signal (grok began
+//     answering). Alive-but-no-first_token is the 1.0.41 --resume hang signature.
+// ---------------------------------------------------------------------------
+ok('scanGrokFirstToken: first_token present → true; alive-but-silent → false', () => {
+  assert.strictEqual(scanGrokFirstToken([L.turnStarted, L.phaseWaiting, L.firstToken]), true);
+  assert.strictEqual(scanGrokFirstToken([L.turnStarted, L.phaseWaiting]), false); // the hang
+  assert.strictEqual(scanGrokFirstToken([]), false);
+  assert.strictEqual(scanGrokFirstToken([{ type: 'first_token' }]), true);
 });
 
 // ---------------------------------------------------------------------------

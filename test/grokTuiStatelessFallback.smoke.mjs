@@ -1,49 +1,52 @@
-// Offline smoke — grok-tui degrades to the STATELESS path when tmux is absent.
+// Offline smoke — grok-tui headless routing: tmux vs headless, and the headless
+// resume/bootstrap/stateless decision.
 //
-// ROOT CAUSE (proven by live repro): grok-tui runs a persistent session via
-// `grok --resume <sid> --prompt-file`. grok 1.0.41's HEADLESS `--resume` never
-// completes the turn → 10-min watchdog → SIGKILL → false StopFailure → retry
-// forever (hang on Windows, which has no tmux). grok-cli (stateless, no --resume)
-// works on the same box.
+// HISTORY: 1.4.178 made headless grok-tui UNCONDITIONALLY stateless because grok
+// 1.0.41's headless `grok --resume` could hang the resumed turn (loaded-but-never-
+// answers → 10-min watchdog → false StopFailure → retry forever) on boxes with no
+// tmux (e.g. Windows). That fixed the hang but LOST cross-turn context ("session=new"
+// every turn). 1.4.180 restores persistence SAFELY: headless now STARTS with
+// `--resume` when a session id exists, guarded by a fast first_token hang-probe that
+// falls back to stateless (and marks the root non-resumable) if the resume hangs.
 //
-// FIX: without tmux, grok-tui must run STATELESS (persist:false → no
-// --resume/--session-id), exactly grok-cli's working invocation. The persistent
-// model is only reliable with a live tmux pane.
-//
-// This asserts the pure decision helper decideGrokRunMode:
-//   grok-tui + no tmux → stateless (persist:false, no tmux)
-//   grok-tui + tmux    → persistent tmux path (useTmux:true)
-//   grok-cli           → stateless (persist:false, never tmux)
+// This asserts the pure decision helpers (no process spawn):
+//   decideGrokRunMode      — grok-tui+tmux → tmux path; else → headless path.
+//   decideHeadlessGrokMode — headless launch choice: resume / new-persistent / stateless.
 //
 // Run: node test/grokTuiStatelessFallback.smoke.mjs   (after npm run build)
 import assert from 'node:assert';
 
-const { decideGrokRunMode } = await import('../out/providers/grok/tui.js');
+const { decideGrokRunMode, decideHeadlessGrokMode } = await import('../out/providers/grok/tui.js');
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
 
-console.log('grok-tui: stateless fallback when tmux unavailable');
+console.log('grok-tui: headless routing (tmux vs headless; resume/bootstrap/stateless)');
 
-ok('grok-tui + NO tmux → stateless (persist:false, no --resume path)', () => {
-  const m = decideGrokRunMode({ tmuxAvailable: false, providerId: 'grok-tui' });
-  assert.strictEqual(m.useTmux, false, 'must not use tmux when tmux is absent');
-  assert.strictEqual(m.persist, false, 'headless grok-tui must be stateless (no --resume/--session-id)');
+// --- decideGrokRunMode: only grok-tui WITH tmux takes the persistent tmux path ---
+ok('grok-tui + tmux → tmux persistent path (useTmux:true)', () => {
+  assert.strictEqual(decideGrokRunMode({ tmuxAvailable: true, providerId: 'grok-tui' }).useTmux, true);
+});
+ok('grok-tui + NO tmux → headless path (useTmux:false)', () => {
+  assert.strictEqual(decideGrokRunMode({ tmuxAvailable: false, providerId: 'grok-tui' }).useTmux, false);
+});
+ok('grok-cli → never uses tmux (useTmux:false either way)', () => {
+  assert.strictEqual(decideGrokRunMode({ tmuxAvailable: false, providerId: 'grok-cli' }).useTmux, false);
+  assert.strictEqual(decideGrokRunMode({ tmuxAvailable: true, providerId: 'grok-cli' }).useTmux, false);
 });
 
-ok('grok-tui + tmux → persistent tmux path (useTmux:true)', () => {
-  const m = decideGrokRunMode({ tmuxAvailable: true, providerId: 'grok-tui' });
-  assert.strictEqual(m.useTmux, true, 'grok-tui stays persistent where tmux exists');
-  assert.strictEqual(m.persist, true);
+// --- decideHeadlessGrokMode: the headless launch choice (persistence restored) ---
+ok('headless + stored session id → RESUME (persistent, pre-1.4.178 behavior)', () => {
+  assert.strictEqual(decideHeadlessGrokMode({ hasSessionId: true, resumeBroken: false }), 'resume');
+});
+ok('headless + no session id → NEW-PERSISTENT (bootstrap a fresh named session)', () => {
+  assert.strictEqual(decideHeadlessGrokMode({ hasSessionId: false, resumeBroken: false }), 'new-persistent');
+});
+ok('headless + resume marked broken this run → STATELESS (skip the probe)', () => {
+  // Once the hang-probe proved --resume broken this run, later turns must NOT pay
+  // the ~90s probe again — go straight to the proven stateless invocation.
+  assert.strictEqual(decideHeadlessGrokMode({ hasSessionId: true, resumeBroken: true }), 'stateless');
+  assert.strictEqual(decideHeadlessGrokMode({ hasSessionId: false, resumeBroken: true }), 'stateless');
 });
 
-ok('grok-cli → stateless regardless of tmux (never uses tmux)', () => {
-  const noTmux = decideGrokRunMode({ tmuxAvailable: false, providerId: 'grok-cli' });
-  const withTmux = decideGrokRunMode({ tmuxAvailable: true, providerId: 'grok-cli' });
-  assert.strictEqual(noTmux.useTmux, false);
-  assert.strictEqual(noTmux.persist, false);
-  assert.strictEqual(withTmux.useTmux, false, 'grok-cli never routes through the tmux persistent path');
-  assert.strictEqual(withTmux.persist, false);
-});
-
-console.log(`\ngrok-tui stateless fallback: ${pass} checks passed`);
+console.log(`\ngrok-tui headless routing: ${pass} checks passed`);

@@ -50,7 +50,7 @@ import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState'
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { killProcessTree } from '../../core/killProcessTree';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
-import { scanGrokTurnEnd, grokLoopForwardHooks } from '../../core/grokEvents';
+import { scanGrokTurnEnd, scanGrokFirstToken, grokLoopForwardHooks } from '../../core/grokEvents';
 import { newestGrokSessionDir } from './sessions';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 import type { ProviderId } from '../../providers';
@@ -89,6 +89,16 @@ const _busyRoots = new Set<string>();
 
 /** Active HEADLESS child processes by root — grok-cli + tmux-unavailable fallback. */
 const _activeChildren = new Map<string, child_process.ChildProcess>();
+
+/**
+ * Roots whose HEADLESS `grok --resume` has proven to hang THIS run (loaded the
+ * session but the first_token hang-probe timed out). Once a root is in here the
+ * headless path skips straight to stateless instead of paying the ~90s probe on
+ * every turn. Reset when the grok session is closed (a new loop/run gets a clean
+ * slate and re-attempts resume once). Only ever consulted on the headless (no
+ * tmux) path — the tmux persistent path is unaffected.
+ */
+const _resumeBroken = new Set<string>();
 
 /** Live tmux-backed grok sessions by root (persistent grok-tui). */
 interface TmuxSession {
@@ -1229,6 +1239,16 @@ interface GrokRunOptions {
   persist?: boolean;
   sessionId?: string;
   providerId?: ProviderId;
+  /**
+   * Headless grok-tui resume hang-probe. When > 0 (with `onResumeHang`), watch
+   * grok's events.jsonl for a `first_token` within this many ms; if none appears
+   * (the grok 1.0.41 headless `--resume` hang: loaded-but-never-answers), kill
+   * this grok WITHOUT writing the exit file and invoke `onResumeHang` so the
+   * caller relaunches THIS turn stateless. A first_token (or any turn_ended) makes
+   * the probe a no-op and the turn runs normally. Must stay under the watchdog.
+   */
+  resumeProbeMs?: number;
+  onResumeHang?: () => void;
 }
 
 export function sendGrokPrompt(
@@ -1351,6 +1371,12 @@ export function sendGrokPrompt(
   let _endSeen = false;
   let _forcedExit: number | null = null;   // set by a session-log turn_ended finish
   let _grokFilesActive = false;            // once true, session logs own narration
+  // Headless resume hang-probe state (see resumeProbeMs / onResumeHang below). The
+  // probe window is the caller-supplied value (sendGrokTuiPrompt reads the env);
+  // 0 (all stateless / non-probed calls) leaves the probe disarmed.
+  const RESUME_PROBE_MS = Math.max(0, opts.resumeProbeMs ?? 0);
+  let _sawFirstToken = false;              // grok emitted first_token → resume works
+  let _resumeAbandoned = false;            // probe killed this grok; a stateless relaunch owns the turn
   const _grokEmittedIds = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
   const _grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
   // Snapshot the pre-turn session so the tailer forwards ONLY this turn's records:
@@ -1439,6 +1465,9 @@ export function sendGrokPrompt(
     _grokFilesActive = true;              // session logs now own narration
     const ev = drainNewJsonlLines(evFile, _evOff); _evOff = ev.offset;
     const ch = drainNewJsonlLines(chFile, _chOff); _chOff = ch.offset;
+    // Resume hang-probe signal: grok emitted first_token → the (resumed) prompt is
+    // being answered, so the probe below leaves the turn to run normally.
+    if (!_sawFirstToken && scanGrokFirstToken(ev.lines)) { _sawFirstToken = true; }
     // Forward native tool calls + assistant narration (mcp__/office tools skipped,
     // deduped per-root by tool_call id, secret-redacted before it leaves the box).
     for (const h of grokLoopForwardHooks(ev.lines, ch.lines, _grokEmittedIds)) {
@@ -1463,6 +1492,41 @@ export function sendGrokPrompt(
   const GROK_FILE_POLL_MS = envNum('AUTODEV_GROK_FILE_POLL_MS', 900);
   const grokFilePoll = GROK_FILE_POLL_MS > 0 ? setInterval(pumpGrokSessionFiles, GROK_FILE_POLL_MS) : null;
   grokFilePoll?.unref?.();
+
+  // ── Headless resume hang-probe ──────────────────────────────────────────────
+  // grok 1.0.41's headless `--resume` can LOAD the session (stays alive, writes
+  // turn_started/phase_changed) yet never answer → the 10-min watchdog → false
+  // StopFailure. When armed (resumeProbeMs > 0 + onResumeHang, i.e. a persistent
+  // grok-tui launch), fire ONE timer at resumeProbeMs: a first_token by then means
+  // the resumed prompt is being processed (leave the turn running); NO first_token
+  // means the hang — kill this grok WITHOUT writing the exit file and hand the SAME
+  // turn to a fresh stateless relaunch (onResumeHang), so the task still completes.
+  // A turn_ended handled by pumpGrokSessionFiles (clean or error) sets _endSeen/killed
+  // first, making the probe a no-op. Well under MAX_RUN_MS so it never races the
+  // watchdog.
+  let resumeProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  if (RESUME_PROBE_MS > 0 && opts.onResumeHang) {
+    resumeProbeTimer = setTimeout(() => {
+      // Final drain to catch a first_token / turn_ended written between polls.
+      try { pumpGrokSessionFiles(); } catch { /* best effort */ }
+      if (_endSeen || killed || _resumeAbandoned) { return; } // turn already resolved
+      if (resumeProbeVerdict({ sawFirstToken: _sawFirstToken, elapsedMs: RESUME_PROBE_MS, probeMs: RESUME_PROBE_MS }) === 'ok') {
+        return; // grok is answering — resume works; let the persistent turn run
+      }
+      // The hang: kill grok and relaunch this turn stateless. Mark abandoned FIRST
+      // so this child's `close` skips writing the exit file / clearing busy state —
+      // the stateless relaunch (invoked below) owns the turn's plumbing now.
+      _resumeAbandoned = true;
+      log(`Grok TUI: headless --resume produced no output in ${Math.round(RESUME_PROBE_MS / 1000)}s — falling back to stateless for this turn (session marked non-resumable)`);
+      if (grokFilePoll) { clearInterval(grokFilePoll); }
+      if (watchdog) { clearTimeout(watchdog); }
+      killed = true; // suppress the watchdog's own kill/report
+      if (child.pid) { killProcessTree(child.pid); }
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      try { opts.onResumeHang!(); } catch (e) { log(`Grok TUI: stateless relaunch failed: ${(e as Error)?.message ?? String(e)}`); }
+    }, RESUME_PROBE_MS);
+    resumeProbeTimer.unref?.();
+  }
 
   rl.on('line', (line: string) => {
     if (!line.trim()) { return; }
@@ -1509,6 +1573,17 @@ export function sendGrokPrompt(
   child.on('close', (code: number | null) => {
     if (watchdog) { clearTimeout(watchdog); }
     if (grokFilePoll) { clearInterval(grokFilePoll); }
+    if (resumeProbeTimer) { clearTimeout(resumeProbeTimer); resumeProbeTimer = null; }
+    if (_resumeAbandoned) {
+      // The resume hang-probe killed this grok and a fresh stateless run has
+      // already taken over THIS turn (it re-set _activeChildren/_busyRoots and owns
+      // the exit file). Do NOT write the exit file, clear busy state, or delete the
+      // active child here — that would clobber the relaunch. Just release our own
+      // stream handles and bow out.
+      errRl?.close();
+      rl.close();
+      return;
+    }
     try { pumpGrokSessionFiles(); } catch { /* best-effort final drain of trailing records */ }
     flushOutputLine();
     flushActivity();
@@ -1549,25 +1624,54 @@ export function sendGrokCliPrompt(
  * headless spawn (with --resume) when tmux is unavailable so nothing regresses.
  */
 /**
- * Pure decision for how a grok turn should run, given whether tmux exists and
- * the provider id. Extracted so the "no tmux ⇒ stateless" rule is unit-testable
- * without spawning a process.
+ * Pure decision for whether a grok turn uses the tmux persistent path, given
+ * whether tmux exists and the provider id. Extracted so the routing is
+ * unit-testable without spawning a process.
  *
- * - grok-tui + tmux    → { useTmux: true }  (persistent live pane; context accretes)
- * - grok-tui + no tmux → { persist: false } STATELESS. The persistent model needs a
- *   live tmux pane; headless it relies on `grok --resume`, which regressed in
- *   grok 1.0.41 (the resumed turn never completes → 10-min watchdog → SIGKILL →
- *   false StopFailure → retry forever). Stateless is exactly grok-cli's working
- *   invocation, so it is the safe degrade (e.g. on Windows, which has no tmux).
- * - grok-cli           → { persist: false } always stateless (never uses tmux).
+ * - grok-tui + tmux    → useTmux: true  (persistent live pane; context accretes)
+ * - grok-tui + no tmux → useTmux: false (HEADLESS path — persistence handled there
+ *   via `grok --resume` behind the first_token hang-probe; see decideHeadlessGrokMode)
+ * - grok-cli           → useTmux: false always (never uses tmux)
  */
 export function decideGrokRunMode(
   opts: { tmuxAvailable: boolean; providerId: string },
-): { useTmux: boolean; persist: boolean } {
-  if (opts.providerId === 'grok-tui' && opts.tmuxAvailable) {
-    return { useTmux: true, persist: true };
-  }
-  return { useTmux: false, persist: false };
+): { useTmux: boolean } {
+  return { useTmux: opts.providerId === 'grok-tui' && opts.tmuxAvailable };
+}
+
+/**
+ * Pure decision for how the HEADLESS grok-tui path (no tmux) should launch this
+ * turn. Extracted so the resume/bootstrap/stateless routing is unit-testable.
+ *
+ * - resumeBroken (this run) → 'stateless': `--resume` already hung this run, so
+ *   skip straight to the proven stateless invocation (no repeated ~90s probe).
+ * - a stored session id      → 'resume': attempt persistent `grok --resume <id>`
+ *   (the pre-1.4.178 behavior), gated by the first_token hang-probe.
+ * - no stored id             → 'new-persistent': bootstrap persistence with a fresh
+ *   named session (`--session-id`, mints + persists a UUID; NOT `--resume`, so it
+ *   can't hit the resume-hang), also behind the probe as a safety net.
+ */
+export function decideHeadlessGrokMode(
+  args: { hasSessionId: boolean; resumeBroken: boolean },
+): 'resume' | 'new-persistent' | 'stateless' {
+  if (args.resumeBroken) { return 'stateless'; }
+  return args.hasSessionId ? 'resume' : 'new-persistent';
+}
+
+/**
+ * Pure verdict for the headless resume hang-probe.
+ *   'ok'       — grok emitted first_token → the resumed prompt is being answered;
+ *                let the persistent turn run to its normal turn-end.
+ *   'fallback' — the probe window elapsed with NO first_token → the grok 1.0.41
+ *                headless `--resume` hang; kill grok and relaunch stateless.
+ *   'wait'     — neither yet (window not elapsed and no first_token) → keep waiting.
+ */
+export function resumeProbeVerdict(
+  args: { sawFirstToken: boolean; elapsedMs: number; probeMs: number },
+): 'ok' | 'fallback' | 'wait' {
+  if (args.sawFirstToken) { return 'ok'; }
+  if (args.probeMs > 0 && args.elapsedMs >= args.probeMs) { return 'fallback'; }
+  return 'wait';
 }
 
 export function sendGrokTuiPrompt(
@@ -1585,14 +1689,51 @@ export function sendGrokTuiPrompt(
     runGrokTmuxTurn(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, model, showOutput);
     return;
   }
-  // HEADLESS (no tmux, e.g. Windows): run STATELESS, not persistent. grok's
-  // headless `--resume` is unreliable (grok 1.0.41 hangs the resumed turn), so
-  // fall back to grok-cli's proven stateless invocation. Each turn is its own
-  // session; sendGrokPrompt's session-log tailing (newestGrokSessionDir) still
-  // forwards tool/narration events and detects turn_ended when persist:false.
-  log('Grok TUI: no tmux — running stateless (persistent session requires tmux; grok headless --resume is unreliable)');
+  // HEADLESS (no tmux, e.g. Windows). We want PERSISTENCE across turns, so attempt
+  // grok's persistent session (`--resume` when a session id exists). grok 1.0.41's
+  // headless `--resume` can hang the resumed turn (loaded-but-never-answers) → the
+  // 10-min watchdog, so every persistent launch is gated behind a FAST first_token
+  // hang-probe: if grok begins answering within AUTODEV_GROK_RESUME_PROBE_MS the
+  // turn runs normally (persistent, context intact); if not, sendGrokPrompt kills it
+  // and calls onResumeHang to relaunch THIS turn stateless, and we mark the root
+  // non-resumable so later turns skip the probe. The stateless path stays intact as
+  // the safety net (sendGrokPrompt's session-log tailing still forwards
+  // tool/narration events and detects turn_ended either way).
+  const PROBE_MS = envNum('AUTODEV_GROK_RESUME_PROBE_MS', 90_000);
+  const persistedSid = resolvedSessionId || getSessionId(root, 'grok-tui');
+  const runStateless = (): void => {
+    sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
+      model, showOutput, persist: false, providerId: 'grok-tui',
+    });
+  };
+  // The fallback the probe invokes on a hang: mark this root non-resumable for the
+  // rest of the run, then relaunch this same turn stateless (reusing the SAME
+  // stdout/exit-file plumbing) so the task still completes.
+  const onResumeHang = (): void => {
+    _resumeBroken.add(root);
+    runStateless();
+  };
+  const decision = decideHeadlessGrokMode({ hasSessionId: !!persistedSid, resumeBroken: _resumeBroken.has(root) });
+  if (decision === 'stateless') {
+    log('Grok TUI: no tmux and --resume marked non-resumable this run — running stateless');
+    runStateless();
+    return;
+  }
+  if (decision === 'resume') {
+    log(`Grok TUI: resuming session ${persistedSid!.slice(0, 8)}… (headless)`);
+    sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
+      model, showOutput, persist: true, sessionId: persistedSid, providerId: 'grok-tui',
+      resumeProbeMs: PROBE_MS, onResumeHang,
+    });
+    return;
+  }
+  // new-persistent — bootstrap a fresh named session so later turns have an id to
+  // resume. A fresh `--session-id` isn't a `--resume`, but keep the probe as a
+  // belt-and-braces safety net (and it can never exceed the watchdog).
+  log('Grok TUI: starting a new persistent session (headless)');
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-    model, showOutput, persist: false, providerId: 'grok-tui',
+    model, showOutput, persist: true, providerId: 'grok-tui',
+    resumeProbeMs: PROBE_MS, onResumeHang,
   });
 }
 
@@ -1652,6 +1793,9 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
   }
   _busyRoots.delete(root);
   _emittedToolIds.delete(root);
+  // A close marks a run boundary — clear the non-resumable mark so the next
+  // loop/run re-attempts persistent --resume once (behind the hang-probe).
+  _resumeBroken.delete(root);
 }
 
 /** Kill all live grok sessions — called on SDK/extension shutdown. */
@@ -1667,6 +1811,7 @@ export function closeAllGrokTuiSessions(): void {
   _tmuxSessions.clear();
   _busyRoots.clear();
   _emittedToolIds.clear();
+  _resumeBroken.clear();
 }
 
 // ---------------------------------------------------------------------------

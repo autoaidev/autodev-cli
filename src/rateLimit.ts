@@ -64,6 +64,16 @@ const AUTH_PHRASES: ReadonlyArray<RegExp> = [
   // "not logged in / authenticated" only when paired with a re-auth instruction
   // (a bare mention appears in ordinary code the agent writes).
   /not (logged in|authenticated)[^\n]{0,40}(log ?in|authenticate|run|sign in|\/login)/i,
+  // grok's auth-failure surface. The grok-tui provider writes a "reauthentication
+  // required — …" sentinel to its stdout capture on an auth failure (auth.json
+  // missing / silent-refresh Failed(ManualLogin) / a login gate); grok's own
+  // manual-login outcome is `Failed(ManualLogin)`. Both are high-signal error
+  // strings that never appear in ordinary assistant prose, and grok auth-failure
+  // exits are non-zero (so this is only consulted on a real failure). Without
+  // this, even the existing grok reauth sentinel was NOT matched by AuthDetector,
+  // so a logged-out grok never reached the loop's reauth PAUSE (🔑 state).
+  /reauthentication required/i,                          // grok-tui reauth sentinel
+  /Failed\(\s*ManualLogin\s*\)/i,                         // grok manual-login outcome
 ];
 
 export class AuthDetector {

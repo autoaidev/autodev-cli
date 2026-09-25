@@ -48,6 +48,7 @@ import { eventTypeFor } from '../../hookEventNormalizer';
 import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
+import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
 import type { ProviderId } from '../../providers';
 
 // ---------------------------------------------------------------------------
@@ -234,10 +235,32 @@ function stripAnsi(s: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Markers that mean grok hit the OAuth/expired-token gate instead of a prompt.
- * The loop must treat this as reauth, NOT a hung turn.
+ * Markers that mean grok hit the OAuth/expired-token gate or a manual-login /
+ * failed-refresh auth failure instead of doing work. The loop must treat this
+ * as reauth, NOT a hung turn. Sourced from ./authClassify (shared with the unit
+ * tests) — broadened beyond the old login-gate-only set to also catch grok's
+ * `Failed(ManualLogin)` / failed silent-refresh signals that previously slipped
+ * through as a plain turn-failure (or a false idle).
  */
-const REAUTH_MARKERS = /waiting for approval|approve in your browser|sign(?:ing)? in to grok|finish signing in|device code|please (?:log ?in|sign ?in)/i;
+const REAUTH_MARKERS = GROK_AUTH_MARKERS;
+
+/**
+ * True when grok's credential file (`~/.grok/auth.json`) exists and is
+ * non-empty. The PROVEN root cause of the failing Windows agent is this file
+ * intermittently going MISSING → grok's silent token refresh fails
+ * (`Failed(ManualLogin)`) → the turn dies. A missing/empty auth.json is a
+ * deterministic auth-failure signal we can check directly, independent of what
+ * the pane happens to render. `GROK_AUTH_JSON` overrides the path for non-default
+ * installs. Absence is only USED to disambiguate an actual turn-failure/death —
+ * never to flag a healthy, still-producing turn.
+ */
+function grokAuthPresent(): boolean {
+  try {
+    const p = process.env['GROK_AUTH_JSON'] || path.join(os.homedir(), '.grok', 'auth.json');
+    const st = fs.statSync(p);
+    return st.isFile() && st.size > 0;
+  } catch { return false; }
+}
 
 /**
  * "grok finished this turn" affordance — CALIBRATED against grok 4.5 build 0.2.93:
@@ -812,6 +835,25 @@ function runGrokTmuxTurn(
     try { fs.writeFileSync(exitFile, `${code}\n`, 'utf8'); } catch { /* ignore */ }
   };
 
+  // Surface a grok AUTH failure (needs re-login) LOUDLY and consistently on both
+  // the loop and operate paths:
+  //   - a first-class `reauth_required` hook → the operate bridge forwards it to
+  //     the office (🔑 needs-auth state) and cliExit classifies it directly;
+  //   - the GROK_REAUTH_MESSAGE sentinel in the stdout capture → the loop's
+  //     AuthDetector raises an AuthError and takes its dedicated reauth PAUSE
+  //     (reauth_required webhook + hooks-events line), instead of a generic fail;
+  //   - finish(1, 'reauth_required') → cliExit maps it to a NON-retryable
+  //     hard-failure (shouldRetryHardFail excludes it), so a missing token is
+  //     never hammered with blind retries — the user is asked to re-login.
+  const finishReauth = (where: string): void => {
+    log(`Grok TUI: reauthentication required — ${where}`);
+    _emitGrokHook(root, 'reauth_required', {
+      message: GROK_REAUTH_MESSAGE, title: 'Authentication required', tool_name: '',
+    });
+    try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: ${GROK_REAUTH_MESSAGE}]\n`, 'utf8'); } catch { /* ignore */ }
+    finish(1, 'reauth_required');
+  };
+
   void (async () => {
     let sess!: TmuxSession;
     let justLaunched = false;
@@ -879,9 +921,7 @@ function runGrokTmuxTurn(
         }
       }
       if (reauth) {
-        log('Grok TUI: reauth required (OAuth gate at startup)');
-        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
-        finish(1, 'reauth_required');
+        finishReauth('auth gate at startup');
         return;
       }
       if (!died) {
@@ -900,6 +940,14 @@ function runGrokTmuxTurn(
       sidForLaunch = undefined; // force a fresh mint on the retry
     }
     if (!startupOk) {
+      // A session that keeps dying during startup while grok's credentials are
+      // ABSENT is an auth failure (silent refresh → Failed(ManualLogin) → exit),
+      // not a transient startup race — surface it as reauth so the user re-logs in
+      // instead of the loop retrying a login it can never satisfy.
+      if (!grokAuthPresent()) {
+        finishReauth('auth.json missing — session exited during startup');
+        return;
+      }
       try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session kept exiting during startup — a fresh session will be tried next turn]\n`, 'utf8'); } catch { /* ignore */ }
       finish(1, 'startup-exit');
       return;
@@ -946,8 +994,16 @@ function runGrokTmuxTurn(
 
       // Session died mid-turn (grok crashed / was killed).
       if (!hasSession(sess.name)) {
-        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited]\n`, 'utf8'); } catch { /* ignore */ }
         _tmuxSessions.delete(root);
+        // A mid-turn death with grok's credentials ABSENT is the proven
+        // auth-failure signature (auth.json vanished → silent refresh failed →
+        // grok exited). Surface it as reauth, not a generic session-exit, so the
+        // user is asked to re-login instead of the turn being retried blindly.
+        if (!grokAuthPresent()) {
+          finishReauth('auth.json missing — grok exited mid-turn');
+          return;
+        }
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: session exited]\n`, 'utf8'); } catch { /* ignore */ }
         finish(1, 'session-exit');
         return;
       }
@@ -982,11 +1038,27 @@ function runGrokTmuxTurn(
       //     SAME transcript, on an independent offset.
       toolOffset = scanGrokToolEvents(root, chatPath, toolOffset, pendingTools);
 
-      // 2) Snapshot for detection (also catches a mid-turn reauth prompt).
+      // 2) Snapshot for detection (also catches a mid-turn auth failure and
+      //    grok's native "Turn failed: Grok stopped before this turn finished"
+      //    banner). classifyGrokTurn disambiguates the two using the pane text +
+      //    grok's credential-file presence:
+      //      - 'reauth'      → auth gate / Failed(ManualLogin) / a turn-failure
+      //        while auth.json is absent → surface reauth (NEVER retried).
+      //      - 'turn-failed' → grok's process blipped mid-turn with credentials
+      //        present → a TRANSIENT hard-failure that IS retried with backoff by
+      //        the loop (shouldRetryHardFail treats it as retryable). Previously
+      //        this banner had no detector, so the pane went quiet and the turn
+      //        was misread as a clean idle (a FALSE success that lost the task).
       const snap = capturePane(sess.name);
-      if (REAUTH_MARKERS.test(snap)) {
-        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: reauthentication required — please login]\n`, 'utf8'); } catch { /* ignore */ }
-        finish(1, 'reauth_required');
+      const turnClass = classifyGrokTurn(snap, grokAuthPresent());
+      if (turnClass === 'reauth') {
+        finishReauth('auth failure detected mid-turn');
+        return;
+      }
+      if (turnClass === 'turn-failed') {
+        log('Grok TUI: grok reported a turn failure (transient) — surfacing for retry');
+        try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: turn failed — grok stopped before this turn finished (transient); the loop will retry]\n`, 'utf8'); } catch { /* ignore */ }
+        finish(1, 'turn-failed');
         return;
       }
       // Backstop: the project-directory picker appears AFTER the first prompt is

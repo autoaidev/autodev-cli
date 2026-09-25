@@ -58,6 +58,11 @@ export interface CliExitContext {
 const FAIL_REASONS = new Set<string>([
   'reauth_required', 'startup-exit', 'session-exit', 'launch-failed',
   'watchdog', 'error', 'session.error',
+  // grok's native "Turn failed: Grok stopped before this turn finished" banner
+  // (process exited/restarted mid-turn) with credentials present — a TRANSIENT
+  // provider failure. Precise label; retryable via shouldRetryHardFail. Without
+  // this, the turn used to be misread as a clean idle (a false green).
+  'turn-failed',
 ]);
 
 /**

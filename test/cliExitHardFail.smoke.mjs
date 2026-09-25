@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { CliExitHandler } from '../out/cliExit.js';
 import { parseTodo } from '../out/todo.js';
+import { shouldRetryHardFail } from '../out/core/retryBackoff.js';
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -90,6 +91,21 @@ ok('grok launch-failed → hard_fail', () => {
   const events = [ev('SessionEnd', { reason: 'launch-failed' })];
   const { handler } = makeHandler('- [ ] build the thing', events);
   assert.equal(handler.decide({ exitedNonZero: true }).reason, 'launch-failed');
+});
+
+// grok's native "Turn failed: Grok stopped before this turn finished" banner
+// (transient — process exited/restarted mid-turn, credentials present) now
+// classifies as a hard_fail with the precise 'turn-failed' reason. It used to
+// slip through as a clean idle (a false green). It MUST be RETRYABLE (distinct
+// from reauth): shouldRetryHardFail('turn-failed') is true.
+ok('grok transient turn-failed → hard_fail (retryable reason, not reauth)', () => {
+  const events = [ev('StopFailure', { exit_code: 1 }), ev('SessionEnd', { reason: 'turn-failed' })];
+  const { handler } = makeHandler('- [ ] build the thing', events);
+  const d = handler.decide({ exitedNonZero: true });
+  assert.equal(d.kind, 'hard_fail');
+  assert.equal(d.reason, 'turn-failed');
+  assert.equal(shouldRetryHardFail('turn-failed', 1, 10), true, 'turn-failed is retried');
+  assert.equal(shouldRetryHardFail('reauth_required', 1, 10), false, 'reauth is never retried');
 });
 
 ok('opencode session.error (exit 0 + [ERROR] stdout sentinel) → hard_fail', () => {

@@ -1428,6 +1428,20 @@ export class TaskLoopRunner {
         if (provider === 'opencode-sdk') {
           return isOpencodeSdkBusy(this._workspaceRoot);
         }
+        // grok-tui: like claude-tui, it runs a PERSISTENT session (tmux PTY, or a
+        // headless `grok --resume` spawn when tmux is unavailable) whose turn is
+        // tracked by an in-memory busy flag cleared at the turn's finish() on EVERY
+        // exit — clean, code!=0, AND the loop's sentinel-unblock (forceIdleGrokTui).
+        // Previously grok-tui fell through to the exit-file heuristic below, whose
+        // `catch { return true }` (file absent) or an empty/rotated per-message exit
+        // file could read STALE-TRUE after a grok exit — so the next task logged
+        // "▶ Task […]" but hit `if (cliIsRunning) skip send` (line ~1701) and grok
+        // was NEVER relaunched: the agent sat dead. The busy flag is the honest
+        // signal (false after any exit → the next dispatch sends → grok relaunches
+        // with --resume, context intact), so use it here exactly like claude-tui.
+        if (provider === 'grok-tui') {
+          return isGrokTuiBusy(this._workspaceRoot);
+        }
         // opencode-cli may run on a remote machine (not launched by this extension).
         // The JSONL hooks file is the authoritative source of truth: if the last
         // event is a terminal Stop/StopFailure/SessionEnd (or the file is stale),

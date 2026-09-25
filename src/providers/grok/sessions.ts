@@ -71,6 +71,46 @@ export function listAllGrokSessions(): Array<{ id: string; title: string; update
   } catch { return []; } finally { try { db?.close(); } catch { /* ignore */ } }
 }
 
+/** grok's sessions base dir (honors GROK_HOME), e.g. ~/.grok/sessions. */
+function grokSessionsBase(): string {
+  const base = process.env['GROK_HOME'] || path.join(os.homedir(), '.grok');
+  return path.join(base, 'sessions');
+}
+
+/** The per-session dir for `cwd`+`sessionId`: <base>/<encodeURIComponent(cwd)>/<id>. */
+export function grokSessionDirFor(cwd: string, sessionId: string): string {
+  return path.join(grokSessionsBase(), encodeURIComponent(cwd), sessionId);
+}
+
+/**
+ * Resolve the NEWEST grok session directory for a workspace `cwd` — the folder
+ * holding that session's events.jsonl / chat_history.jsonl. Picks the most
+ * recently active session by the mtime of its events.jsonl (falling back to
+ * chat_history.jsonl, then the dir itself), so a resumed/active session is found
+ * even before grok's shared sqlite index catches up. Honors GROK_HOME. Returns
+ * undefined when grok has never run for this cwd. Read-only; never throws.
+ */
+export function newestGrokSessionDir(cwd: string): string | undefined {
+  let encDir = '';
+  try { encDir = path.join(grokSessionsBase(), encodeURIComponent(path.resolve(cwd))); } catch { encDir = path.join(grokSessionsBase(), encodeURIComponent(cwd)); }
+  let entries: string[];
+  try { entries = fs.readdirSync(encDir); } catch { return undefined; }
+  let best: string | undefined;
+  let bestMs = -1;
+  for (const id of entries) {
+    const dir = path.join(encDir, id);
+    let stat: fs.Stats | undefined;
+    try { if (!fs.statSync(dir).isDirectory()) { continue; } } catch { continue; }
+    const candidates = [path.join(dir, 'events.jsonl'), path.join(dir, 'chat_history.jsonl'), dir];
+    let ms = -1;
+    for (const c of candidates) {
+      try { stat = fs.statSync(c); ms = stat.mtimeMs; break; } catch { /* try next */ }
+    }
+    if (ms > bestMs) { bestMs = ms; best = dir; }
+  }
+  return best;
+}
+
 export interface TranscriptMsg { role: 'user' | 'assistant' | 'system' | 'tool'; text: string; ts?: number }
 
 /** Path to grok's clean structured transcript for a session under a given cwd. */

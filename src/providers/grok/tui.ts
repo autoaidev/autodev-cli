@@ -49,6 +49,7 @@ import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
+import { scanGrokTurnEnd } from '../../core/grokEvents';
 import type { ProviderId } from '../../providers';
 
 // ---------------------------------------------------------------------------
@@ -974,6 +975,40 @@ function runGrokTmuxTurn(
     let toolOffset = chatOffset;
     const pendingTools = new Map<string, { name: string; input: Record<string, unknown> }>();
 
+    // FIX 3 — clean-turn CORROBORATION from grok's OWN events.jsonl (same session
+    // dir as chat_history.jsonl). The pane "Worked for N.Ns." DONE_MARKER is
+    // calibrated for grok 4.5; grok 4.7's clean turn-end may not print it, so a
+    // finished turn could hang until the 45s quiescence fallback — or, if a footer
+    // kept matching the running-indicator, run to the watchdog and surface as a
+    // FALSE StopFailure (the "finished but shows ❗" bug). grok writes
+    // {"type":"turn_ended","outcome":"completed"} on every clean turn end (4.5 AND
+    // 4.7). Seed the offset at the current size so we only see THIS turn's records
+    // (never a resumed session's prior turn_ended). A clean turn_ended is treated
+    // as a positive done-signal (like the pane marker); an error outcome is left to
+    // the existing pane/exit detectors. Purely additive — the pane heuristic and
+    // its quiescence fallback stay intact as the fallback path.
+    const eventsPath = path.join(path.dirname(chatPath), 'events.jsonl');
+    let eventsOffset = (() => { try { return fs.statSync(eventsPath).size; } catch { return 0; } })();
+    let sawCleanTurnEnd = false;
+    const drainEventsForTurnEnd = (): void => {
+      let size = 0;
+      try { size = fs.statSync(eventsPath).size; } catch { return; }
+      if (size <= eventsOffset) { return; }
+      let raw = '';
+      try {
+        const len = size - eventsOffset;
+        const buf = Buffer.alloc(len);
+        const fd = fs.openSync(eventsPath, 'r');
+        try { fs.readSync(fd, buf, 0, len, eventsOffset); } finally { fs.closeSync(fd); }
+        raw = buf.toString('utf8');
+      } catch { return; }
+      const lastNl = raw.lastIndexOf('\n');
+      if (lastNl < 0) { return; } // no complete line yet
+      const complete = raw.slice(0, lastNl);
+      eventsOffset += Buffer.byteLength(complete, 'utf8') + 1;
+      if (scanGrokTurnEnd(complete.split('\n')) === 'clean') { sawCleanTurnEnd = true; }
+    };
+
     // Submit the prompt.
     log(`Grok TUI: sending turn (${(() => { try { return fs.statSync(promptFilePath).size; } catch { return 0; } })()} bytes)`);
     pastePrompt(sess, promptFilePath);
@@ -1050,12 +1085,18 @@ function runGrokTmuxTurn(
       //        this banner had no detector, so the pane went quiet and the turn
       //        was misread as a clean idle (a FALSE success that lost the task).
       const snap = capturePane(sess.name);
+      // Drain grok's own events.jsonl FIRST so a confirmed clean turn_ended can
+      // veto a pane-scraped false 'turn-failed' below (FIX 3). A clean turn_ended
+      // means grok finished the turn cleanly — grok never writes it after a real
+      // mid-turn process blip — so a lingering pane banner must not force a
+      // StopFailure. reauth is NEVER vetoed (a missing login is real regardless).
+      drainEventsForTurnEnd();
       const turnClass = classifyGrokTurn(snap, grokAuthPresent());
       if (turnClass === 'reauth') {
         finishReauth('auth failure detected mid-turn');
         return;
       }
-      if (turnClass === 'turn-failed') {
+      if (turnClass === 'turn-failed' && !sawCleanTurnEnd) {
         log('Grok TUI: grok reported a turn failure (transient) — surfacing for retry');
         try { fs.appendFileSync(stdoutFile, `\n[Grok TUI: turn failed — grok stopped before this turn finished (transient); the loop will retry]\n`, 'utf8'); } catch { /* ignore */ }
         finish(1, 'turn-failed');
@@ -1077,13 +1118,28 @@ function runGrokTmuxTurn(
       //    unusual grok build), fall back to a MUCH longer quiescence so early
       //    "Starting session…"/"Reading file…" pauses aren't misread as turn-end.
       if (DONE_MARKER.test(snap)) { sawDoneMarker = true; }
+      // events.jsonl was drained above (before the turn-failed check). A clean
+      // {"turn_ended","completed"} this turn is a build-agnostic positive
+      // done-signal (recognizes grok 4.7's clean finish, which may omit the
+      // grok-4.5 pane marker) → treat it exactly like the pane marker so the turn
+      // ends cleanly + fast as finish(0)=Stop instead of hanging to the quiescence
+      // fallback or the watchdog StopFailure.
+      if (sawCleanTurnEnd) { sawDoneMarker = true; }
       if (snap === lastSnap) { stable++; } else { stable = 0; lastSnap = snap; }
       const running = RUNNING_INDICATOR.test(snap);
       const quietMs = Date.now() - lastGrowthMs;
       const readyToJudge = sawOutput || (Date.now() - turnStart >= NOOUTPUT_MS);
+      // A clean events.jsonl turn_ended is authoritative that grok finished — allow
+      // it to end the turn even if a stale footer still matches the running-indicator
+      // (grok 4.7 can leave a "Ctrl+c"-style footer painted after a completed turn),
+      // gated on the same DEBOUNCE_MS quiet window so trailing output still flushes.
       const doneFast = sawDoneMarker && quietMs >= DEBOUNCE_MS;
       const doneSlow = readyToJudge && quietMs >= QUIET_FALLBACK_MS && stable >= STABLE_POLLS;
-      if (!running && (doneFast || doneSlow)) {
+      // grok's own log confirmed a clean turn_ended → end even if a stale footer
+      // still trips the running-indicator (still gated on the quiet window so
+      // trailing transcript records flush first).
+      const doneClean = sawCleanTurnEnd && quietMs >= DEBOUNCE_MS;
+      if (doneClean || (!running && (doneFast || doneSlow))) {
         // Final drain of the transcript to catch records written between the last
         // poll and turn-end.
         const tail = drainChatHistory(chatPath, chatOffset);

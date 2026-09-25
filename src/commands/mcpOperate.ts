@@ -25,6 +25,8 @@ import { redactSecrets, redactDeep } from '../core/redactSecrets';
 import { GraphStore, GraphInvariantError, NODE_TYPES, EDGE_TYPES } from '../graphStore';
 import { fmtNode, renderNeighbors, renderMap, renderSearch, renderToc } from '../graphRender';
 import { createOperateStatusController, classifyHook } from '../core/operateStatus';
+import { newestGrokSessionDir } from '../providers/grok/sessions';
+import { parseGrokEventLine, classifyGrokActivity, grokEventToHook, isOfficeMcpToolName, grokAssistantText } from '../core/grokEvents';
 
 /**
  * `autodev mcp-operate` — run a local stdio MCP server that lets a pure MCP
@@ -1059,6 +1061,108 @@ export function mcpOperateCommand(program: Command): void {
         };
         const interval = setInterval(tick, 5_000);
         interval.unref?.();
+
+        // ── GROK operate: tail grok's OWN session event log ──────────────────
+        // A grok operate/MCP-only agent is NOT driven by an `autodev start` loop
+        // (the bridge's autonomy runs only claude), so nobody writes grok's native
+        // tool calls / narration into .autodev/hooks-events.jsonl and grok has no
+        // Claude transcript. The tick/tailTranscript above therefore saw NOTHING:
+        // the office Events panel stayed empty and the badge stayed 'idle' even
+        // while grok was mid-turn. Fix: for a grok provider, ALSO tail grok's own
+        //   ~/.grok/sessions/<enc-cwd>/<newest session>/events.jsonl   (status + tool hooks)
+        //   …/chat_history.jsonl                                        (assistant narration)
+        // driving the SAME markWorking()/statusCtl and forwardAssistant() used by
+        // the claude path. Tailed by byte offset (only NEW lines, no backlog replay
+        // on connect), secret-redacted before it leaves the machine, and suppressed
+        // while a co-located loop owns forwarding (loopOwnsForwarding) so nothing is
+        // double-shipped. Grounded on a real grok 4.5/4.7 session dump.
+        if (/^grok/i.test(settings.provider || '')) {
+          let grokDir: string | null = null;
+          let grokEvOff = 0;
+          let grokChOff = 0;
+          let grokInit = false;
+          const grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
+          // Read NEW bytes past `off`, returning only COMPLETE lines and the new
+          // offset (a half-written trailing record is re-read next tick).
+          const drainLines = (file: string, off: number): { lines: string[]; offset: number } => {
+            let size = 0;
+            try { size = fs.statSync(file).size; } catch { return { lines: [], offset: off }; }
+            if (size <= off) { return { lines: [], offset: off }; }
+            let raw = '';
+            try {
+              const len = size - off;
+              const buf = Buffer.alloc(len);
+              const fd = fs.openSync(file, 'r');
+              try { fs.readSync(fd, buf, 0, len, off); } finally { fs.closeSync(fd); }
+              raw = buf.toString('utf8');
+            } catch { return { lines: [], offset: off }; }
+            const lastNl = raw.lastIndexOf('\n');
+            if (lastNl < 0) { return { lines: [], offset: off }; }
+            const complete = raw.slice(0, lastNl);
+            const newOff = off + Buffer.byteLength(complete, 'utf8') + 1;
+            return { lines: complete.split('\n'), offset: newOff };
+          };
+
+          const grokTick = (): void => {
+            if (!socket) { return; }
+            const dir = newestGrokSessionDir(cwd);
+            if (!dir) { return; }
+            const evFile = path.join(dir, 'events.jsonl');
+            const chFile = path.join(dir, 'chat_history.jsonl');
+            if (dir !== grokDir) {
+              // First discovery on connect → start at the CURRENT end (never replay a
+              // resumed session's whole backlog). A NEW session dir appearing later is
+              // a fresh turn → read it from the start so its activity isn't missed.
+              if (!grokInit) { grokEvOff = grokSize(evFile); grokChOff = grokSize(chFile); grokInit = true; }
+              else { grokEvOff = 0; grokChOff = 0; }
+              grokDir = dir;
+            }
+            // A co-located loop owns forwarding → advance offsets (so we resume from
+            // the end if it later dies) but forward/report nothing (no double-ship).
+            const owned = loopOwnsForwarding();
+
+            const ev = drainLines(evFile, grokEvOff);
+            grokEvOff = ev.offset;
+            let sawWork = false;
+            let sawEnd = false;
+            for (const line of ev.lines) {
+              const e = parseGrokEventLine(line);
+              if (!e) { continue; }
+              const act = classifyGrokActivity(e);
+              if (act === 'working') { sawWork = true; }
+              else if (act === 'end') { sawEnd = true; }
+              if (owned) { continue; }
+              const hook = grokEventToHook(e);
+              if (!hook || isOfficeMcpToolName(hook.tool_name)) { continue; }
+              const frame: Record<string, unknown> = {
+                hook_event_name: hook.hook_event_name,
+                tool_name: hook.tool_name,
+                provider: settings.provider || 'grok',
+                cwd,
+                timestamp: new Date().toISOString(),
+                _session_name: sessionNameForHooks,
+              };
+              if (hook.tool_use_id) { frame.tool_use_id = hook.tool_use_id; }
+              socket.sendFrame({ type: 'hook_event', data: redactDeep(frame) });
+            }
+            if (!owned) {
+              if (sawWork) { markWorking(); }
+              if (sawEnd) { statusCtl.markTurnEnd(); }
+            }
+
+            // Assistant narration → forward each new bubble via the shared claude path.
+            const ch = drainLines(chFile, grokChOff);
+            grokChOff = ch.offset;
+            if (!owned) {
+              for (const line of ch.lines) {
+                const text = grokAssistantText(line);
+                if (text) { forwardAssistant(text); }
+              }
+            }
+          };
+          const grokInterval = setInterval(grokTick, 5_000);
+          grokInterval.unref?.();
+        }
       };
 
       // Lifecycle flags — declared before the forwarding/autonomy loops that read

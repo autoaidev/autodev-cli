@@ -200,3 +200,62 @@ export function grokAssistantText(line: string): string | null {
   text = text.trim();
   return text || null;
 }
+
+/** One office hook the grok-tui LOOP forwards for a turn, in the schema
+ *  `.autodev/hooks-events.jsonl` (and the WS poller that ships it) consumes. */
+export interface GrokLoopHook {
+  hook_event_name: 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure' | 'Notification';
+  tool_name?: string;
+  tool_use_id?: string;
+  outcome?: string;
+  message?: string;
+}
+
+/**
+ * PURE mapping used by the grok-tui LOOP forwarder (src/providers/grok/tui.ts).
+ * Given freshly-tailed `events.jsonl` lines (grok's NATIVE tool boundaries) and
+ * `chat_history.jsonl` lines (assistant narration) — already byte-offset so no
+ * backlog/replay — plus the loop's per-root dedupe Set of already-emitted tool
+ * ids, return the office hook events to append:
+ *   • tool_started  → PreToolUse    (emitted once per tool_call_id via `emittedIds`)
+ *   • tool_completed→ PostToolUse / PostToolUseFailure (on outcome==="error")
+ *   • assistant text→ Notification  (narration bubble)
+ * grok's OWN native tools only: any `mcp__*` / office-operator tool is SKIPPED
+ * (the office logs those server-side, so re-forwarding double-renders them).
+ * No I/O, so the loop's mapping is unit-testable without a grok process.
+ */
+export function grokLoopForwardHooks(
+  eventLines: string[],
+  chatLines: string[],
+  emittedIds: Set<string>,
+): GrokLoopHook[] {
+  const out: GrokLoopHook[] = [];
+  for (const line of eventLines) {
+    const hook = grokEventToHook(parseGrokEventLine(line));
+    if (!hook) { continue; }
+    if (isOfficeMcpToolName(hook.tool_name)) { continue; } // office logs MCP tools server-side
+    if (hook.hook_event_name === 'PreToolUse') {
+      const id = hook.tool_use_id;
+      // Dedupe by tool_call id so a re-observed line (or a co-emitter) can't
+      // double-render the SAME call. Ids are unique per call, so a seen id is a
+      // re-scan, not a real second call.
+      if (id) {
+        if (emittedIds.has(id)) { continue; }
+        emittedIds.add(id);
+      }
+      out.push({ hook_event_name: 'PreToolUse', tool_name: hook.tool_name, tool_use_id: id });
+    } else {
+      out.push({
+        hook_event_name: hook.hook_event_name,
+        tool_name: hook.tool_name,
+        tool_use_id: hook.tool_use_id,
+        outcome: hook.outcome,
+      });
+    }
+  }
+  for (const line of chatLines) {
+    const text = grokAssistantText(line);
+    if (text) { out.push({ hook_event_name: 'Notification', message: text }); }
+  }
+  return out;
+}

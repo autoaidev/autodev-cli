@@ -50,7 +50,9 @@ import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState'
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { killProcessTree } from '../../core/killProcessTree';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
-import { scanGrokTurnEnd } from '../../core/grokEvents';
+import { scanGrokTurnEnd, grokLoopForwardHooks } from '../../core/grokEvents';
+import { newestGrokSessionDir } from './sessions';
+import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 import type { ProviderId } from '../../providers';
 
 // ---------------------------------------------------------------------------
@@ -156,6 +158,31 @@ function _emitGrokHook(root: string, hookEventName: string, extra: Record<string
     const ev = { hook_event_name: hookEventName, event_type: eventTypeFor(hookEventName), provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
     fs.appendFileSync(path.join(dir, 'hooks-events.jsonl'), JSON.stringify(ev) + '\n', 'utf8');
   } catch { /* non-critical */ }
+}
+
+/**
+ * Read NEW bytes of a jsonl file past `off`, returning only COMPLETE lines and
+ * the advanced offset (a half-written trailing record is re-read next tick). Never
+ * throws — a missing/short file yields no lines and the offset unchanged. Mirrors
+ * the operate bridge's grok tailer so both paths tail grok's logs identically.
+ */
+function drainNewJsonlLines(file: string, off: number): { lines: string[]; offset: number } {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return { lines: [], offset: off }; }
+  if (size <= off) { return { lines: [], offset: off }; }
+  let raw = '';
+  try {
+    const len = size - off;
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, off); } finally { fs.closeSync(fd); }
+    raw = buf.toString('utf8');
+  } catch { return { lines: [], offset: off }; }
+  const lastNl = raw.lastIndexOf('\n');
+  if (lastNl < 0) { return { lines: [], offset: off }; } // no complete line yet
+  const complete = raw.slice(0, lastNl);
+  const newOff = off + Buffer.byteLength(complete, 'utf8') + 1; // +1 for the \n
+  return { lines: complete.split('\n'), offset: newOff };
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,8 +1335,36 @@ export function sendGrokPrompt(
     ? setTimeout(() => killGrok(`exceeded ${Math.round(GROK_MAX_RUN_MS / 60_000)}min time budget`), GROK_MAX_RUN_MS)
     : null;
 
-  const rl = readline.createInterface({ input: child.stdout! });
+  // ── Turn-end + activity from grok's OWN session logs (HEADLESS path) ────────
+  // grok's `--output-format streaming-json` stdout no longer emits the per-tool /
+  // per-message / `end` records this runner's rl parser expected (format drift on
+  // grok 4.7): a HEADLESS loop turn (Windows — no tmux → this spawn) therefore
+  // forwarded only Session*/Stop* boundaries (NO tool calls, NO narration) AND
+  // never saw a turn-end — so a FINISHED grok-4.7 turn (which omits the grok-4.5
+  // "Worked for Ns" pane marker) ran to the 10-min watchdog and surfaced as a
+  // false StopFailure→retry loop. Mirror the 1.4.175 operate bridge + tmux FIX 3:
+  // tail grok's session events.jsonl (native tool calls + turn_ended) and
+  // chat_history.jsonl (assistant narration) by byte offset during the turn,
+  // append the office hook events to the loop's own .autodev/hooks-events.jsonl
+  // channel, and finish PROMPTLY on a clean turn_ended. Never throws / never
+  // blocks; a no-op until the session dir resolves.
   let _endSeen = false;
+  let _forcedExit: number | null = null;   // set by a session-log turn_ended finish
+  let _grokFilesActive = false;            // once true, session logs own narration
+  const _grokEmittedIds = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
+  const _grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
+  // Snapshot the pre-turn session so the tailer forwards ONLY this turn's records:
+  // a RESUMED session's dir already holds backlog → seed at its current end; a
+  // FRESH session mints a NEW dir that appears later → read that dir from the start.
+  let _seedDir = ''; let _seedEvOff = 0; let _seedChOff = 0;
+  try {
+    const d = newestGrokSessionDir(root);
+    if (d) { _seedDir = d; _seedEvOff = _grokSize(path.join(d, 'events.jsonl')); _seedChOff = _grokSize(path.join(d, 'chat_history.jsonl')); }
+  } catch { /* no prior session — a fresh dir reads from 0 */ }
+  let _grokDir: string | null = null;
+  let _evOff = 0; let _chOff = 0;
+
+  const rl = readline.createInterface({ input: child.stdout! });
 
   let _activityBuf = '';
   let _activityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1317,7 +1372,10 @@ export function sendGrokPrompt(
     if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
     const t = _activityBuf.trim();
     _activityBuf = '';
-    if (!t) { return; }
+    // Once grok's session logs are being tailed they OWN the narration bubbles
+    // (clean prose from chat_history.jsonl); don't ALSO emit the stdout scrape or
+    // the same narration renders twice. Fallback stays live until then.
+    if (!t || _grokFilesActive) { return; }
     const preview = t.length > 280 ? t.slice(0, 277) + '…' : t;
     _emitGrokHook(root, 'Notification', { message: preview, title: 'grok', tool_name: 'grok' });
   };
@@ -1341,6 +1399,70 @@ export function sendGrokPrompt(
     _lineBuf = '';
     if (line.trim()) { log(`  ${line}`); }
   };
+
+  // Clean/early finish driven by grok's session-log turn_ended (see block above).
+  // Emits the turn-end boundary hooks ONCE, forces the reported exit code so a
+  // SIGKILL is not misread as a failure, then kills the (often hung) grok process
+  // so `close` writes the exit file promptly.
+  const finishFromTurnEnd = (clean: boolean): void => {
+    if (_endSeen || killed) { return; }
+    _endSeen = true;                 // suppress close's boundary re-emit
+    _forcedExit = clean ? 0 : 1;     // report the true outcome, not the SIGKILL code
+    flushOutputLine();
+    flushActivity();
+    if (clean) {
+      log('Grok: clean turn_ended in session log — ending turn (Stop)');
+      _emitGrokHook(root, 'Stop', {});
+      _emitGrokHook(root, 'SessionEnd', { reason: 'completed' });
+    } else {
+      log('Grok: error turn_ended in session log — ending turn (retryable)');
+      _emitGrokHook(root, 'StopFailure', { exit_code: 1 });
+      _emitGrokHook(root, 'SessionEnd', { reason: 'error' });
+    }
+    killed = true;                   // beat the watchdog to the kill (no double-report)
+    if (child.pid) { killProcessTree(child.pid); }
+    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+  };
+
+  const pumpGrokSessionFiles = (): void => {
+    if (_endSeen || killed) { return; }
+    let dir: string | undefined;
+    try { dir = newestGrokSessionDir(root); } catch { dir = undefined; }
+    if (!dir) { return; }                 // no session dir yet — nothing to tail
+    const evFile = path.join(dir, 'events.jsonl');
+    const chFile = path.join(dir, 'chat_history.jsonl');
+    if (dir !== _grokDir) {
+      _grokDir = dir;
+      if (dir === _seedDir) { _evOff = _seedEvOff; _chOff = _seedChOff; } // skip pre-turn backlog
+      else { _evOff = 0; _chOff = 0; }                                    // fresh turn dir → read all
+    }
+    _grokFilesActive = true;              // session logs now own narration
+    const ev = drainNewJsonlLines(evFile, _evOff); _evOff = ev.offset;
+    const ch = drainNewJsonlLines(chFile, _chOff); _chOff = ch.offset;
+    // Forward native tool calls + assistant narration (mcp__/office tools skipped,
+    // deduped per-root by tool_call id, secret-redacted before it leaves the box).
+    for (const h of grokLoopForwardHooks(ev.lines, ch.lines, _grokEmittedIds)) {
+      if (h.hook_event_name === 'Notification') {
+        const msg = redactSecrets(String(h.message || '')).slice(0, 1200);
+        if (msg.trim()) { _emitGrokHook(root, 'Notification', { message: msg, title: 'grok', tool_name: 'grok' }); }
+      } else {
+        const extra: Record<string, unknown> = { tool_name: h.tool_name };
+        if (h.tool_use_id) { extra['tool_use_id'] = h.tool_use_id; }
+        if (h.outcome) { extra['outcome'] = h.outcome; }
+        _emitGrokHook(root, h.hook_event_name, redactDeep(extra));
+      }
+    }
+    // FIX 3 parity for HEADLESS: a clean turn_ended is a build-agnostic positive
+    // done-signal (grok 4.7 omits the grok-4.5 pane marker), so end the turn NOW
+    // instead of hanging to GROK_MAX_RUN_MS. An error/aborted outcome ends it too
+    // (retryable), honoring scanGrokTurnEnd's classification.
+    const te = scanGrokTurnEnd(ev.lines);
+    if (te === 'clean') { finishFromTurnEnd(true); }
+    else if (te === 'error') { finishFromTurnEnd(false); }
+  };
+  const GROK_FILE_POLL_MS = envNum('AUTODEV_GROK_FILE_POLL_MS', 900);
+  const grokFilePoll = GROK_FILE_POLL_MS > 0 ? setInterval(pumpGrokSessionFiles, GROK_FILE_POLL_MS) : null;
+  grokFilePoll?.unref?.();
 
   rl.on('line', (line: string) => {
     if (!line.trim()) { return; }
@@ -1386,13 +1508,17 @@ export function sendGrokPrompt(
 
   child.on('close', (code: number | null) => {
     if (watchdog) { clearTimeout(watchdog); }
+    if (grokFilePoll) { clearInterval(grokFilePoll); }
+    try { pumpGrokSessionFiles(); } catch { /* best-effort final drain of trailing records */ }
     flushOutputLine();
     flushActivity();
     errRl?.close();
     rl.close();
     _activeChildren.delete(root);
     _busyRoots.delete(root);
-    const exitCode = code ?? 1;
+    // A session-log turn_ended already reported the true outcome via _forcedExit;
+    // don't let the SIGKILL exit code (1) override a clean finish.
+    const exitCode = _forcedExit ?? code ?? 1;
     log(`Grok: exited (code=${exitCode})`);
     if (!_endSeen) {
       _emitGrokHook(root, exitCode === 0 ? 'Stop' : 'StopFailure', { exit_code: exitCode });

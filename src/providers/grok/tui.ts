@@ -48,6 +48,7 @@ import { eventTypeFor } from '../../hookEventNormalizer';
 import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
+import { killProcessTree } from '../../core/killProcessTree';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
 import { scanGrokTurnEnd } from '../../core/grokEvents';
 import type { ProviderId } from '../../providers';
@@ -1236,7 +1237,11 @@ export function sendGrokPrompt(
   try { fs.writeFileSync(exitFile,   '', 'utf8'); } catch { /* ignore */ }
 
   const prior = _activeChildren.get(root);
-  if (prior) { try { prior.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
+  if (prior) {
+    if (prior.pid) { killProcessTree(prior.pid); }
+    try { prior.kill('SIGKILL'); } catch { /* ignore */ }
+    _activeChildren.delete(root);
+  }
 
   _busyRoots.add(root);
 
@@ -1296,6 +1301,7 @@ export function sendGrokPrompt(
     killed = true;
     log(`Grok watchdog: ${why} — killing run`);
     try { fs.appendFileSync(stdoutFile, `\n[Grok watchdog: ${why}]\n`, 'utf8'); } catch { /* ignore */ }
+    if (child.pid) { killProcessTree(child.pid); }
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
   };
   const watchdog = GROK_MAX_RUN_MS > 0
@@ -1478,7 +1484,11 @@ export async function steerGrokTui(root: string, text: string, log: (msg: string
  */
 export function closeGrokTuiSession(root: string, _log: (msg: string) => void): void {
   const child = _activeChildren.get(root);
-  if (child) { try { child.kill('SIGKILL'); } catch { /* ignore */ } _activeChildren.delete(root); }
+  if (child) {
+    if (child.pid) { killProcessTree(child.pid); }
+    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    _activeChildren.delete(root);
+  }
   const sess = _tmuxSessions.get(root);
   if (sess) { killSession(sess.name); _tmuxSessions.delete(root); }
   else {
@@ -1493,6 +1503,7 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
 /** Kill all live grok sessions — called on SDK/extension shutdown. */
 export function closeAllGrokTuiSessions(): void {
   for (const child of _activeChildren.values()) {
+    if (child.pid) { killProcessTree(child.pid); }
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
   }
   _activeChildren.clear();

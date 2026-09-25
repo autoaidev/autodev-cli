@@ -17,6 +17,7 @@ import { deprovisionCommand } from './commands/deprovision';
 import { loginCommand } from './commands/login';
 import { modelsCommand } from './commands/models';
 import { mcpCommand } from './commands/mcp';
+import { killTreeCommand } from './commands/killTree';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -107,6 +108,7 @@ deprovisionCommand(program);
 loginCommand(program);
 modelsCommand(program);
 mcpCommand(program);
+killTreeCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error((err as Error).message);

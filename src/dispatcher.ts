@@ -190,7 +190,13 @@ export async function sendPromptToAi(
     // turn. If it is somehow missing here (SDK path that never ran buildMessage, or
     // a deleted file), build it once so writeCombinedFile never throws. Idempotent.
     if (includeProfile && !fs.existsSync(agentProfileFile)) {
-      try { rebuildProfile(root); } catch { /* writeCombinedFile will surface a clear error */ }
+      try { rebuildProfile(root); }
+      catch (err) {
+        // Don't swallow silently — a failed rebuild here is exactly how PROGRAM.md
+        // ends up missing at dispatch. Log one clear line; writeCombinedFile still
+        // dispatches (agent picks the profile up via the AGENTS.md pointer).
+        log(`⚠️ rebuildProfile failed at dispatch (PROGRAM.md may be missing this turn): ${(err as Error)?.message ?? String(err)}`);
+      }
     }
     const combinedFile = writeCombinedFile(root, agentProfileFile, messageFile, includeProfile);
     const provider = providerRegistry.get(providerId);

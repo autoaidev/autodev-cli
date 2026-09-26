@@ -1760,8 +1760,19 @@ export class TaskLoopRunner {
       if (includeProfile) { this._profileSentCounter = 0; }
       this._profileSentCounter++;
 
+      // Resumed-turn signal for the message builder. Mirror the dispatcher's
+      // `wantResume`: grok-cli/grok-tui always resume their workspace session;
+      // every other provider resumes only when resumeSession is on. Past the first
+      // turn (this._iterations > 1) a prior turn already established the session, so
+      // identity+protocol are in the live context — buildMessage then injects a
+      // per-turn override telling the agent NOT to redundantly re-read them. On a
+      // stateless provider/setting this stays false, so nothing changes there.
+      const isResumingProvider = settings.provider === 'grok-tui' || settings.provider === 'grok-cli';
+      const wantResume = isResumingProvider ? true : settings.resumeSession;
+      const resumedTurn = wantResume && this._iterations > 1;
+
       // Build prompt (needed even when not sending, for messageFile path)
-      let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile);
+      let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile, resumedTurn);
       const remaining = countRemaining(parseTodo(todoPath));
 
       // ── verify_and_keep: pre-task snapshot + fold in any fix hint ──────────

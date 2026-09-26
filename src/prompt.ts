@@ -17,6 +17,8 @@ export function buildPrompt(
   root: string,
   todoDir: string,
   includeProfile = true,
+  /** True when this dispatch resumes an existing session past turn 1 — see buildMessage. */
+  resumedTurn = false,
 ): { prompt: string; messageFile: string } {
-  return buildMessage(task, root, todoDir, includeProfile);
+  return buildMessage(task, root, todoDir, includeProfile, resumedTurn);
 }

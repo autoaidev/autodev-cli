@@ -75,19 +75,44 @@ function injectAgentProfileRef(root: string, _sectionPaths: string[] = []): void
     fs.writeFileSync(filePath, content, 'utf8');
   }
 
-  // Migrate away from older index names so only PROGRAM.md remains. Guard with a
-  // realpath compare so on a case-insensitive FS (program.md === PROGRAM.md) we
-  // never delete the file we just wrote. Best-effort; ignore if absent.
+  // Migrate away from older index names so only PROGRAM.md remains. Guard so we
+  // NEVER delete the canonical PROGRAM.md we just wrote. Two layers:
+  //   1. Case-INSENSITIVE resolved-path compare (Windows fix). On a case-insensitive
+  //      FS `.autodev/program.md` IS `.autodev/PROGRAM.md`, but fs.realpathSync
+  //      returns the REQUESTED case, so the realpath === compare below misses the
+  //      collision and rmSync('.autodev/program.md') deletes the live index — the
+  //      recurring "PROGRAM.md missing on Windows" bug. isCanonicalProfileCollision
+  //      lowercases both resolved paths so program.md is skipped there.
+  //   2. realpath === compare — the secondary guard for genuinely-distinct files
+  //      on a case-sensitive FS (Linux), where a stray lowercase program.md is a
+  //      DIFFERENT file and is safe to remove.
+  // Best-effort; ignore if absent.
   let currentReal: string | null = null;
   try { currentReal = fs.realpathSync(path.join(root, AGENT_PROFILE_FILE)); } catch { currentReal = null; }
   for (const legacy of LEGACY_PROFILE_FILES) {
     try {
       const p = path.join(root, legacy);
       if (!fs.existsSync(p)) { continue; }
-      if (currentReal && fs.realpathSync(p) === currentReal) { continue; } // same file
+      if (isCanonicalProfileCollision(root, legacy)) { continue; } // case-insensitive: same file as PROGRAM.md
+      if (currentReal && fs.realpathSync(p) === currentReal) { continue; } // same file (case-sensitive FS)
       fs.rmSync(p);
     } catch { /* best effort */ }
   }
+}
+
+/**
+ * True when a legacy profile-index candidate resolves to the SAME path as the
+ * canonical `.autodev/PROGRAM.md`, compared case-INSENSITIVELY. On a
+ * case-insensitive FS (Windows) `.autodev/program.md` and `.autodev/PROGRAM.md`
+ * are one file, yet `fs.realpathSync` echoes back the requested case so a plain
+ * `===` realpath compare misses the collision and the legacy cleanup deletes the
+ * live index. Lowercasing both resolved paths closes that gap. The only
+ * case-colliding legacy entry is `program.md`; `AGENT_PROFILE.md` never collides.
+ * Exported for the collision unit test.
+ */
+export function isCanonicalProfileCollision(root: string, legacyRel: string): boolean {
+  return path.resolve(root, legacyRel).toLowerCase()
+    === path.resolve(root, AGENT_PROFILE_FILE).toLowerCase();
 }
 
 const COPILOT_INSTRUCTIONS_FILE = '.github/copilot-instructions.md';
@@ -236,6 +261,38 @@ export function soulUpdatedReminder(root: string): string {
       '</system-reminder>',
     ].join('\n');
   } catch { return ''; }
+}
+
+/**
+ * Resumed-session override reminder (per-turn).
+ *
+ * On a RESUMING provider/turn (grok-cli / grok-tui always; any other provider when
+ * `resumeSession` is on) PAST the first turn, the agent's `SOUL.md` identity and
+ * `.autodev/PROGRAM.md` protocol are ALREADY in the live conversation — the
+ * provider carried them forward. The standing profile pillars ("Read SOUL.md
+ * before every message", "Read SOUL.md FIRST") are written for STATELESS providers
+ * that get a fresh context each turn; on a resumed turn they make the agent open
+ * every turn by redundantly re-reading identity+protocol it already holds, which
+ * both wastes the turn's opening and makes the user think resume is a no-op
+ * ("seems session is not resuming, it always reads its profile").
+ *
+ * This reminder OVERRIDES the standing re-read for THIS turn only. It is NEVER
+ * emitted on turn 1 (identity genuinely must load) and is suppressed when SOUL.md
+ * actually changed this turn (soulUpdatedReminder wins → a real re-read). It is
+ * purely additive: stateless providers and first turns still get their pillars.
+ *
+ * Exported so smoke tests can assert the override text directly.
+ */
+export function resumedSessionReminder(_root: string): string {
+  return [
+    '<system-reminder>',
+    'You are CONTINUING your existing session — your `SOUL.md` identity and',
+    '`.autodev/PROGRAM.md` protocol are ALREADY loaded in this conversation. Do NOT',
+    're-read them or restate your identity/protocol; continue directly with the task.',
+    'Re-read a file only if a reminder tells you it changed, or you actually need a',
+    'specific reference for the work.',
+    '</system-reminder>',
+  ].join('\n');
 }
 
 /** Returns the .autodev/messages directory, creating it if needed. */
@@ -458,6 +515,21 @@ export function rebuildProfile(root: string): void {
   try {
     if (settings?.cozempicAutoInit !== true) { removeCozempicHooks(root); }
   } catch { /* best-effort */ }
+
+  // INVARIANT (last action): PROGRAM.md must exist and be NON-EMPTY after a rebuild,
+  // whatever happened above — a case-insensitive legacy cleanup on Windows, a throw
+  // in skills/mcp/cozempic, or an FS hiccup. Re-assert it here so nothing can leave
+  // the dispatcher's readFileSync(PROGRAM.md) staring at a missing/blank index (the
+  // "PROGRAM.md missing on Windows" report). bodyToWrite already falls back to the
+  // minimal header when the assembled body was empty. Best-effort; the dispatch path
+  // has its own missing-PROGRAM fallback as a further backstop.
+  try {
+    const pf = path.join(root, AGENT_PROFILE_FILE);
+    if (!fs.existsSync(pf) || fs.statSync(pf).size === 0) {
+      fs.mkdirSync(path.dirname(pf), { recursive: true });
+      fs.writeFileSync(pf, bodyToWrite, 'utf8');
+    }
+  } catch { /* best-effort — dispatch rebuilds PROGRAM.md if still missing */ }
 }
 
 /** Minimal non-empty PROGRAM.md fallback — used only if the assembled body is
@@ -488,6 +560,14 @@ export function buildMessage(
   root: string,
   todoDir: string,
   includeProfile = true,
+  /**
+   * True when this dispatch RESUMES an existing provider session (context — incl.
+   * SOUL.md identity + PROGRAM.md protocol — is already loaded) and it is NOT the
+   * first turn. Set by the loop from the same resume state the dispatcher uses
+   * (grok variants always resume; everyone else honors `resumeSession`). Default
+   * false so stateless providers / one-shot sends behave exactly as before.
+   */
+  resumedTurn = false,
 ): { prompt: string; messageFile: string } {
   autodevDir(root);
 
@@ -534,7 +614,21 @@ export function buildMessage(
   // On ANY turn, if SOUL.md changed since we last saw it (e.g. the office edited the
   // agent's identity live), tell the agent to re-read it — not just on turn 1.
   const soulUpd = soulUpdatedReminder(root);
+  const soulChanged = !!soulUpd;
   if (soulUpd) { reminders.push(soulUpd); }
+
+  // On a RESUMED turn (resuming provider, past turn 1), identity+protocol are
+  // already in the live context — inject a per-turn override that suppresses the
+  // standing "re-read SOUL/PROGRAM every message" pillars so the agent doesn't
+  // open every turn re-reading what it already holds. Gated so it never fights the
+  // other reminders: skipped on the first turn (`includeProfile` — that turn must
+  // load identity) and skipped when SOUL.md actually changed this turn (the
+  // soulUpdatedReminder re-read wins). Additive: default resumedTurn=false leaves
+  // stateless providers and one-shot sends untouched.
+  if (resumedTurn && !includeProfile && !soulChanged) {
+    const resumed = resumedSessionReminder(root);
+    if (resumed) { reminders.push(resumed); }
+  }
 
   // Reminders FIRST, then the task text, written to the file the model reads.
   const messageBody = [...reminders, taskMessage].join('\n\n---\n\n');

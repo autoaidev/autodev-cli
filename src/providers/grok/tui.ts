@@ -840,7 +840,7 @@ function runGrokTmuxTurn(
   // stopped or timed out)" then recover-on-retry pattern), so give grok more headroom.
   const STARTUP_MS    = envNum('AUTODEV_GROK_TUI_STARTUP_MS', 30_000);
   const NOOUTPUT_MS   = envNum('AUTODEV_GROK_TUI_NOOUTPUT_MS', 25_000);
-  const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
+  const MAX_RUN_MS    = envNum('AUTODEV_GROK_MAX_RUN_MS', 20 * 60_000);
   const STABLE_POLLS  = Math.max(2, envNum('AUTODEV_GROK_TUI_STABLE_POLLS', 4));
 
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -1375,7 +1375,13 @@ export function sendGrokPrompt(
   _activeChildren.set(root, child);
   child.once('spawn', () => { _emitGrokHook(root, 'SessionStart', { source: 'startup' }); });
 
-  const GROK_MAX_RUN_MS      = envNum('AUTODEV_GROK_MAX_RUN_MS', 10 * 60_000);
+  // Default 20min (was 10). The headless resume hang-probe can now wait patiently up
+  // to ~6.7min (90s + 15 exponential extensions, gated on real per-round progress) for
+  // a first token under heavy startup contention (~17 grok agents serialize on grok's
+  // shared session index). The watchdog MUST comfortably exceed that worst-case probe
+  // total PLUS a real work budget, or a slow-but-alive resume would be killed before it
+  // could do any work. 400s probe worst-case + ≥13min work budget < 1200s watchdog.
+  const GROK_MAX_RUN_MS      = envNum('AUTODEV_GROK_MAX_RUN_MS', 20 * 60_000);
   const GROK_MAX_TOOL_ERRORS = envNum('AUTODEV_GROK_MAX_TOOL_ERRORS', 25);
   let toolErrorCount = 0;
   let killed = false;
@@ -1411,8 +1417,21 @@ export function sendGrokPrompt(
   // probe window is the caller-supplied value (sendGrokTuiPrompt reads the env);
   // 0 (all stateless / non-probed calls) leaves the probe disarmed.
   const RESUME_PROBE_MS = Math.max(0, opts.resumeProbeMs ?? 0);
+  // Exponential, multi-round probe backoff (1.4.185). After the first RESUME_PROBE_MS
+  // window, grant up to RESUME_MAX_EXT further windows, each waiting an EXPONENTIALLY
+  // growing interval (base × 2^(round-1), capped), but ONLY while grok keeps writing
+  // NEW session events (real progress) and has not yet emitted first_token. This makes
+  // resume patient with a slow-but-alive load (~17 agents serialize on grok's shared
+  // session index → a resume can legitimately take minutes) yet fast to abandon a truly
+  // silent/hung one. Worst-case total = 90s + Σ extensions ≈ 6.7min, safely < the 20min
+  // watchdog. All env-overridable.
+  const RESUME_MAX_EXT       = Math.max(0, envNum('AUTODEV_GROK_RESUME_MAX_EXTENSIONS', 15));
+  const RESUME_EXT_BASE_MS   = Math.max(1000, envNum('AUTODEV_GROK_RESUME_EXT_BASE_MS', 8_000));
+  const RESUME_EXT_CAP_MS    = Math.max(RESUME_EXT_BASE_MS, envNum('AUTODEV_GROK_RESUME_EXT_CAP_MS', 22_000));
+  const RESUME_EXT_FACTOR    = 2;
   let _sawFirstToken = false;              // grok emitted first_token → resume works
   let _grokWroteEvents = false;            // grok appended ANY session events this turn (loaded + active)
+  let _grokEventWrites = 0;                // monotonic count of NEW session-event lines drained this turn (per-round progress marker)
   let _resumeAbandoned = false;            // probe killed this grok; a stateless relaunch owns the turn
   const _grokEmittedIds = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
   const _grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
@@ -1539,7 +1558,7 @@ export function sendGrokPrompt(
     _grokFilesActive = true;              // session logs now own narration
     const ev = drainNewJsonlLines(evFile, _evOff); _evOff = ev.offset;
     const ch = drainNewJsonlLines(chFile, _chOff); _chOff = ch.offset;
-    if (ev.lines.length) { _grokWroteEvents = true; } // grok is writing → loaded + active (not a dead-load hang)
+    if (ev.lines.length) { _grokWroteEvents = true; _grokEventWrites += ev.lines.length; } // grok is writing → loaded + active (not a dead-load hang); counter is the per-round progress marker
     // Resume hang-probe signal: grok emitted first_token → the (resumed) prompt is
     // being answered, so the probe below leaves the turn to run normally. On a RESUME
     // launch this is also proof the resume succeeded → clear the failure counter so a
@@ -1592,47 +1611,63 @@ export function sendGrokPrompt(
   // means the hang — kill this grok WITHOUT writing the exit file and hand the SAME
   // turn to a fresh stateless relaunch (onResumeHang), so the task still completes.
   // A turn_ended handled by pumpGrokSessionFiles (clean or error) sets _endSeen/killed
-  // first, making the probe a no-op. Well under MAX_RUN_MS so it never races the
-  // watchdog.
+  // first, making the probe a no-op. Worst-case cumulative wait (~6.7min) stays safely
+  // under MAX_RUN_MS (20min) so it never races the watchdog.
   let resumeProbeTimer: ReturnType<typeof setTimeout> | null = null;
-  let _probeExtended = false;              // the one grace window has been granted
+  let _probeRound = 0;                     // extensions granted so far (0 = still on the first window)
+  let _probeWriteMark = 0;                 // _grokEventWrites snapshot when the CURRENT window was armed
+  let _probeWaitedMs = 0;                  // cumulative probe wait so far (for honest logging)
   if (RESUME_PROBE_MS > 0 && opts.onResumeHang) {
-    const armProbe = (): void => {
+    // Interval for extension round k (1-indexed): base × factor^(k-1), capped.
+    const extIntervalMs = (round: number): number =>
+      Math.min(RESUME_EXT_CAP_MS, Math.round(RESUME_EXT_BASE_MS * Math.pow(RESUME_EXT_FACTOR, round - 1)));
+    const armProbe = (waitMs: number): void => {
+      _probeWriteMark = _grokEventWrites;  // snapshot the per-round progress marker for THIS window
       resumeProbeTimer = setTimeout(() => {
         // Final drain to catch a first_token / turn_ended written between polls.
         try { pumpGrokSessionFiles(); } catch { /* best effort */ }
         if (_endSeen || killed || _resumeAbandoned) { return; } // turn already resolved
+        _probeWaitedMs += waitMs;
+        // PROGRESS-GATED extension: did grok write NEW session events during THIS window?
+        // (not merely "ever wrote") — a fully silent window with no first_token is the
+        // genuine hang and falls back immediately, so a dead process never burns the
+        // whole ~6.7min budget.
+        const grewSinceLastCheck = _grokEventWrites > _probeWriteMark;
         const verdict = resumeProbeVerdict({
-          sawFirstToken: _sawFirstToken, elapsedMs: RESUME_PROBE_MS, probeMs: RESUME_PROBE_MS,
-          grewSinceSeed: _grokWroteEvents, alreadyExtended: _probeExtended,
+          sawFirstToken: _sawFirstToken, elapsedMs: waitMs, probeMs: waitMs,
+          grewSinceSeed: _grokWroteEvents, grewSinceLastCheck,
+          extensionCount: _probeRound, maxExtensions: RESUME_MAX_EXT,
         });
         if (verdict === 'ok') { return; } // grok is answering — resume works; let the turn run
         if (verdict === 'extend') {
-          // Loaded + actively writing but not answering yet (large session / a tool
-          // call before first text) → NOT the hang. Grant ONE more window rather than
-          // killing a healthy-but-slow resume. Bounded (once) and well under the watchdog.
-          _probeExtended = true;
-          log(`Grok TUI: --resume still loading after ${Math.round(RESUME_PROBE_MS / 1000)}s but grok is writing session events — extending the probe once`);
-          armProbe();
+          // Loaded + actively writing NEW events but not answering yet (large session /
+          // serialized index / a tool call before first text) → NOT the hang. Grant one
+          // more EXPONENTIALLY longer window rather than killing a healthy-but-slow resume.
+          // Bounded by RESUME_MAX_EXT and always well under the watchdog.
+          _probeRound += 1;
+          const next = extIntervalMs(_probeRound);
+          log(`Grok: --resume still loading after ${Math.round(_probeWaitedMs / 1000)}s (round ${_probeRound}/${RESUME_MAX_EXT}, grok is writing session events) — waiting up to ~${Math.round(next / 1000)}s more`);
+          armProbe(next);
           return;
         }
-        // The hang (verdict 'fallback'): grok produced nothing at all. Kill it and
-        // relaunch THIS turn stateless. Mark abandoned FIRST so this child's `close`
-        // skips the exit file / busy clear — the stateless relaunch owns the turn now.
-        // NOTE: onResumeHang only counts a TRANSIENT failure (bounded counter); it does
-        // NOT permanently disable resume — the next turn re-attempts `--resume`.
+        // The hang (verdict 'fallback'): this window produced NO new events and NO
+        // first_token (or extensions are exhausted). Kill grok and relaunch THIS turn
+        // stateless. Mark abandoned FIRST so this child's `close` skips the exit file /
+        // busy clear — the stateless relaunch owns the turn now. NOTE: onResumeHang only
+        // counts a TRANSIENT failure (bounded counter); it does NOT permanently disable
+        // resume — the next turn re-attempts `--resume`.
         _resumeAbandoned = true;
-        log(`Grok TUI: headless --resume produced no output in ${Math.round(RESUME_PROBE_MS / 1000)}s — stateless for this turn only (stored session id kept; resume retried next turn)`);
+        log(`Grok: headless --resume produced no output in ${Math.round(_probeWaitedMs / 1000)}s (${_probeRound} extension${_probeRound === 1 ? '' : 's'}) — stateless for this turn only (stored session id kept; resume retried next turn)`);
         if (grokFilePoll) { clearInterval(grokFilePoll); }
         if (watchdog) { clearTimeout(watchdog); }
         killed = true; // suppress the watchdog's own kill/report
         if (child.pid) { killProcessTree(child.pid); }
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        try { opts.onResumeHang!(); } catch (e) { log(`Grok TUI: stateless relaunch failed: ${(e as Error)?.message ?? String(e)}`); }
-      }, RESUME_PROBE_MS);
+        try { opts.onResumeHang!(); } catch (e) { log(`Grok: stateless relaunch failed: ${(e as Error)?.message ?? String(e)}`); }
+      }, waitMs);
       resumeProbeTimer.unref?.();
     };
-    armProbe();
+    armProbe(RESUME_PROBE_MS);
   }
 
   rl.on('line', (line: string) => {
@@ -1780,34 +1815,55 @@ export function decideHeadlessGrokMode(
 }
 
 /**
- * Pure verdict for the headless resume hang-probe.
+ * Pure verdict for the headless resume hang-probe (multi-round exponential, 1.4.185).
  *   'ok'       — grok emitted first_token → the resumed prompt is being answered;
  *                let the persistent turn run to its normal turn-end.
- *   'extend'   — the window elapsed with NO first_token, but grok HAS written new
- *                session events since launch (it loaded the session and is actively
- *                working — e.g. a large session still streaming, or a tool call
- *                before the first text). NOT the hang signature → grant one more
- *                window instead of killing a healthy-but-slow resume. Only offered
- *                once (alreadyExtended gates it), so total probe time stays bounded
- *                well under the run watchdog.
- *   'fallback' — the window elapsed with NO first_token AND no new events (a truly
- *                silent/loaded-but-idle resume) → the hang; kill + relaunch stateless.
+ *   'extend'   — the window elapsed with NO first_token, but grok wrote NEW session
+ *                events during it (`grewSinceLastCheck`) — it loaded the session and is
+ *                actively working (a large/serialized session still streaming, or a tool
+ *                call before the first text). NOT the hang → grant one more, EXPONENTIALLY
+ *                longer window, as long as fewer than `maxExtensions` have been granted.
+ *                This keeps resume patient with a slow-but-alive load (~17 agents serialize
+ *                on grok's shared session index) yet bounded well under the run watchdog.
+ *   'fallback' — the window elapsed with NO first_token AND no progress this window
+ *                (`grewSinceLastCheck` false), OR the extension budget is exhausted → the
+ *                hang; kill + relaunch stateless. Because progress is checked PER WINDOW,
+ *                a dead process falls back on its first silent window (it never burns the
+ *                whole multi-round budget).
  *   'wait'     — neither yet (window not elapsed and no first_token) → keep waiting.
  *
- * Rationale (grok 1.0.13 measured): a healthy `--resume` produces first_token in
- * ~40ms, so a plain time window is NOT a false trigger for normal sessions; the
- * `grewSinceSeed` grace exists only so a very large session's slower load isn't
- * mistaken for the loaded-but-never-answers hang. `grewSinceSeed`/`alreadyExtended`
- * default false → the original single-window behavior is preserved for callers that
- * don't pass them.
+ * Progress source: `grewSinceLastCheck` (NEW events since the LAST probe check) is the
+ * per-round gate; when a caller doesn't pass it we fall back to the legacy `grewSinceSeed`
+ * ("ever wrote"). Extension budget: `extensionCount` / `maxExtensions`; when a caller
+ * passes neither, the legacy single-shot `alreadyExtended` boolean (max = 1) is used, so
+ * the pre-1.4.185 single-grace-window behavior is preserved for old callers.
+ *
+ * Rationale (grok 1.0.13 measured): a healthy `--resume` produces first_token in ~40ms,
+ * so the time window is not a false trigger for normal sessions; the progress grace exists
+ * only so a very large / contended session's slower load isn't mistaken for the
+ * loaded-but-never-answers hang.
  */
 export function resumeProbeVerdict(
-  args: { sawFirstToken: boolean; elapsedMs: number; probeMs: number; grewSinceSeed?: boolean; alreadyExtended?: boolean },
+  args: {
+    sawFirstToken: boolean;
+    elapsedMs: number;
+    probeMs: number;
+    grewSinceSeed?: boolean;        // legacy: grok wrote events at all this turn (back-compat)
+    grewSinceLastCheck?: boolean;   // per-round: NEW events since the LAST probe check
+    alreadyExtended?: boolean;      // legacy single-shot extension gate (back-compat)
+    extensionCount?: number;        // multi-round: extensions granted so far
+    maxExtensions?: number;         // multi-round: extension budget
+  },
 ): 'ok' | 'extend' | 'fallback' | 'wait' {
   if (args.sawFirstToken) { return 'ok'; }
   if (args.probeMs > 0 && args.elapsedMs >= args.probeMs) {
-    if (args.grewSinceSeed && !args.alreadyExtended) { return 'extend'; }
-    return 'fallback';
+    // Real progress THIS window gates the extension; prefer the per-round signal, fall
+    // back to the legacy "ever wrote" grace for old callers that don't pass it.
+    const progressed = args.grewSinceLastCheck ?? args.grewSinceSeed ?? false;
+    if (!progressed) { return 'fallback'; }               // silent window → the hang
+    const count = args.extensionCount ?? (args.alreadyExtended ? 1 : 0);
+    const max = args.maxExtensions ?? 1;                  // legacy default: a single grace window
+    return count < max ? 'extend' : 'fallback';
   }
   return 'wait';
 }

@@ -1251,6 +1251,17 @@ interface GrokRunOptions {
   /** grok-tui: resume/continue a session so context accumulates across tasks. */
   persist?: boolean;
   sessionId?: string;
+  /**
+   * Resume the MOST RECENT grok session for this cwd via `grok --continue` (grok's
+   * "-c, --continue" = continue the most recent session for the current working
+   * directory). This is ROBUST to id/tracking drift: an explicit `--resume <id>`
+   * errors instantly on the user's Windows grok when the stored id can't be matched
+   * for the cwd (a stale id, or a cwd-encoding mismatch), so every turn fell back to
+   * stateless. `--continue` lets grok pick the folder's newest session itself.
+   * MUST NOT be combined with `--session-id` (grok rejects that unless --fork-session,
+   * which we do NOT want) or with `sessionId`.
+   */
+  continueSession?: boolean;
   providerId?: ProviderId;
   /**
    * Headless grok-tui resume hang-probe. When > 0 (with `onResumeHang`), watch
@@ -1268,6 +1279,26 @@ interface GrokRunOptions {
    * failure counter so a prior transient hiccup does not keep biasing later turns.
    */
   onResumeOk?: () => void;
+}
+
+/**
+ * Pure builder for the grok session CLI flags, extracted so the mutually-exclusive
+ * invariants are unit-testable without spawning grok:
+ *   - continueSession → `['--continue']` ONLY. NEVER with `--session-id` (grok rejects
+ *     that combo unless `--fork-session`, which we never pass) and never an explicit id.
+ *   - sessionId       → `['--resume', <id>]` (legacy explicit-id resume; not used by the
+ *     headless path anymore, kept for callers that pass a concrete id).
+ *   - newSessionId    → `['--session-id', <uuid>]` (bootstrap a brand-new named session).
+ *   - none            → `[]` (stateless: grok mints its own throwaway id).
+ * continueSession takes precedence, so `--continue` can never be emitted alongside an id.
+ */
+export function grokSessionArgsFor(
+  args: { continueSession?: boolean; sessionId?: string; newSessionId?: string },
+): string[] {
+  if (args.continueSession) { return ['--continue']; }
+  if (args.sessionId) { return ['--resume', args.sessionId]; }
+  if (args.newSessionId) { return ['--session-id', args.newSessionId]; }
+  return [];
 }
 
 export function sendGrokPrompt(
@@ -1294,10 +1325,30 @@ export function sendGrokPrompt(
   // read from the start = an instant false failure). This is the primary fix for
   // the 1.4.181 forced-resume regression.
   let _launchSid: string | undefined;
+  // For the `--continue` path the concrete id is not known up front — grok appends to
+  // the cwd's most-recent session dir — so we pin the tailer to that EXISTING newest
+  // dir (resolved at launch, before grok appends). Kept separate from _launchSid (which
+  // means "we minted/passed this exact id"), since --continue passes no id at all.
+  let _continueDir: string | undefined;
   if (opts.persist) {
     const providerId = opts.providerId ?? 'grok-tui';
-    if (opts.sessionId) {
-      sessionArgs.push('--resume', opts.sessionId);
+    if (opts.continueSession) {
+      // `grok --continue`: resume the folder's most-recent session. No id, and NO
+      // --session-id (grok rejects that combo unless --fork-session, which we never
+      // want). Robust to the stale-id / cwd-tracking-drift that made `--resume <id>`
+      // error in ~1s on Windows and forced every turn stateless.
+      sessionArgs.push(...grokSessionArgsFor({ continueSession: true }));
+      _continueDir = newestGrokSessionDir(path.resolve(root));
+      // Best-effort: stamp the resolved id into session-state.json so the sessions UI
+      // / resume-aware profile reminder can still name the session. The continue
+      // DECISION no longer depends on a stored id (it keys off folder-session presence).
+      try {
+        const resumedId = _continueDir ? path.basename(_continueDir) : undefined;
+        if (resumedId) { saveSessionId(root, providerId, resumedId); }
+      } catch { /* best effort */ }
+      log(`Grok: continuing most-recent session for cwd (--continue) (model=${modelLabel})`);
+    } else if (opts.sessionId) {
+      sessionArgs.push(...grokSessionArgsFor({ sessionId: opts.sessionId }));
       _launchSid = opts.sessionId;
       // Persist the id we're resuming so the NEXT turn reads it from
       // session-state.json directly — this also stamps a session that was only
@@ -1307,7 +1358,7 @@ export function sendGrokPrompt(
       log(`Grok: resuming session ${opts.sessionId.slice(0, 8)}… (model=${modelLabel})`);
     } else {
       const sid = randomUUID();
-      sessionArgs.push('--session-id', sid);
+      sessionArgs.push(...grokSessionArgsFor({ newSessionId: sid }));
       _launchSid = sid;
       try { saveSessionId(root, providerId, sid); } catch { /* best effort */ }
       log(`Grok: new persistent session ${sid.slice(0, 8)}… (model=${modelLabel})`);
@@ -1413,6 +1464,20 @@ export function sendGrokPrompt(
   let _endSeen = false;
   let _forcedExit: number | null = null;   // set by a session-log turn_ended finish
   let _grokFilesActive = false;            // once true, session logs own narration
+  // Best diagnostic grok gave us THIS turn, so a fast-failing resume/continue is no
+  // longer a blind guess (the user's Windows `--resume <id>` errors in ~1s but our log
+  // never showed grok's real reason). Populated from three channels: an authoritative
+  // streaming-json {type:"error"} record or an error turn_ended detail (_lastGrokErr),
+  // and, as a fallback, the most recent stderr line (_lastGrokStderr). Surfaced right
+  // before the stateless fallback in finishFromTurnEnd, redacted + truncated.
+  let _lastGrokErr = '';                    // authoritative: json error record / error turn_ended detail
+  let _lastGrokStderr = '';                 // fallback: latest non-empty stderr line
+  const grokFailDiag = (): string => {
+    const raw = _lastGrokErr || _lastGrokStderr;
+    if (!raw) { return ''; }
+    const t = redactSecrets(String(raw)).replace(/\s+/g, ' ').trim();
+    return t.length > 300 ? t.slice(0, 297) + '…' : t;
+  };
   // Headless resume hang-probe state (see resumeProbeMs / onResumeHang below). The
   // probe window is the caller-supplied value (sendGrokTuiPrompt reads the env);
   // 0 (all stateless / non-probed calls) leaves the probe disarmed.
@@ -1442,7 +1507,10 @@ export function sendGrokPrompt(
   // the tailer pins THIS dir and never "newest-by-mtime" (which a newer unrelated
   // session dir could hijack). undefined only in the stateless mode, where grok
   // mints an unknown id and newest-by-mtime is the only way to find it.
-  const _fixedDir: string | undefined = _launchSid ? grokSessionDirFor(path.resolve(root), _launchSid) : undefined;
+  // --continue → the existing newest dir grok appends to (resolved above); resume /
+  // new-persistent → the fixed dir for the known id; stateless → undefined (unknown id).
+  const _fixedDir: string | undefined = _continueDir
+    ?? (_launchSid ? grokSessionDirFor(path.resolve(root), _launchSid) : undefined);
   // Snapshot the pre-turn session so the tailer forwards ONLY this turn's records:
   // a RESUMED session's dir already holds backlog → seed at its current end; a
   // FRESH session mints a NEW dir that appears later → read that dir from the start
@@ -1509,8 +1577,12 @@ export function sendGrokPrompt(
     // re-attempts `--resume <storedId>` — continuity resumes as soon as the transient
     // condition clears. Only for a launched RESUME (opts.sessionId present, probe
     // armed); a new-persistent/stateless error falls through to the normal report.
-    if (!clean && !_sawFirstToken && opts.sessionId && opts.onResumeHang && !_resumeAbandoned) {
+    if (!clean && !_sawFirstToken && (opts.sessionId || opts.continueSession) && opts.onResumeHang && !_resumeAbandoned) {
       _resumeAbandoned = true;       // close skips the exit file — the relaunch owns the turn
+      const how = opts.continueSession ? '--continue' : '--resume';
+      const diag = grokFailDiag();
+      if (diag) { log(`Grok: ${how} failed fast — grok said: "${diag}"`); }
+      else { log(`Grok: ${how} failed fast — grok emitted no diagnostic (no stderr / error record captured this turn)`); }
       log('Grok: resume errored before any output (no first_token) — marking session non-resumable this run, falling back to stateless for this turn');
       if (grokFilePoll) { clearInterval(grokFilePoll); }
       if (watchdog) { clearTimeout(watchdog); }
@@ -1565,7 +1637,7 @@ export function sendGrokPrompt(
     // prior transient hiccup stops biasing later turns.
     if (!_sawFirstToken && scanGrokFirstToken(ev.lines)) {
       _sawFirstToken = true;
-      if (opts.sessionId && opts.onResumeOk) { try { opts.onResumeOk(); } catch { /* best effort */ } }
+      if ((opts.sessionId || opts.continueSession) && opts.onResumeOk) { try { opts.onResumeOk(); } catch { /* best effort */ } }
     }
     // Turn-start signal: THIS turn has demonstrably begun in the tailed window
     // (turn_started/loop_started/first_token). A trailing turn_ended is only the
@@ -1589,6 +1661,17 @@ export function sendGrokPrompt(
     // instead of hanging to GROK_MAX_RUN_MS. An error/aborted outcome ends it too
     // (retryable), honoring scanGrokTurnEnd's classification.
     const te = scanGrokTurnEnd(ev.lines);
+    // Capture grok's own error detail from an error turn_ended so the fast-fail
+    // fallback can name WHY (session-not-found, in-use, cwd mismatch, auth, …). Only
+    // when we don't already have an authoritative streaming-json error record.
+    if (te === 'error' && !_lastGrokErr) {
+      for (const l of ev.lines) {
+        let o: any; try { o = typeof l === 'string' ? JSON.parse(l) : l; } catch { continue; }
+        if (!o || o.type !== 'turn_ended') { continue; }
+        const d = o.error?.message ?? o.error ?? o.detail ?? o.message ?? o.reason ?? o.outcome_detail;
+        if (d) { _lastGrokErr = typeof d === 'string' ? d : JSON.stringify(d); break; }
+      }
+    }
     // Safety net against any residual offset skew: only honor a turn_ended once
     // THIS turn has demonstrably started in the tailed window. A turn_ended with no
     // preceding current-turn start is backlog (a prior errored turn read from a
@@ -1657,7 +1740,10 @@ export function sendGrokPrompt(
         // counts a TRANSIENT failure (bounded counter); it does NOT permanently disable
         // resume — the next turn re-attempts `--resume`.
         _resumeAbandoned = true;
-        log(`Grok: headless --resume produced no output in ${Math.round(_probeWaitedMs / 1000)}s (${_probeRound} extension${_probeRound === 1 ? '' : 's'}) — stateless for this turn only (stored session id kept; resume retried next turn)`);
+        const how = opts.continueSession ? '--continue' : '--resume';
+        const diag = grokFailDiag();
+        if (diag) { log(`Grok: ${how} failed — grok said: "${diag}"`); }
+        log(`Grok: headless ${how} produced no output in ${Math.round(_probeWaitedMs / 1000)}s (${_probeRound} extension${_probeRound === 1 ? '' : 's'}) — stateless for this turn only (stored session id kept; resume retried next turn)`);
         if (grokFilePoll) { clearInterval(grokFilePoll); }
         if (watchdog) { clearTimeout(watchdog); }
         killed = true; // suppress the watchdog's own kill/report
@@ -1688,6 +1774,7 @@ export function sendGrokPrompt(
       }
     } else if (type === 'error') {
       const errMsg: string = msg.message ?? JSON.stringify(msg);
+      _lastGrokErr = errMsg;                 // authoritative diagnostic for a fast resume/continue failure
       log(`Grok error: ${errMsg}`);
       try { fs.appendFileSync(stdoutFile, `\n[Grok error: ${errMsg}]\n`, 'utf8'); } catch { /* ignore */ }
     } else if (type === 'end') {
@@ -1703,6 +1790,7 @@ export function sendGrokPrompt(
   errRl?.on('line', (line: string) => {
     const text = line.trim();
     if (!text) { return; }
+    _lastGrokStderr = text;                  // fallback diagnostic for a fast resume/continue failure
     log(`Grok stderr: ${text}`);
     if (GROK_MAX_TOOL_ERRORS > 0 && text.includes('tool_output_error')) {
       toolErrorCount++;
@@ -1736,6 +1824,15 @@ export function sendGrokPrompt(
     // A session-log turn_ended already reported the true outcome via _forcedExit;
     // don't let the SIGKILL exit code (1) override a clean finish.
     const exitCode = _forcedExit ?? code ?? 1;
+    // A resume/continue that FAILED FAST by exiting non-zero directly (grok printed to
+    // stderr and quit, e.g. "Session <id> not found locally … 404 Not Found") never
+    // wrote a session-log turn_ended, so it bypassed finishFromTurnEnd's diagnostic.
+    // Surface grok's captured reason here too so this failure shape is not a blind guess.
+    if (exitCode !== 0 && !_sawFirstToken && (opts.sessionId || opts.continueSession)) {
+      const how = opts.continueSession ? '--continue' : '--resume';
+      const diag = grokFailDiag();
+      if (diag) { log(`Grok: ${how} failed fast (exit ${exitCode}) — grok said: "${diag}"`); }
+    }
     log(`Grok: exited (code=${exitCode})`);
     if (!_endSeen) {
       _emitGrokHook(root, exitCode === 0 ? 'Stop' : 'StopFailure', { exit_code: exitCode });
@@ -1778,7 +1875,7 @@ export function sendGrokCliPrompt(
  *
  * - grok-tui + tmux    → useTmux: true  (persistent live pane; context accretes)
  * - grok-tui + no tmux → useTmux: false (HEADLESS path — persistence handled there
- *   via `grok --resume` behind the first_token hang-probe; see decideHeadlessGrokMode)
+ *   via `grok --continue` behind the first_token hang-probe; see decideHeadlessGrokMode)
  * - grok-cli           → useTmux: false always (never uses tmux)
  */
 export function decideGrokRunMode(
@@ -1793,25 +1890,30 @@ export function decideGrokRunMode(
  * unit-testable. The `maxConsecutiveFailures` guard REPLACES the old permanent
  * "resumeBroken" flag that doomed a whole run to statelessness after one hiccup.
  *
- * - no stored session id                                → 'new-persistent': there is
- *   no id to reuse, so bootstrap persistence with a fresh named session
- *   (`--session-id`, mints + persists a UUID; NOT `--resume`, so it can't hit a
- *   resume-hang), behind the probe as a safety net.
- * - a stored id, failures < max                         → 'resume': attempt persistent
- *   `grok --resume <id>` (the reliable, near-instant path on grok 1.0.13), gated by
- *   the first_token hang-probe. This is the STEADY STATE — every turn resumes.
- * - a stored id, failures >= max (sustained resume hang) → 'stateless' for exactly ONE
+ * - no folder session yet                                → 'new-session': there is no
+ *   session on disk for this cwd to continue, so bootstrap persistence with a fresh
+ *   named session (`--session-id`, mints + persists a UUID; NOT `--continue`, which
+ *   would have nothing to continue), behind the probe as a safety net.
+ * - a folder session exists, failures < max              → 'continue': resume the cwd's
+ *   most-recent session with `grok --continue` — robust to the stale-id / cwd-tracking
+ *   drift that made an explicit `--resume <id>` error in ~1s on Windows. Gated by the
+ *   first_token hang-probe. This is the STEADY STATE — every turn continues.
+ * - a folder session, failures >= max (sustained hang)   → 'stateless' for exactly ONE
  *   breather turn (skip the probe cost once); the caller resets the counter so the
- *   NEXT turn returns to 'resume'. The stored id is preserved throughout, so resume
- *   is NEVER permanently abandoned — persistence self-heals.
+ *   NEXT turn returns to 'continue'. The folder session is untouched, so continuity is
+ *   NEVER permanently abandoned — persistence self-heals.
+ *
+ * NOTE: the decision keys off FOLDER-SESSION PRESENCE (newestGrokSessionDir exists),
+ * NOT a stored id — because `--continue` needs no id, and keying off a stored id is
+ * exactly what let a stale/mismatched id drive a doomed `--resume`.
  */
 export function decideHeadlessGrokMode(
-  args: { hasSessionId: boolean; consecutiveResumeFailures: number; maxConsecutiveFailures?: number },
-): 'resume' | 'new-persistent' | 'stateless' {
-  if (!args.hasSessionId) { return 'new-persistent'; }
+  args: { hasFolderSession: boolean; consecutiveResumeFailures: number; maxConsecutiveFailures?: number },
+): 'continue' | 'new-session' | 'stateless' {
+  if (!args.hasFolderSession) { return 'new-session'; }
   const max = args.maxConsecutiveFailures ?? RESUME_MAX_CONSEC_FAILURES;
   if (args.consecutiveResumeFailures >= max) { return 'stateless'; }
-  return 'resume';
+  return 'continue';
 }
 
 /**
@@ -1889,14 +1991,16 @@ export function sendGrokTuiPrompt(
 
 /**
  * The persistent HEADLESS grok launch, shared by grok-cli and headless grok-tui.
- * We want PERSISTENCE across turns, so attempt grok's persistent session
- * (`--resume` when a session id exists). grok 1.0.41's headless `--resume` can hang
- * the resumed turn (loaded-but-never-answers) → the 10-min watchdog, so every
- * persistent launch is gated behind a FAST first_token hang-probe: if grok begins
- * answering within AUTODEV_GROK_RESUME_PROBE_MS the turn runs normally (persistent,
- * context intact); if not, sendGrokPrompt kills it and calls onResumeHang to relaunch
- * THIS turn stateless. A resume failure is COUNTED (bounded, NOT a permanent poison):
- * the STORED session id is preserved and the NEXT turn re-attempts `--resume`, so a
+ * We want PERSISTENCE across turns, so when the cwd already has a grok session on disk
+ * we resume the MOST RECENT one with `grok --continue` (robust to the stale-id /
+ * cwd-tracking drift that made an explicit `--resume <id>` error in ~1s on Windows and
+ * forced every turn stateless). grok's headless resume can also hang a resumed turn
+ * (loaded-but-never-answers) → the watchdog, so every persistent launch is gated behind
+ * a FAST first_token hang-probe: if grok begins answering within
+ * AUTODEV_GROK_RESUME_PROBE_MS the turn runs normally (persistent, context intact); if
+ * not, sendGrokPrompt kills it and calls onResumeHang to relaunch THIS turn stateless. A
+ * failure is COUNTED (bounded, NOT a permanent poison): the folder session is preserved
+ * and the NEXT turn re-attempts `--continue`, so a
  * transient hiccup can't strand the run in per-turn statelessness (the pre-1.4.184 bug).
  * Only after RESUME_MAX_CONSEC_FAILURES straight failures does a single breather turn
  * skip resume, after which resume is tried again. The stateless path stays intact as the
@@ -1916,6 +2020,11 @@ function sendGrokPersistentHeadless(
 ): void {
   const label = providerId === 'grok-cli' ? 'Grok CLI' : 'Grok TUI';
   const PROBE_MS = envNum('AUTODEV_GROK_RESUME_PROBE_MS', 90_000);
+  // Continuity is decided by whether grok has a session on disk for THIS cwd — the same
+  // signal `grok --continue` itself uses — NOT a stored id (a stale/mismatched id was the
+  // root cause of the instant `--resume <id>` error). resolvedSessionId/getSessionId are
+  // kept only for logging + best-effort id display.
+  const hasFolderSession = !!newestGrokSessionDir(path.resolve(root));
   const persistedSid = resolvedSessionId || getSessionId(root, providerId);
   // Stateless relaunch: grok mints a throwaway id for THIS turn. persist:false means
   // it never overwrites the STORED session id in session-state.json → the next turn
@@ -1938,28 +2047,29 @@ function sendGrokPersistentHeadless(
   const onResumeOk = (): void => { _noteResumeSuccess(root); };
 
   const decision = decideHeadlessGrokMode({
-    hasSessionId: !!persistedSid, consecutiveResumeFailures: _resumeFailCount(root),
+    hasFolderSession, consecutiveResumeFailures: _resumeFailCount(root),
   });
 
   if (decision === 'stateless') {
-    // Sustained resume failures → ONE breather turn (skip the probe cost), then the
-    // counter resets so the NEXT turn resumes again. Persistence is never abandoned.
-    log(`${label}: --resume failed ${_resumeFailCount(root)}× in a row — one stateless breather turn, will retry --resume next turn`);
-    _noteResumeSuccess(root); // reset so the next turn returns to 'resume'
+    // Sustained continue failures → ONE breather turn (skip the probe cost), then the
+    // counter resets so the NEXT turn continues again. Persistence is never abandoned.
+    log(`${label}: --continue failed ${_resumeFailCount(root)}× in a row — one stateless breather turn, will retry --continue next turn`);
+    _noteResumeSuccess(root); // reset so the next turn returns to 'continue'
     runStateless();
     return;
   }
-  if (decision === 'resume') {
-    log(`${label}: resuming session ${persistedSid!.slice(0, 8)}… (headless)`);
+  if (decision === 'continue') {
+    const idNote = persistedSid ? ` (${persistedSid.slice(0, 8)}…)` : '';
+    log(`${label}: continuing most-recent session for cwd${idNote} (headless --continue)`);
     sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
-      model, showOutput, persist: true, sessionId: persistedSid, providerId,
+      model, showOutput, persist: true, continueSession: true, providerId,
       resumeProbeMs: PROBE_MS, onResumeHang, onResumeOk,
     });
     return;
   }
-  // new-persistent — no stored id yet: bootstrap a fresh named session so later turns
-  // have an id to resume. A fresh `--session-id` isn't a `--resume`, but keep the
-  // probe as a belt-and-braces safety net (and it can never exceed the watchdog).
+  // new-session — no folder session yet: bootstrap a fresh named session so later turns
+  // have one to `--continue`. A fresh `--session-id` isn't a resume, but keep the probe
+  // as a belt-and-braces safety net (and it can never exceed the watchdog).
   log(`${label}: starting a new persistent session (headless)`);
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
     model, showOutput, persist: true, providerId,

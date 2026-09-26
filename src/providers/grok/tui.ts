@@ -91,14 +91,27 @@ const _busyRoots = new Set<string>();
 const _activeChildren = new Map<string, child_process.ChildProcess>();
 
 /**
- * Roots whose HEADLESS `grok --resume` has proven to hang THIS run (loaded the
- * session but the first_token hang-probe timed out). Once a root is in here the
- * headless path skips straight to stateless instead of paying the ~90s probe on
- * every turn. Reset when the grok session is closed (a new loop/run gets a clean
- * slate and re-attempts resume once). Only ever consulted on the headless (no
- * tmux) path — the tmux persistent path is unaffected.
+ * CONSECUTIVE headless-`grok --resume` failures per root (probe hang OR an
+ * error-before-first-token). This REPLACES the old permanent `_resumeBroken` set,
+ * which — after a SINGLE transient resume hiccup — forced every later turn STATELESS
+ * (a fresh, unknown session id each turn → no conversation continuity for the rest
+ * of the run). Empirically `grok --resume <id>` is reliable and near-instant on the
+ * current grok (1.0.13: first_token ~40ms on resume, correct cross-turn recall), so
+ * a resume failure is treated as TRANSIENT, not terminal: the count is RESET to 0 the
+ * moment a resumed turn produces its first_token, and the headless path RE-ATTEMPTS
+ * `--resume <storedId>` on the very next turn. Only after RESUME_MAX_CONSEC_FAILURES
+ * straight failures does one turn take a stateless "breather" (skip the probe once),
+ * after which the count resets and resume is tried again — so persistence is never
+ * permanently abandoned. The STORED session id is preserved across every fallback
+ * (stateless relaunch uses persist:false and never overwrites it), so continuity
+ * resumes as soon as the transient condition clears. Cleared when the session closes.
  */
-const _resumeBroken = new Set<string>();
+const _resumeFailures = new Map<string, number>();
+/** Straight resume failures before ONE stateless breather turn (then retry resume). */
+const RESUME_MAX_CONSEC_FAILURES = Math.max(1, envNum('AUTODEV_GROK_RESUME_MAX_FAILS', 3));
+const _resumeFailCount = (root: string): number => _resumeFailures.get(root) ?? 0;
+const _noteResumeFailure = (root: string): void => { _resumeFailures.set(root, _resumeFailCount(root) + 1); };
+const _noteResumeSuccess = (root: string): void => { _resumeFailures.delete(root); };
 
 /** Live tmux-backed grok sessions by root (persistent grok-tui). */
 interface TmuxSession {
@@ -1249,6 +1262,12 @@ interface GrokRunOptions {
    */
   resumeProbeMs?: number;
   onResumeHang?: () => void;
+  /**
+   * Fired ONCE when a launched RESUME (opts.sessionId present) demonstrably begins
+   * answering — the first `first_token`. Lets the caller clear its consecutive-resume-
+   * failure counter so a prior transient hiccup does not keep biasing later turns.
+   */
+  onResumeOk?: () => void;
 }
 
 export function sendGrokPrompt(
@@ -1393,6 +1412,7 @@ export function sendGrokPrompt(
   // 0 (all stateless / non-probed calls) leaves the probe disarmed.
   const RESUME_PROBE_MS = Math.max(0, opts.resumeProbeMs ?? 0);
   let _sawFirstToken = false;              // grok emitted first_token → resume works
+  let _grokWroteEvents = false;            // grok appended ANY session events this turn (loaded + active)
   let _resumeAbandoned = false;            // probe killed this grok; a stateless relaunch owns the turn
   const _grokEmittedIds = _emittedToolIds.get(root) ?? (() => { const s = new Set<string>(); _emittedToolIds.set(root, s); return s; })();
   const _grokSize = (f: string): number => { try { return fs.statSync(f).size; } catch { return 0; } };
@@ -1464,9 +1484,11 @@ export function sendGrokPrompt(
     // failing fast, a poisoned/stale session, or any unrecoverable resume error).
     // Reporting a task failure here would just re-resume the SAME broken session
     // next turn → the infinite `retry 1/10` loop. Instead, reuse the resume
-    // hang-probe's machinery: mark the root non-resumable for this run and relaunch
-    // THIS turn stateless (decideHeadlessGrokMode then routes later turns to
-    // new-persistent). Only for a launched RESUME (opts.sessionId present, probe
+    // hang-probe's machinery: count ONE transient resume failure (bounded, NOT a
+    // permanent poison) and relaunch THIS turn stateless so the task completes. The
+    // STORED session id is preserved (stateless uses persist:false), so the next turn
+    // re-attempts `--resume <storedId>` — continuity resumes as soon as the transient
+    // condition clears. Only for a launched RESUME (opts.sessionId present, probe
     // armed); a new-persistent/stateless error falls through to the normal report.
     if (!clean && !_sawFirstToken && opts.sessionId && opts.onResumeHang && !_resumeAbandoned) {
       _resumeAbandoned = true;       // close skips the exit file — the relaunch owns the turn
@@ -1517,9 +1539,15 @@ export function sendGrokPrompt(
     _grokFilesActive = true;              // session logs now own narration
     const ev = drainNewJsonlLines(evFile, _evOff); _evOff = ev.offset;
     const ch = drainNewJsonlLines(chFile, _chOff); _chOff = ch.offset;
+    if (ev.lines.length) { _grokWroteEvents = true; } // grok is writing → loaded + active (not a dead-load hang)
     // Resume hang-probe signal: grok emitted first_token → the (resumed) prompt is
-    // being answered, so the probe below leaves the turn to run normally.
-    if (!_sawFirstToken && scanGrokFirstToken(ev.lines)) { _sawFirstToken = true; }
+    // being answered, so the probe below leaves the turn to run normally. On a RESUME
+    // launch this is also proof the resume succeeded → clear the failure counter so a
+    // prior transient hiccup stops biasing later turns.
+    if (!_sawFirstToken && scanGrokFirstToken(ev.lines)) {
+      _sawFirstToken = true;
+      if (opts.sessionId && opts.onResumeOk) { try { opts.onResumeOk(); } catch { /* best effort */ } }
+    }
     // Turn-start signal: THIS turn has demonstrably begun in the tailed window
     // (turn_started/loop_started/first_token). A trailing turn_ended is only the
     // current turn's result once we have seen the start — otherwise it is backlog.
@@ -1567,27 +1595,44 @@ export function sendGrokPrompt(
   // first, making the probe a no-op. Well under MAX_RUN_MS so it never races the
   // watchdog.
   let resumeProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  let _probeExtended = false;              // the one grace window has been granted
   if (RESUME_PROBE_MS > 0 && opts.onResumeHang) {
-    resumeProbeTimer = setTimeout(() => {
-      // Final drain to catch a first_token / turn_ended written between polls.
-      try { pumpGrokSessionFiles(); } catch { /* best effort */ }
-      if (_endSeen || killed || _resumeAbandoned) { return; } // turn already resolved
-      if (resumeProbeVerdict({ sawFirstToken: _sawFirstToken, elapsedMs: RESUME_PROBE_MS, probeMs: RESUME_PROBE_MS }) === 'ok') {
-        return; // grok is answering — resume works; let the persistent turn run
-      }
-      // The hang: kill grok and relaunch this turn stateless. Mark abandoned FIRST
-      // so this child's `close` skips writing the exit file / clearing busy state —
-      // the stateless relaunch (invoked below) owns the turn's plumbing now.
-      _resumeAbandoned = true;
-      log(`Grok TUI: headless --resume produced no output in ${Math.round(RESUME_PROBE_MS / 1000)}s — falling back to stateless for this turn (session marked non-resumable)`);
-      if (grokFilePoll) { clearInterval(grokFilePoll); }
-      if (watchdog) { clearTimeout(watchdog); }
-      killed = true; // suppress the watchdog's own kill/report
-      if (child.pid) { killProcessTree(child.pid); }
-      try { child.kill('SIGKILL'); } catch { /* ignore */ }
-      try { opts.onResumeHang!(); } catch (e) { log(`Grok TUI: stateless relaunch failed: ${(e as Error)?.message ?? String(e)}`); }
-    }, RESUME_PROBE_MS);
-    resumeProbeTimer.unref?.();
+    const armProbe = (): void => {
+      resumeProbeTimer = setTimeout(() => {
+        // Final drain to catch a first_token / turn_ended written between polls.
+        try { pumpGrokSessionFiles(); } catch { /* best effort */ }
+        if (_endSeen || killed || _resumeAbandoned) { return; } // turn already resolved
+        const verdict = resumeProbeVerdict({
+          sawFirstToken: _sawFirstToken, elapsedMs: RESUME_PROBE_MS, probeMs: RESUME_PROBE_MS,
+          grewSinceSeed: _grokWroteEvents, alreadyExtended: _probeExtended,
+        });
+        if (verdict === 'ok') { return; } // grok is answering — resume works; let the turn run
+        if (verdict === 'extend') {
+          // Loaded + actively writing but not answering yet (large session / a tool
+          // call before first text) → NOT the hang. Grant ONE more window rather than
+          // killing a healthy-but-slow resume. Bounded (once) and well under the watchdog.
+          _probeExtended = true;
+          log(`Grok TUI: --resume still loading after ${Math.round(RESUME_PROBE_MS / 1000)}s but grok is writing session events — extending the probe once`);
+          armProbe();
+          return;
+        }
+        // The hang (verdict 'fallback'): grok produced nothing at all. Kill it and
+        // relaunch THIS turn stateless. Mark abandoned FIRST so this child's `close`
+        // skips the exit file / busy clear — the stateless relaunch owns the turn now.
+        // NOTE: onResumeHang only counts a TRANSIENT failure (bounded counter); it does
+        // NOT permanently disable resume — the next turn re-attempts `--resume`.
+        _resumeAbandoned = true;
+        log(`Grok TUI: headless --resume produced no output in ${Math.round(RESUME_PROBE_MS / 1000)}s — stateless for this turn only (stored session id kept; resume retried next turn)`);
+        if (grokFilePoll) { clearInterval(grokFilePoll); }
+        if (watchdog) { clearTimeout(watchdog); }
+        killed = true; // suppress the watchdog's own kill/report
+        if (child.pid) { killProcessTree(child.pid); }
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        try { opts.onResumeHang!(); } catch (e) { log(`Grok TUI: stateless relaunch failed: ${(e as Error)?.message ?? String(e)}`); }
+      }, RESUME_PROBE_MS);
+      resumeProbeTimer.unref?.();
+    };
+    armProbe();
   }
 
   rl.on('line', (line: string) => {
@@ -1708,37 +1753,62 @@ export function decideGrokRunMode(
 }
 
 /**
- * Pure decision for how the HEADLESS grok-tui path (no tmux) should launch this
- * turn. Extracted so the resume/bootstrap/stateless routing is unit-testable.
+ * Pure decision for how the HEADLESS grok-tui / grok-cli path (no tmux) should
+ * launch this turn. Extracted so the resume/bootstrap/stateless routing is
+ * unit-testable. The `maxConsecutiveFailures` guard REPLACES the old permanent
+ * "resumeBroken" flag that doomed a whole run to statelessness after one hiccup.
  *
- * - resumeBroken (this run) → 'stateless': `--resume` already hung this run, so
- *   skip straight to the proven stateless invocation (no repeated ~90s probe).
- * - a stored session id      → 'resume': attempt persistent `grok --resume <id>`
- *   (the pre-1.4.178 behavior), gated by the first_token hang-probe.
- * - no stored id             → 'new-persistent': bootstrap persistence with a fresh
- *   named session (`--session-id`, mints + persists a UUID; NOT `--resume`, so it
- *   can't hit the resume-hang), also behind the probe as a safety net.
+ * - no stored session id                                → 'new-persistent': there is
+ *   no id to reuse, so bootstrap persistence with a fresh named session
+ *   (`--session-id`, mints + persists a UUID; NOT `--resume`, so it can't hit a
+ *   resume-hang), behind the probe as a safety net.
+ * - a stored id, failures < max                         → 'resume': attempt persistent
+ *   `grok --resume <id>` (the reliable, near-instant path on grok 1.0.13), gated by
+ *   the first_token hang-probe. This is the STEADY STATE — every turn resumes.
+ * - a stored id, failures >= max (sustained resume hang) → 'stateless' for exactly ONE
+ *   breather turn (skip the probe cost once); the caller resets the counter so the
+ *   NEXT turn returns to 'resume'. The stored id is preserved throughout, so resume
+ *   is NEVER permanently abandoned — persistence self-heals.
  */
 export function decideHeadlessGrokMode(
-  args: { hasSessionId: boolean; resumeBroken: boolean },
+  args: { hasSessionId: boolean; consecutiveResumeFailures: number; maxConsecutiveFailures?: number },
 ): 'resume' | 'new-persistent' | 'stateless' {
-  if (args.resumeBroken) { return 'stateless'; }
-  return args.hasSessionId ? 'resume' : 'new-persistent';
+  if (!args.hasSessionId) { return 'new-persistent'; }
+  const max = args.maxConsecutiveFailures ?? RESUME_MAX_CONSEC_FAILURES;
+  if (args.consecutiveResumeFailures >= max) { return 'stateless'; }
+  return 'resume';
 }
 
 /**
  * Pure verdict for the headless resume hang-probe.
  *   'ok'       — grok emitted first_token → the resumed prompt is being answered;
  *                let the persistent turn run to its normal turn-end.
- *   'fallback' — the probe window elapsed with NO first_token → the grok 1.0.41
- *                headless `--resume` hang; kill grok and relaunch stateless.
+ *   'extend'   — the window elapsed with NO first_token, but grok HAS written new
+ *                session events since launch (it loaded the session and is actively
+ *                working — e.g. a large session still streaming, or a tool call
+ *                before the first text). NOT the hang signature → grant one more
+ *                window instead of killing a healthy-but-slow resume. Only offered
+ *                once (alreadyExtended gates it), so total probe time stays bounded
+ *                well under the run watchdog.
+ *   'fallback' — the window elapsed with NO first_token AND no new events (a truly
+ *                silent/loaded-but-idle resume) → the hang; kill + relaunch stateless.
  *   'wait'     — neither yet (window not elapsed and no first_token) → keep waiting.
+ *
+ * Rationale (grok 1.0.13 measured): a healthy `--resume` produces first_token in
+ * ~40ms, so a plain time window is NOT a false trigger for normal sessions; the
+ * `grewSinceSeed` grace exists only so a very large session's slower load isn't
+ * mistaken for the loaded-but-never-answers hang. `grewSinceSeed`/`alreadyExtended`
+ * default false → the original single-window behavior is preserved for callers that
+ * don't pass them.
  */
 export function resumeProbeVerdict(
-  args: { sawFirstToken: boolean; elapsedMs: number; probeMs: number },
-): 'ok' | 'fallback' | 'wait' {
+  args: { sawFirstToken: boolean; elapsedMs: number; probeMs: number; grewSinceSeed?: boolean; alreadyExtended?: boolean },
+): 'ok' | 'extend' | 'fallback' | 'wait' {
   if (args.sawFirstToken) { return 'ok'; }
-  if (args.probeMs > 0 && args.elapsedMs >= args.probeMs) { return 'fallback'; }
+  if (args.probeMs > 0 && args.elapsedMs >= args.probeMs) {
+    if (args.grewSinceSeed && !args.alreadyExtended) { return 'extend'; }
+    return 'fallback';
+  }
   return 'wait';
 }
 
@@ -1768,11 +1838,14 @@ export function sendGrokTuiPrompt(
  * the resumed turn (loaded-but-never-answers) → the 10-min watchdog, so every
  * persistent launch is gated behind a FAST first_token hang-probe: if grok begins
  * answering within AUTODEV_GROK_RESUME_PROBE_MS the turn runs normally (persistent,
- * context intact); if not, sendGrokPrompt kills it and calls onResumeHang to
- * relaunch THIS turn stateless, and we mark the root non-resumable so later turns
- * skip the probe. The stateless path stays intact as the safety net (sendGrokPrompt's
- * session-log tailing still forwards tool/narration events and detects turn_ended
- * either way).
+ * context intact); if not, sendGrokPrompt kills it and calls onResumeHang to relaunch
+ * THIS turn stateless. A resume failure is COUNTED (bounded, NOT a permanent poison):
+ * the STORED session id is preserved and the NEXT turn re-attempts `--resume`, so a
+ * transient hiccup can't strand the run in per-turn statelessness (the pre-1.4.184 bug).
+ * Only after RESUME_MAX_CONSEC_FAILURES straight failures does a single breather turn
+ * skip resume, after which resume is tried again. The stateless path stays intact as the
+ * safety net (sendGrokPrompt's session-log tailing still forwards tool/narration events
+ * and detects turn_ended either way).
  */
 function sendGrokPersistentHeadless(
   root: string,
@@ -1788,21 +1861,35 @@ function sendGrokPersistentHeadless(
   const label = providerId === 'grok-cli' ? 'Grok CLI' : 'Grok TUI';
   const PROBE_MS = envNum('AUTODEV_GROK_RESUME_PROBE_MS', 90_000);
   const persistedSid = resolvedSessionId || getSessionId(root, providerId);
+  // Stateless relaunch: grok mints a throwaway id for THIS turn. persist:false means
+  // it never overwrites the STORED session id in session-state.json → the next turn
+  // still resumes the real conversation. This is the per-turn safety net, NOT the
+  // steady state (the steady state is 'resume').
   const runStateless = (): void => {
     sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
       model, showOutput, persist: false, providerId,
     });
   };
-  // The fallback the probe invokes on a hang: mark this root non-resumable for the
-  // rest of the run, then relaunch this same turn stateless (reusing the SAME
-  // stdout/exit-file plumbing) so the task still completes.
+  // The fallback the probe / error-before-first-token path invokes: count ONE
+  // transient resume failure (bounded — NOT a permanent poison) and relaunch this
+  // same turn stateless so the task completes. The stored id is untouched, so the
+  // next turn re-attempts `--resume <storedId>`.
   const onResumeHang = (): void => {
-    _resumeBroken.add(root);
+    _noteResumeFailure(root);
     runStateless();
   };
-  const decision = decideHeadlessGrokMode({ hasSessionId: !!persistedSid, resumeBroken: _resumeBroken.has(root) });
+  // Clear the failure counter the instant a resumed turn starts answering.
+  const onResumeOk = (): void => { _noteResumeSuccess(root); };
+
+  const decision = decideHeadlessGrokMode({
+    hasSessionId: !!persistedSid, consecutiveResumeFailures: _resumeFailCount(root),
+  });
+
   if (decision === 'stateless') {
-    log(`${label}: no tmux and --resume marked non-resumable this run — running stateless`);
+    // Sustained resume failures → ONE breather turn (skip the probe cost), then the
+    // counter resets so the NEXT turn resumes again. Persistence is never abandoned.
+    log(`${label}: --resume failed ${_resumeFailCount(root)}× in a row — one stateless breather turn, will retry --resume next turn`);
+    _noteResumeSuccess(root); // reset so the next turn returns to 'resume'
     runStateless();
     return;
   }
@@ -1810,13 +1897,13 @@ function sendGrokPersistentHeadless(
     log(`${label}: resuming session ${persistedSid!.slice(0, 8)}… (headless)`);
     sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
       model, showOutput, persist: true, sessionId: persistedSid, providerId,
-      resumeProbeMs: PROBE_MS, onResumeHang,
+      resumeProbeMs: PROBE_MS, onResumeHang, onResumeOk,
     });
     return;
   }
-  // new-persistent — bootstrap a fresh named session so later turns have an id to
-  // resume. A fresh `--session-id` isn't a `--resume`, but keep the probe as a
-  // belt-and-braces safety net (and it can never exceed the watchdog).
+  // new-persistent — no stored id yet: bootstrap a fresh named session so later turns
+  // have an id to resume. A fresh `--session-id` isn't a `--resume`, but keep the
+  // probe as a belt-and-braces safety net (and it can never exceed the watchdog).
   log(`${label}: starting a new persistent session (headless)`);
   sendGrokPrompt(root, promptFilePath, stdoutFile, exitFile, log, {
     model, showOutput, persist: true, providerId,
@@ -1880,9 +1967,9 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
   }
   _busyRoots.delete(root);
   _emittedToolIds.delete(root);
-  // A close marks a run boundary — clear the non-resumable mark so the next
-  // loop/run re-attempts persistent --resume once (behind the hang-probe).
-  _resumeBroken.delete(root);
+  // A close marks a run boundary — clear the transient resume-failure count so the
+  // next loop/run starts clean and re-attempts persistent --resume immediately.
+  _resumeFailures.delete(root);
 }
 
 /** Kill all live grok sessions — called on SDK/extension shutdown. */
@@ -1898,7 +1985,7 @@ export function closeAllGrokTuiSessions(): void {
   _tmuxSessions.clear();
   _busyRoots.clear();
   _emittedToolIds.clear();
-  _resumeBroken.clear();
+  _resumeFailures.clear();
 }
 
 // ---------------------------------------------------------------------------

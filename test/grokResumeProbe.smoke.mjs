@@ -45,9 +45,22 @@ ok('first_token seen before the window → "ok" (let the persistent turn run)', 
   // ok wins even at/after the deadline — a first_token is proof regardless of time.
   assert.strictEqual(resumeProbeVerdict({ sawFirstToken: true, elapsedMs: 90000, probeMs: 90000 }), 'ok');
 });
-ok('window elapsed with NO first_token → "fallback" (the hang → relaunch stateless)', () => {
+ok('window elapsed with NO first_token and NO new events → "fallback" (the hang)', () => {
   assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 90000, probeMs: 90000 }), 'fallback');
   assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 90001, probeMs: 90000 }), 'fallback');
+  // Explicit no-growth is the same as the default (back-compat preserved).
+  assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 90000, probeMs: 90000, grewSinceSeed: false }), 'fallback');
+});
+// Tolerant probe (1.4.184): a resume that LOADED and is actively writing session
+// events (large session still streaming / a tool call before first text) is NOT the
+// loaded-but-idle hang → grant ONE grace window instead of killing a healthy resume.
+ok('window elapsed, no first_token, but grok WROTE events → "extend" (once)', () => {
+  assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 90000, probeMs: 90000, grewSinceSeed: true }), 'extend');
+  // The grace is offered only once — after extending, a still-silent window falls back.
+  assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 90000, probeMs: 90000, grewSinceSeed: true, alreadyExtended: true }), 'fallback');
+});
+ok('a first_token still wins even when events grew (no needless extend)', () => {
+  assert.strictEqual(resumeProbeVerdict({ sawFirstToken: true, elapsedMs: 90000, probeMs: 90000, grewSinceSeed: true }), 'ok');
 });
 ok('neither yet (window not elapsed, no first_token) → "wait"', () => {
   assert.strictEqual(resumeProbeVerdict({ sawFirstToken: false, elapsedMs: 5000, probeMs: 90000 }), 'wait');

@@ -199,6 +199,15 @@ export interface AutodevSettings {
    */
   maxProviderRetries: number;
   /**
+   * How many times a STRANDED task (the CLI exited leaving it [~] in-progress
+   * without completing it) is reset to pending [ ] and re-attempted before it is
+   * finally flagged BLOCKED / needs-attention. A stranded task is NEVER marked
+   * [x] done — correctness over efficiency; the user prefers never-false-done.
+   * Distinct from maxProviderRetries (a detected provider hard-failure) and
+   * maxTaskAttempts (turns that RAN but did not mark the task done). Default: 3.
+   */
+  maxStrandRetries: number;
+  /**
    * Move completed [x] tasks from TODO.md into DONE.md every N
    * completed tasks (0 = disabled). Keeps the active TODO file short.
    */
@@ -332,6 +341,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   resetSessionEveryNTurns: 0,
   maxTaskAttempts: 3,
   maxProviderRetries: 10,
+  maxStrandRetries: 3,
   pruneTodoEveryNTasks: 0,
   journalLearnEveryNTasks: 0,
   profileEveryNTasks: 0,

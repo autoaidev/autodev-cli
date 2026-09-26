@@ -58,6 +58,56 @@ export function taskHardFailedDuringWait(blockedBeforeWait: boolean, blockedAfte
   return blockedAfterWait && !blockedBeforeWait;
 }
 
+/**
+ * Default number of times a stranded `[~]` in-progress task (the CLI exited
+ * without completing it) is reset to pending `[ ]` and re-attempted before it
+ * is finally flagged BLOCKED / needs-attention. Overridable per-agent via
+ * `settings.maxStrandRetries`. A crashed / StopFailure'd task is NEVER marked
+ * done — correctness over efficiency: re-doing a task the agent actually
+ * finished (safe, wasteful) beats reporting a half-done task as complete
+ * (unsafe). The user explicitly prefers never-false-done.
+ */
+export const MAX_STRAND_RETRIES = 3;
+
+/** Action decided for a single stranded `[~]` task by {@link reconcileStrandedTask}. */
+export type StrandAction = 'reset' | 'block';
+
+/**
+ * PURE, side-effect-contained reconciliation for ONE stranded `[~]` task on a
+ * non-clean CLI exit. Advances the in-memory strand counter and decides whether
+ * to reset the task to pending (`reset`, retry) or promote it to blocked /
+ * needs-attention (`block`).
+ *
+ * CRITICAL flood-safety contract: this mutates ONLY the in-memory `strandCount`
+ * map and (on `block`) the `blocked` set — it does NOT touch TODO.md. The caller
+ * MUST invoke this and let the bookkeeping settle BEFORE any TODO.md write, so a
+ * locked / unwritable TODO.md can never cause a flood: the per-task counter
+ * still climbs and the task still lands in `blocked` after MAX regardless of
+ * whether the reset/blocked-marker write throws or silently fails. Because the
+ * caller's stranded filter excludes `blocked` tasks, a given task is reconciled
+ * at most `max + 1` times total (max resets, then one block) — never per-second.
+ *
+ * @param key   Task identity — `t.id ?? t.text` (mirrors _blockedTasks/_pendingRetry keying).
+ * @param strandCount  Per-task strand-attempt counter map (mutated).
+ * @param blocked      Blocked / needs-attention task-key set (mutated on `block`).
+ * @param max   Retry ceiling (default {@link MAX_STRAND_RETRIES}).
+ */
+export function reconcileStrandedTask(
+  key: string,
+  strandCount: Map<string, number>,
+  blocked: Set<string>,
+  max: number = MAX_STRAND_RETRIES,
+): { action: StrandAction; count: number } {
+  const count = (strandCount.get(key) ?? 0) + 1;
+  strandCount.set(key, count);
+  if (count > max) {
+    blocked.add(key);
+    strandCount.delete(key); // done escalating — it is blocked now; free the counter
+    return { action: 'block', count };
+  }
+  return { action: 'reset', count };
+}
+
 // ---------------------------------------------------------------------------
 // Rate-limit + context-length errors
 // ---------------------------------------------------------------------------
@@ -238,6 +288,13 @@ export class TaskLoopRunner {
    *  stranded-[~] cleanup auto-marking them done). Consumed when the loop
    *  re-picks the task for re-dispatch. */
   private _pendingRetry = new Set<string>();
+  /** Per-task STRAND counter (id or text). Incremented each time the CLI exits
+   *  leaving this task `[~]` in-progress without completing it. While ≤
+   *  maxStrandRetries the task is reset to pending `[ ]` and re-attempted; past
+   *  the ceiling it is promoted to _blockedTasks (needs-attention) and NEVER
+   *  marked done. Advances purely in-memory BEFORE any TODO.md write so a
+   *  locked/unwritable TODO.md can never flood the stranded sweep. */
+  private _strandCount = new Map<string, number>();
   /** Counts completed tasks since the last auto-compact run. */
   private _autoCompactCounter = 0;
   /** Counts completed tasks since the last session reset. */
@@ -398,6 +455,7 @@ export class TaskLoopRunner {
     this._blockedTasks.clear();
     this._hardFailAttempts.clear();
     this._pendingRetry.clear();
+    this._strandCount.clear();
     this._autoCompactCounter = 0;
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
@@ -1552,28 +1610,73 @@ export class TaskLoopRunner {
             if (cleanExit) {
               this._cb?.log(`⏳ opencode-cli exited cleanly with [~] task — waiting for external response…`);
             } else {
-              // Exclude tasks flagged as provider hard-failures: those were left
-              // [~] ON PURPOSE to signal "blocked / needs attention". Auto-marking
-              // them done here would re-introduce the exact false-green we fixed.
-              // Also exclude tasks queued for a provider-hard-failure retry:
-              // those are re-dispatched (not auto-completed) by the retry hook
-              // above once their backoff elapses.
+              // TRUTHFUL stranded-[~] reconciliation. The CLI exited leaving a
+              // task [~] in-progress without completing it (crash, StopFailure,
+              // resume stale-read, any provider hard-exit). We must NEVER mark it
+              // [x] done — that reports a half-done task as SUCCESS (false-green,
+              // the exact data-integrity bug the user hit). Instead: bounded
+              // reset+retry, then BLOCKED / needs-attention.
+              //
+              // Exclusions preserved: tasks already flagged blocked (_blockedTasks
+              // — left [~] on purpose) and tasks queued for a provider-retry
+              // re-dispatch (_pendingRetry, re-sent by the retry hook above).
+              //
+              // FLOOD SAFETY: reconcileStrandedTask advances the in-memory strand
+              // counter (and promotes to _blockedTasks past MAX) BEFORE and
+              // INDEPENDENTLY of the TODO.md write below. So even if every
+              // resetToTodo write silently fails on a locked/unwritable TODO.md
+              // (the Windows file-lock case that produced the ~40×/second flood),
+              // the counter still climbs and the task still lands blocked after
+              // MAX — and once blocked it is excluded from this sweep, so a given
+              // task is reconciled at most MAX+1 times TOTAL, never per-second.
+              // We also do NOT tight-`continue`: we fall through to the
+              // _sleepOrWake(loopInterval) below, so nothing can spin faster than
+              // the loop interval regardless of write success. ≤1 pass/iteration.
+              const maxStrand = settings.maxStrandRetries ?? MAX_STRAND_RETRIES;
               const stranded = tasks.filter(t =>
                 t.status === 'in-progress'
                 && !this._blockedTasks.has(t.id ?? t.text)
                 && !this._pendingRetry.has(t.id ?? t.text));
               for (const t of stranded) {
-                // Auto-mark as [x] done rather than resetting to [ ].
-                // Resetting to [ ] causes an infinite loop: the agent picks it
-                // up, marks [~] again, exits, and we end up here forever.
-                // If the CLI exited leaving a [~] task it means the agent
-                // already worked on it — treat it as done.
-                await todoWriter.markDone(todoPath, t).catch(() => {});
+                const key = t.id ?? t.text;
+                // In-memory bookkeeping FIRST (write-independent, flood-proof).
+                const { action, count } = reconcileStrandedTask(key, this._strandCount, this._blockedTasks, maxStrand);
+                if (action === 'reset') {
+                  this._cb?.log(`↺ Reset stranded [~] task to pending — retry ${count}/${maxStrand}: ${discordLabel(t.text)}`);
+                  // Best-effort reset; a failure here cannot flood (counter already
+                  // advanced above, and we fall through to the loopInterval wait).
+                  await todoWriter.resetToTodo(todoPath, t).catch(() => {});
+                } else {
+                  // count > MAX → BLOCKED / needs-attention. NEVER done, NEVER
+                  // reset again. Surface it the SAME way a provider hard-failure
+                  // does (task_fail → FAILED + StopFailure hook), then keep polling
+                  // for OTHER work (it's now excluded from the stranded sweep).
+                  this._failedCount++;
+                  this._cb?.log(`⚠ Task stranded after ${maxStrand} attempts — marking blocked (needs attention), NOT done: ${discordLabel(t.text)}`);
+                  const errText = `task stranded (CLI exited without completing it) after ${maxStrand} reset attempts — needs attention`;
+                  this._notifyWebhook('task_fail', {
+                    iteration: this._iterations,
+                    task:      { text: t.text, id: t.id },
+                    duration:  0,
+                    error:     errText,
+                    reason:    'stranded',
+                    workDir:   this._workspaceRoot,
+                    gitRepo:   this._gitRepo,
+                    gitBranch: this._gitBranch,
+                  });
+                  this._notifyDiscord(`⚠ **Task stranded — blocked (not done):**\n${discordLabel(t.text)}`);
+                  if (this._workspaceRoot) {
+                    appendHookEventLine(this._workspaceRoot, {
+                      hook_event_name: 'StopFailure', event_type: 'stop_failure',
+                      provider: provider ?? '', cwd: this._workspaceRoot, error: 'stranded',
+                      title: 'Task stranded', message: errText, tool_name: '',
+                      timestamp: new Date().toISOString(),
+                    });
+                  }
+                }
               }
-              if (stranded.length > 0) {
-                this._cb?.log(`✅ Auto-marked ${stranded.length} stranded [~] task(s) as done — CLI exited without completing them`);
-                continue; // re-pick immediately
-              }
+              // NOTE: NO tight-`continue` — fall through to the loopInterval sleep
+              // below (do NOT re-pick instantly). This is the flood guard.
             }
           }
           this._cb?.log(`No pending tasks — waiting ${settings.loopInterval}s…`);

@@ -1975,7 +1975,10 @@ function getOrCreateAcpSession(
   // Resume-on-(re)start: seed the id to session/load from the persisted id, else
   // the newest grok session on disk for this cwd (works whether that session was
   // created by a prior ACP run or the legacy headless `--continue`).
-  const seedId = resolvedSessionId || getSessionId(root, providerId) || getGrokLatestSessionId(root) || undefined;
+  // Layer A.2: PREFER the persisted id (session-state.json) over the disk-latest
+  // fallback — disk-latest can resume the WRONG session (a stray/newer dir). Use
+  // disk-latest ONLY when there is no persisted id.
+  const seedId = getSessionId(root, providerId) || resolvedSessionId || getGrokLatestSessionId(root) || undefined;
   const hooks: AcpHostHooks = {
     emitHook: (name, extra) => {
       if (name === 'Notification' && typeof extra['message'] === 'string') {

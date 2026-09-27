@@ -16,6 +16,11 @@ import * as net from 'net';
 import { pathToFileURL } from 'url';
 import { normalizeEvent } from '../../hookEventNormalizer';
 import { LiveNarrationStreamer, appendHookEventLine } from '../../core/liveNarration';
+import {
+  opencodeAcpEnabled, sendOpencodeAcpPrompt, steerOpencodeAcp, isOpencodeAcpBusy,
+  getOpencodeAcpActivity, getOpencodeAcpLatestSessionId, hasOpencodeAcpSession,
+  compactOpencodeAcp, forceIdleOpencodeAcp, closeOpencodeAcp, closeAllOpencodeAcp,
+} from './acp';
 
 // ---------------------------------------------------------------------------
 // Minimal TypeScript interfaces for the parts of the SDK we use.
@@ -68,18 +73,18 @@ const _activity = new Map<string, string>();
 /** Roots that currently have an opencode-sdk turn actively running. */
 const _busyRoots = new Set<string>();
 
-/** True while an opencode-sdk turn is running for the given workspace root. */
+/** True while an opencode turn is running (ACP session OR createOpencode server). */
 export function isOpencodeSdkBusy(root: string): boolean {
-  return _busyRoots.has(root);
+  return _busyRoots.has(root) || isOpencodeAcpBusy(root);
 }
 
 /** Current tool activity label for the given root (undefined = idle). */
 export function getOpencodeSdkActivity(root: string): string | undefined {
-  return _activity.get(root);
+  return getOpencodeAcpActivity(root) ?? _activity.get(root);
 }
 
 export function getOpencodeSdkLatestSessionId(root: string): string | undefined {
-  return _latestSessionIds.get(root) ?? _state.get(root)?.sessionId;
+  return getOpencodeAcpLatestSessionId(root) ?? _latestSessionIds.get(root) ?? _state.get(root)?.sessionId;
 }
 
 /**
@@ -92,6 +97,8 @@ export function getOpencodeSdkLatestSessionId(root: string): string | undefined 
  * the durable TODO queue (at-least-once delivery preserved).
  */
 export async function steerOpencodeSdk(root: string, text: string, log: (msg: string) => void): Promise<boolean> {
+  // Native-ACP path: a queued session/prompt to the live opencode acp process.
+  if (hasOpencodeAcpSession(root)) { return steerOpencodeAcp(root, text, log); }
   const st = _state.get(root);
   if (!st || !_busyRoots.has(root)) { return false; }
   try {
@@ -454,7 +461,34 @@ function _evictClient(root: string): void {
 // exit code to exitFile once session.idle fires.
 // ---------------------------------------------------------------------------
 
+/**
+ * Router: prefer native `opencode acp` (persistent AcpSession) when enabled;
+ * otherwise use the createOpencode in-process server. On ACP startup failure the
+ * ACP layer transparently falls back to the server path (onAcpUnavailable), so
+ * nothing regresses. Both paths are "SDK-like" to the task loop (persistent,
+ * turn-end via isOpencodeSdkBusy) so no loop change is needed.
+ */
 export function sendOpencodeSdkPrompt(
+  root: string,
+  promptFilePath: string,
+  resumeSessionId: string | undefined,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  model?: string,
+  showOutput?: () => void,
+): void {
+  if (opencodeAcpEnabled()) {
+    sendOpencodeAcpPrompt(
+      root, promptFilePath, resumeSessionId, stdoutFile, exitFile, log, model, showOutput,
+      () => _sendOpencodeSdkServerPrompt(root, promptFilePath, resumeSessionId, stdoutFile, exitFile, log, model, showOutput),
+    );
+    return;
+  }
+  _sendOpencodeSdkServerPrompt(root, promptFilePath, resumeSessionId, stdoutFile, exitFile, log, model, showOutput);
+}
+
+function _sendOpencodeSdkServerPrompt(
   root: string,
   /** Absolute path to the combined agent-profile + message file. */
   promptFilePath: string,
@@ -593,6 +627,7 @@ export function runOpencodeSdkCompact(
   root: string,
   log: (msg: string) => void,
 ): Promise<void> {
+  if (hasOpencodeAcpSession(root)) { return compactOpencodeAcp(root, log); }
   return new Promise((resolve) => {
     const s = _state.get(root);
     if (!s) { resolve(); return; }
@@ -610,6 +645,7 @@ export function runOpencodeSdkCompact(
 // ---------------------------------------------------------------------------
 
 export function closeOpencodeSdkClient(root: string, log: (msg: string) => void): void {
+  closeOpencodeAcp(root, log);
   const s = _state.get(root);
   if (s) {
     log('OpenCode SDK: closing persistent session + server');
@@ -631,11 +667,13 @@ export function closeOpencodeSdkClient(root: string, log: (msg: string) => void)
 export function forceIdleOpencodeSdk(root: string): void {
   _busyRoots.delete(root);
   _activity.delete(root);
+  forceIdleOpencodeAcp(root);
   _evictClient(root);
 }
 
 /** Close all open SDK servers — called on extension deactivate to avoid orphaned processes. */
 export function closeAllOpencodeSdkClients(): void {
+  closeAllOpencodeAcp();
   for (const [root, s] of _state) {
     try { s.server.close(); } catch { /* ignore */ }
     _state.delete(root);

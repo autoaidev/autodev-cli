@@ -51,8 +51,10 @@ import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { killProcessTree } from '../../core/killProcessTree';
 import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
 import { scanGrokTurnEnd, scanGrokFirstToken, scanGrokTurnStart, grokLoopForwardHooks } from '../../core/grokEvents';
-import { newestGrokSessionDir, grokSessionDirFor } from './sessions';
+import { newestGrokSessionDir, grokSessionDirFor, getGrokLatestSessionId } from './sessions';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
+import { GrokAcpSession } from './GrokAcpSession';
+import type { AcpHostHooks } from './GrokAcpSession';
 import type { ProviderId } from '../../providers';
 
 // ---------------------------------------------------------------------------
@@ -121,6 +123,35 @@ interface TmuxSession {
   readOffset: number; // bytes of rawLog already streamed to a stdoutFile
 }
 const _tmuxSessions = new Map<string, TmuxSession>();
+
+/**
+ * Live PERSISTENT `grok agent stdio` ACP sessions by root (the persistent-process
+ * model). ONE long-lived grok per workspace serves many turns without exiting;
+ * resume happens only at (re)start via session/load. See GrokAcpSession.
+ */
+const _acpSessions = new Map<string, GrokAcpSession>();
+
+/** Cached probe: does this grok build expose `agent stdio` (the ACP transport)? */
+let _grokAgentStdioSupported: boolean | null = null;
+export function grokAgentStdioSupported(): boolean {
+  if (_grokAgentStdioSupported !== null) { return _grokAgentStdioSupported; }
+  try {
+    const out = child_process.execFileSync(GROK_BIN, ['agent', '--help'], { encoding: 'utf8', timeout: 8_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    _grokAgentStdioSupported = /\bstdio\b/.test(out);
+  } catch { _grokAgentStdioSupported = false; }
+  return _grokAgentStdioSupported;
+}
+
+/**
+ * Whether the persistent ACP path is active. Gated on grok supporting `agent
+ * stdio` AND the AUTODEV_GROK_PERSISTENT env override (default ON when supported;
+ * set to 'false'/'0'/'off' to force the legacy one-shot headless path).
+ */
+export function grokAcpEnabled(): boolean {
+  const raw = String(process.env['AUTODEV_GROK_PERSISTENT'] ?? '').toLowerCase();
+  if (raw === 'false' || raw === '0' || raw === 'off' || raw === 'no') { return false; }
+  return grokAgentStdioSupported();
+}
 
 // Per-root set of grok tool_call ids already emitted as PreToolUse, so a re-scan of
 // the transcript can't emit the SAME tool call twice → duplicate rows in the office
@@ -1860,7 +1891,121 @@ export function sendGrokCliPrompt(
   model?: string,
   showOutput?: () => void,
 ): void {
+  if (grokAcpEnabled()) {
+    sendGrokAcpPrompt(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, 'grok-cli', model, showOutput);
+    return;
+  }
   sendGrokPersistentHeadless(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, 'grok-cli', model, showOutput);
+}
+
+// ---------------------------------------------------------------------------
+// PERSISTENT-PROCESS (ACP) path — one long-lived `grok agent stdio` per root.
+// ---------------------------------------------------------------------------
+
+/** Get (or lazily create) the persistent ACP session for a root. */
+function getOrCreateAcpSession(
+  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
+  resolvedSessionId: string | undefined,
+): GrokAcpSession {
+  let sess = _acpSessions.get(root);
+  if (sess) { return sess; }
+  // Resume-on-(re)start: seed the id to session/load from the persisted id, else
+  // the newest grok session on disk for this cwd (works whether that session was
+  // created by a prior ACP run or the legacy headless `--continue`).
+  const seedId = resolvedSessionId || getSessionId(root, providerId) || getGrokLatestSessionId(root) || undefined;
+  const hooks: AcpHostHooks = {
+    emitHook: (name, extra) => {
+      if (name === 'Notification' && typeof extra['message'] === 'string') {
+        const msg = redactSecrets(String(extra['message'])).slice(0, 1200);
+        if (!msg.trim()) { return; }
+        _emitGrokHook(root, 'Notification', { ...extra, message: msg });
+      } else {
+        _emitGrokHook(root, name, redactDeep(extra));
+      }
+    },
+    log,
+  };
+  sess = new GrokAcpSession({ root, model, bin: GROK_BIN, hooks, initialSessionId: seedId });
+  _acpSessions.set(root, sess);
+  return sess;
+}
+
+/**
+ * Fire-and-forget: run ONE turn through the persistent ACP session. Streams
+ * assistant text to stdoutFile and writes the exit code to exitFile exactly once
+ * at turn end — preserving the taskLoop contract byte-for-byte. The grok process
+ * STAYS ALIVE between turns; a crash/exit is detected and the NEXT turn respawns
+ * + session/load restores context. If the ACP handshake can't be established
+ * (older grok, or a transient spawn failure) it transparently FALLS BACK to the
+ * legacy one-shot headless path so nothing regresses.
+ */
+export function sendGrokAcpPrompt(
+  root: string,
+  promptFilePath: string,
+  resolvedSessionId: string | undefined,
+  stdoutFile: string,
+  exitFile: string,
+  log: (msg: string) => void,
+  providerId: 'grok-cli' | 'grok-tui',
+  model?: string,
+  showOutput?: () => void,
+): void {
+  try { fs.writeFileSync(stdoutFile, '', 'utf8'); } catch { /* ignore */ }
+  try { fs.writeFileSync(exitFile, '', 'utf8'); } catch { /* ignore */ }
+  let promptText = '';
+  try { promptText = fs.readFileSync(promptFilePath, 'utf8'); }
+  catch (err) {
+    try { fs.appendFileSync(stdoutFile, `\n[Grok ACP: cannot read prompt file: ${(err as Error)?.message ?? err}]\n`, 'utf8'); } catch { /* ignore */ }
+    try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
+    return;
+  }
+  const sess = getOrCreateAcpSession(root, providerId, model, log, resolvedSessionId);
+  _busyRoots.add(root);
+  if (showOutput) { try { showOutput(); } catch { /* ignore */ } }
+  const sink = (text: string): void => { try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ } };
+  void (async () => {
+    try {
+      await sess.ensureReady();
+    } catch (err) {
+      // ACP unavailable / handshake failed → clean fallback to the one-shot path
+      // (which writes its own stdout/exit + hooks). Nothing regresses.
+      log(`Grok ACP: startup failed (${(err as Error)?.message ?? err}); stderr="${sess.stderrSnapshot.slice(0, 200)}" — falling back to headless one-shot`);
+      try { sess.close(); } catch { /* ignore */ }
+      _acpSessions.delete(root);
+      _busyRoots.delete(root);
+      sendGrokPersistentHeadless(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, providerId, model, showOutput);
+      return;
+    }
+    // Persist the session id so a restart can session/load it (resume-on-restart).
+    if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
+    let res: { clean: boolean; stopReason: string; error?: string };
+    try { res = await sess.runTurn(promptText, sink); }
+    catch (err) { res = { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) }; }
+    if (!res.clean && res.error) {
+      try { fs.appendFileSync(stdoutFile, `\n[Grok ACP: turn ended ${res.stopReason} — ${res.error}]\n`, 'utf8'); } catch { /* ignore */ }
+    }
+    try { fs.writeFileSync(exitFile, `${res.clean ? 0 : 1}\n`, 'utf8'); } catch { /* ignore */ }
+    _busyRoots.delete(root);
+  })();
+}
+
+/**
+ * Deliver a mid-run steer to the LIVE persistent grok process (a queued
+ * session/prompt). Returns true only when a live ACP session accepted it; false
+ * lets the caller fall back to the durable TODO buffer (at-least-once).
+ */
+export function steerGrokAcp(root: string, text: string, log: (msg: string) => void): boolean {
+  const sess = _acpSessions.get(root);
+  if (!sess || !sess.isAlive()) { return false; }
+  const ok = sess.steer(text);
+  if (ok) { log(`Grok ACP: steered live process (${text.length} chars) — queued to the running session`); }
+  return ok;
+}
+
+/** True if a persistent ACP session for this root is mid-turn. */
+export function isGrokAcpBusy(root: string): boolean {
+  const sess = _acpSessions.get(root);
+  return !!sess && sess.isBusy();
 }
 
 /**
@@ -1980,6 +2125,12 @@ export function sendGrokTuiPrompt(
   model?: string,
   showOutput?: () => void,
 ): void {
+  // Preferred persistent model: ONE long-lived `grok agent stdio` (ACP). Cleaner
+  // than the tmux PTY (no pane-scraping, real steering, unified with grok-cli).
+  if (grokAcpEnabled()) {
+    sendGrokAcpPrompt(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, 'grok-tui', model, showOutput);
+    return;
+  }
   const mode = decideGrokRunMode({ tmuxAvailable: tmuxAvailable(), providerId: 'grok-tui' });
   if (mode.useTmux) {
     runGrokTmuxTurn(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, model, showOutput);
@@ -2118,6 +2269,14 @@ export async function steerGrokTui(root: string, text: string, log: (msg: string
  * persisted session id so a later task relaunches with --resume (context intact).
  */
 export function closeGrokTuiSession(root: string, _log: (msg: string) => void): void {
+  const acp = _acpSessions.get(root);
+  if (acp) {
+    // Reap grok's whole worker subtree (grok forks a per-turn worker child), then
+    // close — SIGKILL of just the parent would orphan the worker to init.
+    if (acp.pid) { try { killProcessTree(acp.pid); } catch { /* ignore */ } }
+    try { acp.close(); } catch { /* ignore */ }
+    _acpSessions.delete(root);
+  }
   const child = _activeChildren.get(root);
   if (child) {
     if (child.pid) { killProcessTree(child.pid); }
@@ -2140,6 +2299,11 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
 
 /** Kill all live grok sessions — called on SDK/extension shutdown. */
 export function closeAllGrokTuiSessions(): void {
+  for (const acp of _acpSessions.values()) {
+    if (acp.pid) { try { killProcessTree(acp.pid); } catch { /* ignore */ } }
+    try { acp.close(); } catch { /* ignore */ }
+  }
+  _acpSessions.clear();
   for (const child of _activeChildren.values()) {
     if (child.pid) { killProcessTree(child.pid); }
     try { child.kill('SIGKILL'); } catch { /* ignore */ }

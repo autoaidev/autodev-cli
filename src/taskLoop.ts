@@ -20,7 +20,7 @@ import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider'
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk } from './providers/opencodeSdkProvider';
-import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui } from './providers/grokTuiProvider';
+import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy } from './providers/grokTuiProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -1166,6 +1166,17 @@ export class TaskLoopRunner {
     if (root && turnInFlight && provider === 'grok-tui' && isGrokTuiBusy(root)) {
       if (await steerGrokTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (grok-tui): "${clean.slice(0, 80)}"`);
+        onDelivered?.();
+        return;
+      }
+    }
+
+    // Persistent-process grok (ACP `grok agent stdio`, grok-cli AND grok-tui):
+    // a mid-run steer is a QUEUED session/prompt delivered to the LIVE process —
+    // it never exits, so the steer reaches the same long-lived agent.
+    if (root && turnInFlight && (provider === 'grok-cli' || provider === 'grok-tui') && isGrokAcpBusy(root)) {
+      if (steerGrokAcp(root, clean, msg => this._cb?.log(msg))) {
+        this._cb?.log(`⚡ Steered mid-turn (grok ACP): "${clean.slice(0, 80)}"`);
         onDelivered?.();
         return;
       }

@@ -259,6 +259,21 @@ export class AcpSession {
     return 20 * 60 * 1000;
   }
 
+  /** Grace window (ms) to wait for a TRAILING agent_message_chunk after a clean
+   *  end_turn before declaring the turn empty. gpt-oss:20b (and some slow local
+   *  models) can emit their FINAL chunk a beat after end_turn resolves; without
+   *  this grace the loop reads _turnHadOutput===false and flags a spuriously-empty
+   *  turn. Bounded + only consumed when a clean turn has produced nothing yet, so
+   *  it never adds latency to a normal turn. Env: AUTODEV_ACP_TRAILING_CHUNK_MS
+   *  (0/negative disables the grace). Default 600ms. */
+  static trailingChunkGraceMs(): number {
+    const raw = process.env['AUTODEV_ACP_TRAILING_CHUNK_MS'] ?? '';
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0) { return n; }
+    if (Number.isFinite(n) && n <= 0 && String(raw).trim() !== '') { return 0; } // disabled
+    return 600;
+  }
+
   get pid(): number | undefined { return this.child?.pid; }
   get sessionId(): string | undefined { return this._sessionId; }
   get activity(): string | undefined { return this._activity; }
@@ -538,6 +553,22 @@ export class AcpSession {
       res = { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) };
     } finally {
       if (timer) { clearTimeout(timer); }
+    }
+    // gpt-oss:20b empty-turn race: a clean end_turn can be followed a beat later
+    // by the model's FINAL agent_message_chunk. If the turn ended clean but no
+    // output has landed yet, briefly wait (bounded, polling the flag) for a
+    // trailing chunk — done BEFORE nulling the sink so a late chunk still reaches
+    // the sink + narration and flips _turnHadOutput. Minimal + safe for all
+    // providers: skipped entirely when the turn already produced output, did not
+    // end clean, or the grace is disabled.
+    if (res.clean && !this._turnHadOutput) {
+      const graceMs = AcpSession.trailingChunkGraceMs();
+      const stepMs = 50;
+      let waited = 0;
+      while (waited < graceMs && !this._turnHadOutput) {
+        await new Promise<void>(r => setTimeout(r, Math.min(stepMs, graceMs - waited)));
+        waited += stepMs;
+      }
     }
     this._flushNarration(true);
     if (!timedOut) { this._flushOpenTools('interrupted'); } // Bug B (close() already flushed on timeout)

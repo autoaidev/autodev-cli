@@ -408,13 +408,15 @@ see in
 1. Open \`${todoPath}\` and find line ${task.line}:
    \`${taskLine}\`
 2. Mark it in-progress **before** starting: change \`[ ]\` to \`[~]\`
-3. **Actually do the work** described by the task text above. Follow all protocol instructions from your agent profile. 
+3. **Actually do the work** described by the task text above. Follow all protocol instructions from your agent profile.
  3.1 Discover the real task by opening the attachment files related to the todo entry, which are part of the task instructions. The files are listed above and may include important context, data, or subtasks. They are embedded in the message for your convenience, so read them carefully.
-4. When the work is fully done, mark it complete:
+4. Only when a **concrete deliverable actually exists** — a file created or edited, a command run with its result, a verifiable change on disk — mark it complete:
    \`${doneLine}\`
 5. Continue to the next \`[ ]\` task in \`${todoPath}\` — do not stop until all tasks are done.
 
-> This loop runs continuously. Each task dispatch is a fresh task. "Standing by" or "already done" is not acceptable — complete the work.
+> **A turn ends with a PRODUCED DELIVERABLE, never with an intention.** Do NOT reply that you *will* do X, *plan to* do X, or have *acknowledged* X — in THIS turn, actually produce X (an edit / a new file / a command result) and change the box to \`[x]\`. A turn that only restates the plan, describes what you would do, or says "I will continue" — without a file, an edit, or a command result — is **NOT progress** and does **NOT** count as done. Never write \`[x]\` unless the deliverable is really there; if you cannot finish it this turn, leave it \`[~]\` and produce as much real work as you can.
+
+> This loop runs continuously. Each task dispatch is a fresh task. "Standing by", "already done", or "I will do it" is not acceptable — complete the work.
 
 ---
 

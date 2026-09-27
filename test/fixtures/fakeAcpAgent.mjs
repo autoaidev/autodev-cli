@@ -77,6 +77,26 @@ function pump() {
   const job = queue.shift();
   if (!job) return;
   running = true;
+  // SILENT: resolve end_turn with NO output at all — a genuinely empty turn.
+  // The client's trailing-chunk grace must NOT falsely mark it non-empty.
+  if (job.text.includes('SILENT')) {
+    setTimeout(() => { reply(job.id, { stopReason: 'end_turn' }); running = false; pump(); }, 40);
+    return;
+  }
+  // TRAILING: the gpt-oss:20b race — resolve end_turn with no output yet, then
+  // emit the FINAL agent_message_chunk a beat AFTER end_turn. The client's
+  // bounded trailing-chunk grace must still count it (emptyOutput === false).
+  if (job.text.includes('TRAILING')) {
+    setTimeout(() => {
+      reply(job.id, { stopReason: 'end_turn' });
+      running = false;
+      setTimeout(() => {
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'TRAILING-FINAL\n' } });
+        pump();
+      }, 150);
+    }, 40);
+    return;
+  }
   update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: job.text + '\n' } });
   if (job.text.includes('HANG')) {
     // Never resolve this prompt — the client's per-turn watchdog must fire.

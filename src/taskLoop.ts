@@ -132,6 +132,90 @@ export function reconcileStrandedTask(
 }
 
 // ---------------------------------------------------------------------------
+// NO-PROGRESS detection (grok / opencode "ACK-without-doing")
+//
+// Some providers (notably grok auto-mode, and opencode) sometimes ACK a turn
+// WITHOUT producing the deliverable: they reply that they will do X, the TODO
+// item stays [ ]/[~], no file lands, and the office keeps sending "go on" so the
+// run churns while nothing advances. `pickNextTask` never re-picks a `[~]`, so a
+// stuck-open item cannot self-advance. This mechanism gives the loop a truthful,
+// bounded way out: snapshot a cheap "progress signature" before and after each
+// grok/opencode turn; a turn that ends with NO checkbox transition AND no
+// workspace file change is a NO-PROGRESS turn. After N consecutive no-progress
+// turns on the SAME task, stop re-nudging it and flag it needs-attention (never
+// falsely done — preserves the 1.4.183 no-false-done invariant).
+// ---------------------------------------------------------------------------
+
+/**
+ * Default number of CONSECUTIVE no-progress turns on the same task before it is
+ * escalated to blocked / needs-attention. Overridable via
+ * `AUTODEV_MAX_NOPROGRESS_TURNS`.
+ */
+export const MAX_NOPROGRESS_TURNS = 3;
+
+/** Resolve the no-progress ceiling from the env (default {@link MAX_NOPROGRESS_TURNS}). */
+export function maxNoProgressTurns(): number {
+  const raw = Number(process.env.AUTODEV_MAX_NOPROGRESS_TURNS);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : MAX_NOPROGRESS_TURNS;
+}
+
+/**
+ * Stable signature of the TODO.md checkbox state — a sorted map of task identity
+ * → status marker. Any checkbox transition ([ ]→[~], [~]→[x], …) changes this
+ * string. Pure + cheap; the file-mtime half of the full progress signature is
+ * added by the loop's `_computeProgressSignature` (which needs fs).
+ */
+export function todoCheckboxSignature(tasks: Task[]): string {
+  return tasks
+    .map(t => `${t.id ?? t.text}=${t.status}`)
+    .sort()
+    .join('\n');
+}
+
+/** Action decided for one task's no-progress state by {@link reconcileNoProgress}. */
+export type NoProgressAction = 'progress' | 'noprogress' | 'block';
+
+/**
+ * PURE, side-effect-contained reconciliation for ONE task's no-progress state at
+ * the end of a turn. Mirrors {@link reconcileStrandedTask}'s flood-safety
+ * contract: mutates ONLY the in-memory `counts` map and (on `block`) the
+ * `blocked` set — never TODO.md. The caller applies the honest needs-attention
+ * reporting AFTER this settles the bookkeeping, so a locked/unwritable TODO.md
+ * can never prevent escalation.
+ *
+ * @param key           Task identity — `t.id ?? t.text`.
+ * @param changed       Did the progress signature change this turn? (a checkbox
+ *                      transition OR a workspace file mtime/size/count change)
+ * @param taskStillOpen Is the task still un-done ([ ]/[~], not [x])?
+ * @param counts        Per-task consecutive-no-progress counter (mutated).
+ * @param blocked       Blocked / needs-attention task-key set (mutated on block).
+ * @param max           Escalation ceiling (default {@link MAX_NOPROGRESS_TURNS}).
+ */
+export function reconcileNoProgress(
+  key: string,
+  changed: boolean,
+  taskStillOpen: boolean,
+  counts: Map<string, number>,
+  blocked: Set<string>,
+  max: number = MAX_NOPROGRESS_TURNS,
+): { action: NoProgressAction; count: number } {
+  // Real progress (a checkbox moved or a file changed) OR the task is now done →
+  // reset the counter. A task that advanced is NEVER escalated.
+  if (changed || !taskStillOpen) {
+    counts.delete(key);
+    return { action: 'progress', count: 0 };
+  }
+  const count = (counts.get(key) ?? 0) + 1;
+  counts.set(key, count);
+  if (count >= max) {
+    blocked.add(key);
+    counts.delete(key); // done escalating — it is blocked now; free the counter
+    return { action: 'block', count };
+  }
+  return { action: 'noprogress', count };
+}
+
+// ---------------------------------------------------------------------------
 // Rate-limit + context-length errors
 // ---------------------------------------------------------------------------
 
@@ -318,6 +402,13 @@ export class TaskLoopRunner {
    *  marked done. Advances purely in-memory BEFORE any TODO.md write so a
    *  locked/unwritable TODO.md can never flood the stranded sweep. */
   private _strandCount = new Map<string, number>();
+  /** Per-task CONSECUTIVE no-progress-turn counter (id or text). A grok/opencode
+   *  turn that ends with no TODO checkbox transition AND no workspace file change
+   *  ("ACK-without-doing") increments this; after maxNoProgressTurns() the task
+   *  is promoted to _blockedTasks (needs-attention, NEVER done) and the loop
+   *  stops re-nudging it. Reset to 0 on any real progress (a moved checkbox or a
+   *  changed file). */
+  private _noProgressCount = new Map<string, number>();
   /** Counts completed tasks since the last auto-compact run. */
   private _autoCompactCounter = 0;
   /** Counts completed tasks since the last session reset. */
@@ -482,6 +573,7 @@ export class TaskLoopRunner {
     this._hardFailAttempts.clear();
     this._pendingRetry.clear();
     this._strandCount.clear();
+    this._noProgressCount.clear();
     this._autoCompactCounter = 0;
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
@@ -2023,6 +2115,16 @@ export class TaskLoopRunner {
       // Snapshot the JSONL cursor before sending — we only read bytes written after this
       const claudeCursor = getClaudeSessionCursor(this._workspaceRoot!);
 
+      // No-progress detection (grok/opencode "ACK-without-doing"): snapshot a
+      // cheap progress signature BEFORE the turn so that after it we can tell
+      // whether the turn produced ANY deliverable (a checkbox transition or a
+      // workspace file change). Only for grok/opencode — the providers that
+      // exhibit auto-mode ACK-without-doing; other providers keep prior behavior.
+      const progressProvider = this._cb?.getActiveProvider();
+      const trackNoProgress = !!progressProvider
+        && (progressProvider.startsWith('grok') || progressProvider.startsWith('opencode'));
+      const progressSigBefore = trackNoProgress ? this._computeProgressSignature(todoPath) : '';
+
       try {
         if (cliIsRunning || watchingInProgress) {
           this._cb?.log(`⏳ CLI still running — skipping send, waiting for task completion…`);
@@ -2179,6 +2281,68 @@ export class TaskLoopRunner {
         } else {
           // Non-CLI providers: just wait for OS flush
           await this._sleepAbortable(2_000);
+        }
+
+        // ── No-progress escalation (grok/opencode ACK-without-doing) ──────────
+        // The turn has fully settled (busy flag cleared, files flushed). If it
+        // produced NO deliverable — no TODO checkbox transition AND no workspace
+        // file changed — and the task is still open, count it as a no-progress
+        // turn. After N CONSECUTIVE no-progress turns on the SAME task, STOP
+        // re-nudging it (the "go on" churn): flag it blocked / needs-attention
+        // (honest), report task_fail + a stop_failure hook, and move on to other
+        // work. We NEVER falsely mark it done (preserves 1.4.183). Any real
+        // progress resets the counter (handled inside reconcileNoProgress).
+        // Skipped for the hard-fail / retry paths above (they `continue` first)
+        // and for non-grok/opencode providers (trackNoProgress === false).
+        if (trackNoProgress) {
+          const npKey = task.id ?? task.text;
+          const progressSigAfter = this._computeProgressSignature(todoPath);
+          const changed = progressSigAfter !== progressSigBefore;
+          let taskStillOpen = true;
+          try {
+            const afterTasks = parseTodo(todoPath);
+            const cur = afterTasks.find(t => (task.id && t.id === task.id) || t.text === task.text);
+            taskStillOpen = !cur || cur.status !== 'done';
+          } catch { /* treat as open on read failure */ }
+          const maxNP = maxNoProgressTurns();
+          const { action, count } = reconcileNoProgress(
+            npKey, changed, taskStillOpen, this._noProgressCount, this._blockedTasks, maxNP,
+          );
+          if (action === 'block') {
+            // Honest needs-attention path — mirrors the provider hard_fail block.
+            // Task stays [~] (NEVER [x]) so pickNextTask skips it and the loop
+            // works on other tasks instead of churning "go on" on this one.
+            this._failedCount++;
+            this._taskAttempts.delete(npKey);
+            this._pendingRetry.delete(npKey);
+            this._cb?.log(`⚠ Task made no progress after ${maxNP} turns — marking needs-attention (not silently re-running): ${discordLabel(task.text)}`);
+            await todoWriter.markInProgress(todoPath, task).catch(() => {});
+            const duration = Math.round((Date.now() - taskStartTime) / 1000);
+            const errText = `no progress after ${maxNP} consecutive turns (no deliverable produced — needs attention)`;
+            this._notifyWebhook('task_fail', {
+              iteration: this._iterations,
+              task:      { text: task.text, id: task.id },
+              duration,
+              error:     errText,
+              reason:    'no_progress',
+              workDir:   this._workspaceRoot,
+              gitRepo:   this._gitRepo,
+              gitBranch: this._gitBranch,
+            });
+            this._notifyDiscord(`⚠️ **No progress after ${maxNP} turns — task blocked (needs attention, not done):**\n${discordLabel(task.text)}`);
+            if (this._workspaceRoot) {
+              appendHookEventLine(this._workspaceRoot, {
+                hook_event_name: 'StopFailure', event_type: 'stop_failure',
+                provider: progressProvider ?? 'unknown', cwd: this._workspaceRoot, error: 'no_progress',
+                title: 'No progress', message: errText, tool_name: '',
+                timestamp: new Date().toISOString(),
+              });
+            }
+            this._currentTask = undefined;
+            continue;
+          } else if (action === 'noprogress') {
+            this._cb?.log(`… no-progress turn ${count}/${maxNP} on: ${discordLabel(task.text)}`);
+          }
         }
 
         // Capture and persist CLI session ID so the next task can resume it
@@ -2894,6 +3058,59 @@ export class TaskLoopRunner {
       await sleep(Math.min(step, totalMs - waited));
       waited += step;
     }
+  }
+
+  /**
+   * Cheap "progress signature" of the current cwd: the TODO.md checkbox map plus
+   * a BOUNDED mtime/size/count scan of the workspace deliverable files. Any
+   * checkbox transition, or any file created/edited/deleted this turn, changes
+   * the returned string. Excludes .autodev/, .git/, node_modules/ and the common
+   * heavy build/cache dirs, and hard-caps the number of files walked and the
+   * recursion depth so a huge tree can never make this expensive. Used before and
+   * after each grok/opencode turn to detect a no-progress ("ACK-without-doing")
+   * turn without a git dependency.
+   */
+  private _computeProgressSignature(todoPath: string): string {
+    let checkboxSig = '';
+    try { checkboxSig = todoCheckboxSignature(parseTodo(todoPath)); } catch { /* ignore */ }
+    let count = 0;
+    let totalSize = 0;
+    let maxMtime = 0;
+    const root = this._workspaceRoot;
+    if (root) {
+      // Non-deliverable / churny dirs: never count as "progress" and are costly
+      // to walk. .autodev is excluded per the design (it churns every turn).
+      const SKIP = new Set<string>([
+        '.autodev', '.git', 'node_modules', 'dist', 'build', 'out', '.cache',
+        '.next', '.nuxt', '.turbo', 'coverage', '.venv', 'venv', '__pycache__',
+        '.pytest_cache', 'target', '.gradle', '.idea', 'vendor', '.svelte-kit',
+      ]);
+      const MAX_FILES = 4000;
+      const MAX_DEPTH = 6;
+      const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+      while (stack.length && count < MAX_FILES) {
+        const { dir, depth } = stack.pop()!;
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+        for (const ent of entries) {
+          if (count >= MAX_FILES) { break; }
+          if (SKIP.has(ent.name)) { continue; }
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            if (depth < MAX_DEPTH) { stack.push({ dir: full, depth: depth + 1 }); }
+            continue;
+          }
+          if (!ent.isFile()) { continue; }
+          try {
+            const st = fs.statSync(full);
+            count++;
+            totalSize += st.size;
+            if (st.mtimeMs > maxMtime) { maxMtime = st.mtimeMs; }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    return `${checkboxSig}||files:${count}:${totalSize}:${Math.round(maxMtime)}`;
   }
 
   /** Return when the task text appears with [x] status in the TODO.md file. */

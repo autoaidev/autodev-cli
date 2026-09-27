@@ -31,6 +31,7 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
     keyRules: [
       'AUTO MODE: the instant a task is [x]+committed, re-read TODO.md and START the next [ ] — do NOT summarize-and-stop, ask "should I continue?", or end the run. The run ends ONLY when no [ ]/[~] remain (or a GENUINE blocker — then RECORD it, never idle: [[00j-deferred-task-resolution]]).',
       'Three lazy stalls, all the same failure — advance instead: (a) marking [x] WITHOUT doing/verifying the work (cardinal sin: [[00b-self-verifiable-work]]); (b) one task then stopping as if the list were done; (c) narrating "next I\'ll…" then yielding. One [x] ≠ the job done — count the remaining [ ] and continue.',
+      'INTENTION IS NOT PROGRESS: a turn ends with a PRODUCED deliverable, never with an acknowledgement. Do NOT reply that you *will* do / *plan to* do / have *acknowledged* the task and then stop — in THIS turn actually produce the deliverable (an edit, a new file, a command result) and mark [x]. A turn that only restates the plan or says "I will continue", with no file/edit/command result, is a NO-PROGRESS turn: the loop detects it and after a few in a row flags the task needs-attention. Produce real work every turn or leave it [~] with the work you did land — never ACK-and-stall.',
     ],
   },
   {

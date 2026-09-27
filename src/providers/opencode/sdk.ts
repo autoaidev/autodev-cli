@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as net from 'net';
+import { execSync } from 'child_process';
 import { pathToFileURL } from 'url';
 import { normalizeEvent } from '../../hookEventNormalizer';
 import { LiveNarrationStreamer, appendHookEventLine } from '../../core/liveNarration';
@@ -302,6 +303,30 @@ function _getNarrator(root: string): LiveNarrationStreamer {
 // appends them to <root>/.autodev/hooks-events.jsonl for the WS poller.
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract streamed assistant TEXT from an opencode SDK event, handling BOTH wire
+ * shapes: opencode ≤1.13 streams it as `message.part.updated` with the text on
+ * `properties.delta`; opencode 1.14.22 streams it as `message.part.delta` with
+ * `properties.field === 'text'` and the text on `properties.delta`. Returns ''
+ * for any other event type or a non-text delta field. Single source of truth for
+ * BOTH the background narrator (_startEventLogger) and the fallback prompt loop
+ * (_sendOpencodeSdkServerPrompt), so the two can never drift again — the drift is
+ * exactly what returned EMPTY stdout on the AUTODEV_OPENCODE_ACP=0 fallback path.
+ */
+export function extractOpencodeDeltaText(
+  type: string | undefined,
+  props: Record<string, unknown> | undefined,
+): string {
+  if (type === 'message.part.updated') {
+    return (props?.delta as string | undefined) ?? '';
+  }
+  if (type === 'message.part.delta') {
+    if ((props?.field as string | undefined) !== 'text') { return ''; }
+    return (props?.delta as string | undefined) ?? '';
+  }
+  return '';
+}
+
 function _appendHookEvent(root: string, rawEv: Record<string, unknown>): void {
   try {
     const normalized = normalizeEvent('opencode-sdk', rawEv);
@@ -329,15 +354,15 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
       if (!type || _SKIP_LOG.has(type)) { continue; }
 
       // --- Stream text deltas into a per-root buffer ---
+      // message.part.updated is skip-logged above; opencode 1.14.22 streams text
+      // as message.part.delta(field:'text'). Uses the SAME extractor as the
+      // fallback prompt loop so the two can never diverge on the wire shape.
       if (type === 'message.part.delta') {
-        const field = props?.field as string | undefined;
-        if (field === 'text') {
-          const delta = props?.delta as string | undefined;
-          if (delta) {
-            _textBuffer.set(root, (_textBuffer.get(root) ?? '') + delta);
-            // Stream this delta to the chat live (coalesced Notification events).
-            _getNarrator(root).push(delta);
-          }
+        const delta = extractOpencodeDeltaText(type, props);
+        if (delta) {
+          _textBuffer.set(root, (_textBuffer.get(root) ?? '') + delta);
+          // Stream this delta to the chat live (coalesced Notification events).
+          _getNarrator(root).push(delta);
         }
         continue;
       }
@@ -559,8 +584,12 @@ function _sendOpencodeSdkServerPrompt(
         const type = payload?.type as string | undefined;
         const props = payload?.properties as Record<string, unknown> | undefined;
 
-        if (type === 'message.part.updated') {
-          const delta = (props?.delta as string | undefined) ?? '';
+        if (type === 'message.part.updated' || type === 'message.part.delta') {
+          // Handle BOTH opencode wire shapes (see extractOpencodeDeltaText) so the
+          // fallback path (AUTODEV_OPENCODE_ACP=0) never returns empty stdout —
+          // opencode 1.14.22 emits message.part.delta(field:'text'), not the older
+          // message.part.updated, and reading only the latter drained a blank turn.
+          const delta = extractOpencodeDeltaText(type, props);
           if (delta) {
             try { fs.appendFileSync(stdoutFile, delta, 'utf8'); } catch { /* ignore */ }
             _lineBuf += delta;
@@ -648,12 +677,51 @@ export function runOpencodeSdkCompact(
 // Shutdown — cleanly close the server when the task loop stops.
 // ---------------------------------------------------------------------------
 
+/** Parse the TCP port out of the SDK server URL (e.g. http://127.0.0.1:4096). */
+function _serverPortFromUrl(url: string | undefined): number | null {
+  if (!url) { return null; }
+  try { const p = Number(new URL(url).port); return Number.isFinite(p) && p > 0 ? p : null; }
+  catch { return null; }
+}
+
+/**
+ * Belt-and-suspenders reaper for the `opencode serve` child the SDK spawns on the
+ * createOpencode (fallback) path. The SDK's `server.close()` only sends a single
+ * SIGTERM to the direct child (see @opencode-ai/sdk process.stop); a serve
+ * process that ignores SIGTERM — or whose grandchildren reparent to init — is
+ * left ORPHANED holding the port. We locate whatever is still bound to the
+ * server's port and force-kill it (tree-kill on Windows). Best-effort and fully
+ * guarded: a missing `lsof`, a permission error, or an already-dead process is
+ * swallowed. Called AFTER server.close() so a clean SIGTERM shutdown is tried
+ * first and this only mops up survivors.
+ */
+function _reapOpencodeServerPort(port: number | null, log: (msg: string) => void): void {
+  if (!port) { return; }
+  try {
+    let pids: number[] = [];
+    if (process.platform === 'win32') {
+      let out = '';
+      try { out = execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { out = ''; }
+      pids = [...new Set(out.split('\n').map(l => Number(l.trim().split(/\s+/).pop())).filter(n => Number.isFinite(n) && n > 0))];
+      for (const pid of pids) { try { execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' }); } catch { /* ignore */ } }
+    } else {
+      let out = '';
+      try { out = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { out = ''; }
+      pids = [...new Set(out.split('\n').map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n > 0 && n !== process.pid))];
+      for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ } }
+    }
+    if (pids.length) { log(`OpenCode SDK: reaped orphaned serve process(es) on port ${port}: ${pids.join(', ')}`); }
+  } catch { /* best-effort — never throw from teardown */ }
+}
+
 export function closeOpencodeSdkClient(root: string, log: (msg: string) => void): void {
   closeOpencodeAcp(root, log);
   const s = _state.get(root);
   if (s) {
     log('OpenCode SDK: closing persistent session + server');
+    const port = _serverPortFromUrl(s.server.url);
     try { s.server.close(); } catch { /* ignore */ }
+    _reapOpencodeServerPort(port, log);
     _state.delete(root);
     _loggers.delete(root);
     _activity.delete(root);
@@ -679,7 +747,9 @@ export function forceIdleOpencodeSdk(root: string): void {
 export function closeAllOpencodeSdkClients(): void {
   closeAllOpencodeAcp();
   for (const [root, s] of _state) {
+    const port = _serverPortFromUrl(s.server.url);
     try { s.server.close(); } catch { /* ignore */ }
+    _reapOpencodeServerPort(port, () => { /* no channel on deactivate */ });
     _state.delete(root);
     _loggers.delete(root);
     _activity.delete(root);

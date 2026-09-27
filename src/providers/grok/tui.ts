@@ -54,8 +54,10 @@ import { scanGrokTurnEnd, scanGrokFirstToken, scanGrokTurnStart, grokLoopForward
 import { newestGrokSessionDir, grokSessionDirFor, getGrokLatestSessionId } from './sessions';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 import { GrokAcpSession } from './GrokAcpSession';
+import { AcpSession } from '../acp/AcpSession';
 import type { AcpHostHooks } from './GrokAcpSession';
 import type { ProviderId } from '../../providers';
+import { leaderModeEnabled, ensureLeader, stopLeader } from './leader';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1965,7 +1967,24 @@ export function sendGrokCliPrompt(
 // PERSISTENT-PROCESS (ACP) path — one long-lived `grok agent stdio` per root.
 // ---------------------------------------------------------------------------
 
-/** Get (or lazily create) the persistent ACP session for a root. */
+/** Redaction-aware AcpHostHooks that append to this root's hook feed. Shared by
+ *  the non-leader and leader ACP paths so hook emission stays in one place. */
+function makeAcpHooks(root: string, log: (msg: string) => void): AcpHostHooks {
+  return {
+    emitHook: (name, extra) => {
+      if (name === 'Notification' && typeof extra['message'] === 'string') {
+        const msg = redactSecrets(String(extra['message'])).slice(0, 1200);
+        if (!msg.trim()) { return; }
+        _emitGrokHook(root, 'Notification', { ...extra, message: msg });
+      } else {
+        _emitGrokHook(root, name, redactDeep(extra));
+      }
+    },
+    log,
+  };
+}
+
+/** Get (or lazily create) the NON-LEADER persistent ACP session for a root. */
 function getOrCreateAcpSession(
   root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
   resolvedSessionId: string | undefined,
@@ -1979,21 +1998,56 @@ function getOrCreateAcpSession(
   // fallback — disk-latest can resume the WRONG session (a stray/newer dir). Use
   // disk-latest ONLY when there is no persisted id.
   const seedId = getSessionId(root, providerId) || resolvedSessionId || getGrokLatestSessionId(root) || undefined;
-  const hooks: AcpHostHooks = {
-    emitHook: (name, extra) => {
-      if (name === 'Notification' && typeof extra['message'] === 'string') {
-        const msg = redactSecrets(String(extra['message'])).slice(0, 1200);
-        if (!msg.trim()) { return; }
-        _emitGrokHook(root, 'Notification', { ...extra, message: msg });
-      } else {
-        _emitGrokHook(root, name, redactDeep(extra));
-      }
-    },
-    log,
-  };
-  sess = new GrokAcpSession({ root, model, bin: GROK_BIN, hooks, initialSessionId: seedId });
+  sess = new GrokAcpSession({ root, model, bin: GROK_BIN, hooks: makeAcpHooks(root, log), initialSessionId: seedId });
   _acpSessions.set(root, sess);
   return sess;
+}
+
+/**
+ * LEADER-AWARE ensure (Layer B, 1.4.193). When AUTODEV_GROK_LEADER is ON, ensure a
+ * per-agent leader + keepalive backend (orphan-sweeping/adopting/spawning as
+ * needed) and return a LEADER-CLIENT ACP session that ATTACHES to the warm session
+ * WITHOUT session/load. When the flag is OFF — or the leader backend can't be
+ * established — this returns the existing non-leader session UNCHANGED. Async
+ * because ensuring the leader spawns detached processes on a cold start.
+ */
+async function ensureAcpSession(
+  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
+  resolvedSessionId: string | undefined,
+): Promise<GrokAcpSession> {
+  if (leaderModeEnabled()) {
+    const cached = _acpSessions.get(root);
+    if (cached && cached.isAlive()) { return cached; }
+    if (cached) { try { cached.close(); } catch { /* ignore */ } _acpSessions.delete(root); }
+    const info = await ensureLeader({ root, bin: GROK_BIN, providerId, model, log });
+    if (info) {
+      const sess = new GrokAcpSession({
+        root, model, bin: GROK_BIN, hooks: makeAcpHooks(root, log),
+        initialSessionId: info.sessionId, leaderSocket: info.socket, attachWithoutLoad: true,
+      });
+      _acpSessions.set(root, sess);
+      return sess;
+    }
+    log('grok leader: backend unavailable — falling back to the non-leader ACP path');
+  }
+  return getOrCreateAcpSession(root, providerId, model, log, resolvedSessionId);
+}
+
+/**
+ * Leader POISON-ESCAPE: the attached session id was rejected by the leader
+ * ("unknown session id" — the keepalive died / a wrong id). Reap the leader
+ * backend, clear the persisted id, drop the thin client — the caller then
+ * re-ensures a FRESH leader with session/new.
+ */
+function recoverLeaderPoison(root: string, providerId: 'grok-cli' | 'grok-tui', log: (msg: string) => void): void {
+  try { stopLeader(root, log); } catch { /* ignore */ }
+  try { clearSessionId(root, providerId); } catch { /* ignore */ }
+  const s = _acpSessions.get(root);
+  if (s) {
+    if (s.pid) { try { killProcessTree(s.pid); } catch { /* ignore */ } }
+    try { s.close(); } catch { /* ignore */ }
+    _acpSessions.delete(root);
+  }
 }
 
 /**
@@ -2025,24 +2079,27 @@ export function sendGrokAcpPrompt(
     try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
     return;
   }
-  const sess = getOrCreateAcpSession(root, providerId, model, log, resolvedSessionId);
   _busyRoots.add(root);
   if (showOutput) { try { showOutput(); } catch { /* ignore */ } }
   const sink = (text: string): void => { try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ } };
   void (async () => {
+    let sess: GrokAcpSession;
     try {
+      sess = await ensureAcpSession(root, providerId, model, log, resolvedSessionId);
       await sess.ensureReady();
     } catch (err) {
-      const startupErr = `${(err as Error)?.message ?? err} ${sess.stderrSnapshot}`;
-      log(`Grok ACP: startup failed (${(err as Error)?.message ?? err}); stderr="${sess.stderrSnapshot.slice(0, 200)}" — falling back to headless one-shot`);
-      try { sess.close(); } catch { /* ignore */ }
+      const cur = _acpSessions.get(root);
+      const stderr = cur?.stderrSnapshot ?? '';
+      const startupErr = `${(err as Error)?.message ?? err} ${stderr}`;
+      log(`Grok ACP: startup failed (${(err as Error)?.message ?? err}); stderr="${stderr.slice(0, 200)}" — falling back to headless one-shot`);
+      if (cur) { try { cur.close(); } catch { /* ignore */ } }
       _acpSessions.delete(root);
       _busyRoots.delete(root);
       // AUTH failure at ACP startup (grok not signed in): the headless fallback
       // would just re-hit the same logged-out gate, so short-circuit to
       // reauth_required (non-retryable) instead of falling through.
       if (isGrokAuthFailure(startupErr)) {
-        _emitGrokReauthHook(root, stdoutFile, log, 'ACP startup (not signed in)', providerId, sess.stderrSnapshot.slice(0, 160));
+        _emitGrokReauthHook(root, stdoutFile, log, 'ACP startup (not signed in)', providerId, stderr.slice(0, 160));
         try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
         return;
       }
@@ -2053,9 +2110,23 @@ export function sendGrokAcpPrompt(
     }
     // Persist the session id so a restart can session/load it (resume-on-restart).
     if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
-    let res: { clean: boolean; stopReason: string; error?: string };
-    try { res = await sess.runTurn(promptText, sink); }
-    catch (err) { res = { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) }; }
+    const runTurnSafe = async (s: GrokAcpSession): Promise<{ clean: boolean; stopReason: string; error?: string }> => {
+      try { return await s.runTurn(promptText, sink); }
+      catch (err) { return { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) }; }
+    };
+    let res = await runTurnSafe(sess);
+    // Leader POISON-ESCAPE: the warm session was rejected (keepalive died / stale
+    // id). Reap the leader + session/new on a FRESH leader, then retry ONCE.
+    if (leaderModeEnabled() && sess.attachMode && !res.clean && AcpSession.isUnknownSessionError(res.error)) {
+      log('Grok leader: attach rejected (poison) — reaping leader, starting a fresh session, retrying once');
+      recoverLeaderPoison(root, providerId, log);
+      try {
+        sess = await ensureAcpSession(root, providerId, model, log, undefined);
+        await sess.ensureReady();
+        if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
+        res = await runTurnSafe(sess);
+      } catch (err) { res = { clean: false, stopReason: 'poison-recover-failed', error: (err as Error)?.message ?? String(err) }; }
+    }
     if (!res.clean && res.error) {
       try { fs.appendFileSync(stdoutFile, `\n[Grok ACP: turn ended ${res.stopReason} — ${res.error}]\n`, 'utf8'); } catch { /* ignore */ }
       // AUTH failure mid-turn (token expired between turns): surface reauth_required
@@ -2121,7 +2192,7 @@ export async function ensureGrokAcpSteer(
   root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, text: string, log: (msg: string) => void,
 ): Promise<import('./GrokAcpSession').AcpTurnResult | null> {
   if (!grokAcpEnabled()) { return null; }
-  const sess = getOrCreateAcpSession(root, providerId, model, log, undefined);
+  const sess = await ensureAcpSession(root, providerId, model, log, undefined);
   try { await sess.ensureReady(); }
   catch (err) { log(`Grok ACP: durable-steer ensureReady failed (${(err as Error)?.message ?? err})`); return null; }
   if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
@@ -2396,6 +2467,10 @@ export function closeGrokTuiSession(root: string, _log: (msg: string) => void): 
   if (acp) {
     // Reap grok's whole worker subtree (grok forks a per-turn worker child), then
     // close — SIGKILL of just the parent would orphan the worker to init.
+    // LEADER-AWARE (Layer B): acp.pid here is the THIN CLIENT. The leader + keepalive
+    // are DETACHED (their own process groups, not in the client's tree), so this
+    // reaps ONLY the client — the leader survives the loop restart, exactly as
+    // intended. The app reaps the leader itself via `autodev leader-stop <root>`.
     if (acp.pid) { try { killProcessTree(acp.pid); } catch { /* ignore */ } }
     try { acp.close(); } catch { /* ignore */ }
     _acpSessions.delete(root);

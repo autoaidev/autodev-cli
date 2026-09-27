@@ -18,6 +18,8 @@ import { loginCommand } from './commands/login';
 import { modelsCommand } from './commands/models';
 import { mcpCommand } from './commands/mcp';
 import { killTreeCommand } from './commands/killTree';
+import { leaderStopCommand } from './commands/leaderStop';
+import { grokKeepaliveCommand } from './commands/grokKeepalive';
 import { applyWsUrl, applySetupUrl } from './connect';
 import { log } from './logger';
 
@@ -109,6 +111,8 @@ loginCommand(program);
 modelsCommand(program);
 mcpCommand(program);
 killTreeCommand(program);
+leaderStopCommand(program);
+grokKeepaliveCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error((err as Error).message);

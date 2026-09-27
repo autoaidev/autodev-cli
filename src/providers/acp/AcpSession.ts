@@ -194,6 +194,12 @@ export class AcpSession {
   /** Extra env vars merged into the child's environment (e.g. OPENCODE_CONFIG). */
   protected readonly extraEnv: Record<string, string>;
   private readonly _decode: (msg: unknown) => AcpUpdate;
+  /** LEADER attach-without-load (Layer B, 1.4.193): when true and a candidate
+   *  session id is known, adopt it DIRECTLY at (re)start — no session/load, no
+   *  history replay — because a live keepalive client holds the session warm in
+   *  the leader's memory. Default false ⇒ the pre-1.4.193 session/load path is
+   *  used byte-for-byte (zero behaviour change when leader mode is off). */
+  private readonly _attachWithoutLoad: boolean;
 
   private child: child_process.ChildProcess | null = null;
   private buf = '';
@@ -229,7 +235,7 @@ export class AcpSession {
   constructor(opts: {
     root: string; model?: string; bin: string; hooks: AcpHostHooks;
     spec: AcpLaunchSpec; initialSessionId?: string; extraArgs?: string[];
-    extraEnv?: Record<string, string>;
+    extraEnv?: Record<string, string>; attachWithoutLoad?: boolean;
   }) {
     this.root = opts.root;
     this.model = opts.model;
@@ -240,6 +246,7 @@ export class AcpSession {
     this._wantSessionId = opts.initialSessionId;
     this.extraArgs = opts.extraArgs ?? [];
     this.extraEnv = opts.extraEnv ?? {};
+    this._attachWithoutLoad = opts.attachWithoutLoad ?? false;
   }
 
   /** Per-turn watchdog budget (ms). Env: AUTODEV_ACP_MAX_RUN_MS, else GROK_MAX_RUN_MS
@@ -272,7 +279,16 @@ export class AcpSession {
     this._spawnChild();
     await this._request('initialize', { protocolVersion: 1, clientCapabilities: {} });
     const want = this._wantSessionId;
-    if (want) {
+    if (want && this._attachWithoutLoad) {
+      // Layer B (1.4.193): a live keepalive client holds this session warm in the
+      // leader's memory, so ATTACH DIRECTLY — set the id, NO session/load, NO replay.
+      // Verify / rediscover via session/list (the persisted id may be stale while a
+      // cwd-matching live session exists); optimistic otherwise — a truly-dead id
+      // fails the first prompt and the host runs its leader poison-escape.
+      const chosen = await this._rediscoverLiveSession(want);
+      this._sessionId = chosen;
+      this.hooks.log(`ACP: attached to live leader session ${chosen.slice(0, 8)}… (no session/load) — context warm`);
+    } else if (want) {
       // Layer A.1: suppress hook emission for the whole session/load replay so a
       // reload restores context QUIETLY (no re-spammed historical narration/tools).
       this._loading = true;
@@ -302,6 +318,40 @@ export class AcpSession {
     }
     this._wantSessionId = this._sessionId;
     this.hooks.emitHook('SessionStart', { source: this._startCount > 1 ? 'resume' : 'startup' });
+  }
+
+  /** True when this session is in LEADER attach-without-load mode. */
+  get attachMode(): boolean { return this._attachWithoutLoad; }
+
+  /**
+   * Does a JSON-RPC error message look like the leader rejecting our attach id
+   * (session evicted / never existed on this leader)? Used by the host to trigger
+   * the leader poison-escape. PURE.
+   */
+  static isUnknownSessionError(msg: string | undefined): boolean {
+    return /unknown session id|no such session|session not found|invalid session|unknown session/i.test(String(msg ?? ''));
+  }
+
+  /**
+   * Best-effort: confirm `want` is a live session on the leader (session/list), or
+   * rediscover the session for this cwd if the persisted id is stale. Returns the
+   * id to attach to (falls back to `want` when session/list is unavailable). PURE
+   * of side effects beyond the one JSON-RPC read.
+   */
+  private async _rediscoverLiveSession(want: string): Promise<string> {
+    try {
+      const r = await this._request('session/list', {});
+      const sessions = (r.result as { sessions?: Array<{ sessionId?: string; cwd?: string }> } | undefined)?.sessions;
+      if (Array.isArray(sessions) && sessions.length) {
+        if (sessions.some((s) => s?.sessionId === want)) { return want; }
+        const cwdMatch = sessions.find((s) => s?.cwd === this.root && s?.sessionId);
+        if (cwdMatch?.sessionId) {
+          this.hooks.log(`ACP: persisted id stale; rediscovered cwd session ${cwdMatch.sessionId.slice(0, 8)}… via session/list`);
+          return cwdMatch.sessionId;
+        }
+      }
+    } catch { /* session/list unsupported → optimistic attach */ }
+    return want;
   }
 
   private _spawnChild(): void {

@@ -1144,12 +1144,20 @@ export class TaskLoopRunner {
     // DURABLE-STEER path (persistent ACP: grok-cli/grok-tui + opencode via the
     // shared AcpSession). A steer here is PERSISTED to .autodev/pending-steers.jsonl
     // BEFORE it is acked, delivered to the live process as a loop-tracked turn, and
-    // acked (+ de-queued) only when that steered turn COMPLETES — so a restart mid-
-    // steer re-delivers it (at-least-once) instead of silently losing it. Requires a
-    // delivery id (the A2A id) for restart-safe dedup; without one we fall through to
-    // the buffer path below (unchanged). NOT TODO.md — grok rewrites TODO.md mid-turn.
-    if (root && steerId && this._acpSteerKind(provider)) {
-      this._deliverAcpSteerDurable(root, provider, steerId, clean, onDelivered);
+    // acked (+ de-queued) only when that steered turn COMPLETES CLEANLY — so a
+    // restart / watchdog teardown mid-steer re-delivers it (at-least-once) instead of
+    // silently losing it. NOT TODO.md — grok rewrites TODO.md mid-turn.
+    //
+    // 1.4.193: route ALL grok/opencode ACP steers here REGARDLESS of steerId. Office/
+    // browser INSTANT steers whose A2A frame carries no id previously fell through to
+    // the LOSSY `steerGrokAcp`/`AcpSession.steer()` branch below (fire-and-forget:
+    // onDelivered() immediately, so a teardown before the queued turn drained lost it
+    // forever). When there is no A2A id we synthesize a stable local one (text+ts) so
+    // the durable queue owns it — the id is only used for OUR restart-safe dedup /
+    // tracking, never sent to the server.
+    if (root && this._acpSteerKind(provider)) {
+      const id = steerId || this._synthSteerId(clean);
+      this._deliverAcpSteerDurable(root, provider, id, clean, onDelivered);
       return;
     }
 
@@ -1267,6 +1275,17 @@ export class TaskLoopRunner {
   // fired ONLY when the steered turn completes.
   private readonly _acpSteerAcks = new Map<string, () => void>();
 
+  /**
+   * Synthesize a stable local steer id for an INSTANT steer that arrived with no
+   * A2A delivery id (office/browser ⚡). Hash of text+ts so the durable queue can
+   * track / dedup it across a restart-drain; NEVER sent to the server (an id-less
+   * frame has no server delivery to ack). Distinct arrivals get distinct ids
+   * (at-least-once favours delivery over rare double-run).
+   */
+  private _synthSteerId(text: string): string {
+    return 'local-' + crypto.createHash('sha1').update(`${text} ${Date.now()}`).digest('hex').slice(0, 16);
+  }
+
   /** Which persistent-ACP steer path applies to this provider (null = none). */
   private _acpSteerKind(provider: string): 'grok' | 'opencode' | null {
     if ((provider === 'grok-cli' || provider === 'grok-tui') && grokAcpEnabled()) { return 'grok'; }
@@ -1307,7 +1326,21 @@ export class TaskLoopRunner {
     }
     this._acpSteerInflight.add(id);
     this._cb?.log(`⚡ Steered live (durable, ${kind}): "${text.slice(0, 80)}"`);
-    void p.then(() => this._settleAcpSteer(root, id), () => this._settleAcpSteer(root, id));
+    // Settle (de-queue + markDeliverySeen) ONLY when the steered turn completes
+    // CLEANLY. steerGrokAcpTracked/steerOpencodeAcpTracked RESOLVE (never reject)
+    // with {clean:false} when the turn is torn down (watchdog cancel+close, grok
+    // child death, restart) — settling on that would de-queue a steer that never
+    // ran (the 1.4.192 loss). Instead we LEAVE it on the durable queue (do NOT
+    // markDeliverySeen) so _drainDurableAcpSteers re-delivers it after respawn +
+    // session/load — genuine at-least-once.
+    void p.then(
+      (res) => {
+        if (res && res.clean) { this._settleAcpSteer(root, id); return; }
+        this._acpSteerInflight.delete(id); // kept queued for redelivery
+        this._cb?.log(`⚡ Durable steer did not complete cleanly (id=${id}, ${res?.stopReason ?? 'unknown'}) — kept queued for redelivery`);
+      },
+      () => { this._acpSteerInflight.delete(id); }, // errored → kept queued
+    );
   }
 
   /**
@@ -1335,7 +1368,13 @@ export class TaskLoopRunner {
             this._acpSteerInflight.delete(s.id);
             return;
           }
-          this._settleAcpSteer(root, s.id);
+          // Settle ONLY on a clean completion — a redelivered steer torn down again
+          // stays queued (do NOT markDeliverySeen) so the next boundary retries it.
+          if (res.clean) { this._settleAcpSteer(root, s.id); }
+          else {
+            this._acpSteerInflight.delete(s.id);
+            this._cb?.log(`⚡ Durable steer redelivery not clean (id=${s.id}, ${res.stopReason}) — kept queued`);
+          }
         } catch {
           this._acpSteerInflight.delete(s.id);
         }

@@ -39,15 +39,41 @@ export const GROK_ACP_SPEC: AcpLaunchSpec = {
 };
 
 /**
+ * LEADER-CLIENT spec (Layer B, 1.4.193): a thin `grok agent … --leader
+ * --leader-socket <sock> … stdio` client that connects to a shared leader daemon
+ * instead of starting its own backend (replaces `--no-leader` with the leader
+ * connect flags). The leader + a detached keepalive keep the session warm so this
+ * client attaches WITHOUT session/load. Everything else (decoder, narration) is
+ * identical to GROK_ACP_SPEC.
+ */
+export function grokLeaderClientSpec(socket: string): AcpLaunchSpec {
+  return {
+    buildArgs(model: string | undefined, extraArgs: string[]): string[] {
+      const args = ['agent', '--always-approve'];
+      if (model) { args.push('-m', model); }
+      args.push('--leader', '--leader-socket', socket, ...extraArgs, 'stdio');
+      return args;
+    },
+    decodeUpdate: decodeAcpUpdateStandard,
+    narrationTitle: 'grok',
+    narrateReasoning: false,
+  };
+}
+
+/**
  * One persistent `grok agent stdio` process for a workspace root. Thin subclass
- * that injects GROK_ACP_SPEC — all behaviour is in the shared AcpSession.
+ * that injects GROK_ACP_SPEC — all behaviour is in the shared AcpSession. When
+ * `leaderSocket` is given it uses the LEADER-CLIENT spec + attach-without-load
+ * (Layer B); otherwise the non-leader spec, byte-for-byte unchanged.
  */
 export class GrokAcpSession extends AcpSession {
   constructor(opts: {
     root: string; model?: string; bin: string;
     hooks: import('../acp/AcpSession').AcpHostHooks;
     initialSessionId?: string; extraArgs?: string[];
+    leaderSocket?: string; attachWithoutLoad?: boolean;
   }) {
-    super({ ...opts, spec: GROK_ACP_SPEC });
+    const spec = opts.leaderSocket ? grokLeaderClientSpec(opts.leaderSocket) : GROK_ACP_SPEC;
+    super({ ...opts, spec, attachWithoutLoad: opts.attachWithoutLoad });
   }
 }

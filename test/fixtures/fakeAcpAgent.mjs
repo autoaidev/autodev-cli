@@ -14,6 +14,7 @@
 //       * resolves the prompt with stopReason 'end_turn' after ~80ms
 //       * a prompt received while one is running is QUEUED and run after (Bug A)
 import process from 'node:process';
+import { appendFileSync as fsAppend } from 'node:fs';
 
 let buf = '';
 const queue = [];
@@ -36,9 +37,23 @@ function send(o) { process.stdout.write(JSON.stringify(o) + '\n'); }
 function reply(id, result) { send({ jsonrpc: '2.0', id, result }); }
 function update(u) { send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-1', update: u } }); }
 
+// Optional method log (Layer B attach-without-load tests assert session/load is
+// NOT sent when attaching). Set FAKE_ACP_LOG to a file path.
+function logMethod(m) {
+  const f = process.env.FAKE_ACP_LOG;
+  if (!f) return;
+  try { fsAppend(f, m + '\n'); } catch { /* ignore */ }
+}
+
 function handle(msg) {
-  if (msg.method === 'initialize') { reply(msg.id, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); return; }
+  if (msg.method) logMethod(msg.method);
+  if (msg.method === 'initialize') { reply(msg.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { list: {}, resume: {} } } }); return; }
   if (msg.method === 'session/new') { reply(msg.id, { sessionId: 'fake-1' }); return; }
+  if (msg.method === 'session/list') {
+    // Leader-style: report the warm session so attach-without-load can verify it.
+    reply(msg.id, { sessions: [{ sessionId: 'fake-1', cwd: msg.params?.cwd ?? '', updatedAt: new Date().toISOString() }] });
+    return;
+  }
   if (msg.method === 'session/load') {
     // Replay prior history as session/update notifications BEFORE resolving —
     // exactly what grok/opencode do. The client must SUPPRESS these (Layer A.1).

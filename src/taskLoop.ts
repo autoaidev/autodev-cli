@@ -17,9 +17,9 @@ import { getClaudeSessionCursor, parseClaudeStateSince, findLatestClaudeSession,
 import { getLatestOpenCodeSessionId, runOpenCodeCompact } from './providers/opencodeCliProvider';
 import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedCleanly } from './openCodeHooksManager';
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
-import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient } from './providers/claudeTuiProvider';
-import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk } from './providers/copilotSdkProvider';
-import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk } from './providers/opencodeSdkProvider';
+import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient, claudeCliPersistentEnabled } from './providers/claudeTuiProvider';
+import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk, copilotCliPersistentEnabled } from './providers/copilotSdkProvider';
+import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk, opencodeCliPersistentEnabled } from './providers/opencodeSdkProvider';
 import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy } from './providers/grokTuiProvider';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
@@ -35,6 +35,28 @@ import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, provide
 import { ConfigManager } from './configManager';
 import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
 import { CLI_VERSION } from './version';
+
+// ---------------------------------------------------------------------------
+// Persistent-CLI predicates (Phase 2). A CLI provider that runs through its
+// persistent sibling's in-process client this turn must be treated by the loop
+// exactly like that sibling (busy flag, mid-turn steer, session capture, close,
+// compact/clear) instead of the exit-file/command path. These mirror the gate
+// the dispatcher uses, so both agree per turn. When the gate is off (or the
+// transport is unavailable) they return false and the legacy command handling
+// applies — nothing regresses.
+// ---------------------------------------------------------------------------
+/** claude-cli is reusing the claude-tui StructuredClient this turn. */
+function claudeCliIsPersistent(p?: string): boolean { return p === 'claude-cli' && claudeCliPersistentEnabled(); }
+/** copilot-cli is reusing the copilot-sdk LocalSession this turn. */
+function copilotCliIsPersistent(p?: string): boolean { return p === 'copilot-cli' && copilotCliPersistentEnabled(); }
+/** opencode-cli is reusing the opencode-sdk server+session this turn. */
+function opencodeCliIsPersistent(p?: string): boolean { return p === 'opencode-cli' && opencodeCliPersistentEnabled(); }
+/** Provider runs on the persistent claude-tui client (native or claude-cli routed). */
+function usesClaudeTuiClient(p?: string): boolean { return p === 'claude-tui' || claudeCliIsPersistent(p); }
+/** Provider runs on the persistent copilot-sdk session (native or copilot-cli routed). */
+function usesCopilotSdkSession(p?: string): boolean { return p === 'copilot-sdk' || copilotCliIsPersistent(p); }
+/** Provider runs on the persistent opencode-sdk server (native or opencode-cli routed). */
+function usesOpencodeSdkServer(p?: string): boolean { return p === 'opencode-sdk' || opencodeCliIsPersistent(p); }
 
 // ---------------------------------------------------------------------------
 // TaskLoopRunner — mirrors PHP Loop.php
@@ -370,22 +392,24 @@ export class TaskLoopRunner {
     this._compacting = true;
     log(`🗜 Manual compact triggered (provider: ${provider})`);
     try {
-      if (provider === 'claude-cli') {
+      if (provider === 'claude-cli' && !claudeCliIsPersistent(provider)) {
         let sid = getSessionId(root, 'claude-cli');
         if (!sid) { sid = findLatestClaudeSession(root); }
         if (sid) { await runClaudeCompact(sid, root, log); log('🗜 Compact complete'); }
         else { log('⚠️ Compact: no Claude session ID found'); }
-      } else if (provider === 'claude-tui') {
-        let sid = getSessionId(root, 'claude-tui');
+      } else if (usesClaudeTuiClient(provider)) {
+        // claude-tui OR a persistent claude-cli — compact the LIVE StructuredClient
+        // (spawning a separate `claude … /compact` would fight the held session).
+        let sid = getSessionId(root, provider!);
         if (!sid) { sid = getClaudeTuiLatestSessionId(root); }
         if (sid) { await runClaudeTuiCompact(root, sid, log); log('🗜 Compact complete'); }
         else { log('⚠️ Compact: no Claude TUI session ID found'); }
-      } else if (provider === 'opencode-cli') {
+      } else if (provider === 'opencode-cli' && !opencodeCliIsPersistent(provider)) {
         let sid = getSessionId(root, 'opencode-cli');
         if (!sid) { sid = await getLatestOpenCodeSessionId(root, log); }
         if (sid) { await runOpenCodeCompact(sid, root, log); log('🗜 Compact complete'); }
         else { log('⚠️ Compact: no OpenCode session ID found'); }
-      } else if (provider === 'opencode-sdk') {
+      } else if (usesOpencodeSdkServer(provider)) {
         await runOpencodeSdkCompact(root, log);
         log('🗜 Compact complete (opencode-sdk)');
       } else {
@@ -404,7 +428,7 @@ export class TaskLoopRunner {
     const log = (m: string) => this._cb?.log(m);
     log(`🗑 Manual /clear triggered (provider: ${provider})`);
     try {
-      if (provider === 'claude-cli') {
+      if (provider === 'claude-cli' && !claudeCliIsPersistent(provider)) {
         let sid = getSessionId(root, 'claude-cli');
         if (!sid) { sid = findLatestClaudeSession(root); }
         if (sid) {
@@ -412,12 +436,13 @@ export class TaskLoopRunner {
           clearSessionId(root, 'claude-cli');
           log('🗑 /clear complete — session reset');
         } else { log('⚠️ /clear: no Claude session ID found'); }
-      } else if (provider === 'claude-tui') {
-        let sid = getSessionId(root, 'claude-tui');
+      } else if (usesClaudeTuiClient(provider)) {
+        // claude-tui OR a persistent claude-cli — /clear the LIVE StructuredClient.
+        let sid = getSessionId(root, provider!);
         if (!sid) { sid = getClaudeTuiLatestSessionId(root); }
         if (sid) {
           await runClaudeTuiClear(root, sid, log);
-          clearSessionId(root, 'claude-tui');
+          clearSessionId(root, provider!);
           log('🗑 /clear (TUI) complete — session reset');
         } else { log('⚠️ /clear: no Claude TUI session ID found'); }
       } else {
@@ -1068,18 +1093,20 @@ export class TaskLoopRunner {
       const root = this._workspaceRoot;
       const provider = this._cb?.getActiveProvider() ?? '';
       if (root) {
-        if (provider === 'claude-tui') {
-          let sessionId = getSessionId(root, 'claude-tui');
+        if (usesClaudeTuiClient(provider)) {
+          // claude-tui OR a persistent claude-cli — clear the LIVE StructuredClient.
+          const claudeProvider = provider as ProviderId;
+          let sessionId = getSessionId(root, claudeProvider);
           if (!sessionId) { sessionId = getClaudeTuiLatestSessionId(root); }
           if (sessionId) {
             runClaudeTuiClear(root, sessionId, msg => this._cb?.log(msg))
-              .then(() => { clearSessionId(root, 'claude-tui'); this._cb?.log('🗑 /clear (TUI) complete'); })
+              .then(() => { clearSessionId(root, claudeProvider); this._cb?.log('🗑 /clear (TUI) complete'); })
               .catch(e => this._cb?.log(`⚠️ /clear (TUI) failed: ${e instanceof Error ? e.message : String(e)}`));
           } else {
             this._cb?.log('⚠️ /clear: no active Claude TUI session found');
           }
         } else {
-          // Default to claude-cli
+          // Default to claude-cli (legacy per-turn command path)
           let sessionId = getSessionId(root, 'claude-cli');
           if (!sessionId) { sessionId = findLatestClaudeSession(root); }
           if (sessionId) {
@@ -1129,7 +1156,7 @@ export class TaskLoopRunner {
     // `_currentTask` routes an idle steer to the buffer path below, which wakes the
     // idle sleep and drains it into a real turn immediately.
     const turnInFlight = !!this._currentTask;
-    if (root && turnInFlight && provider === 'claude-tui' && isClaudeTuiBusy(root)) {
+    if (root && turnInFlight && usesClaudeTuiClient(provider) && isClaudeTuiBusy(root)) {
       if (await steerClaudeTui(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn: "${clean.slice(0, 80)}"`);
         onDelivered?.(); // durably injected into the live turn
@@ -1141,7 +1168,7 @@ export class TaskLoopRunner {
     // injects into the running turn — true mid-turn steering, same as claude-tui.
     // (copilot-CLI is a one-shot subprocess with no live turn to inject into, so
     // it always falls through to the next-turn TODO queue below.)
-    if (root && turnInFlight && provider === 'copilot-sdk' && isCopilotSdkBusy(root)) {
+    if (root && turnInFlight && usesCopilotSdkSession(provider) && isCopilotSdkBusy(root)) {
       if (await steerCopilotSdk(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (copilot-sdk): "${clean.slice(0, 80)}"`);
         onDelivered?.();
@@ -1151,7 +1178,7 @@ export class TaskLoopRunner {
 
     // opencode-sdk keeps a persistent in-process server + session; a prompt sent to
     // the live session mid-turn is picked up by the running turn (interrupt + continue).
-    if (root && turnInFlight && provider === 'opencode-sdk' && isOpencodeSdkBusy(root)) {
+    if (root && turnInFlight && usesOpencodeSdkServer(provider) && isOpencodeSdkBusy(root)) {
       if (await steerOpencodeSdk(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (opencode-sdk): "${clean.slice(0, 80)}"`);
         onDelivered?.();
@@ -1488,13 +1515,16 @@ export class TaskLoopRunner {
         // turn takes >30 s to finish.  Instead, use the in-flight turn flag which
         // stays true for the entire duration of the async, including after
         // _waitForTaskCompletion resolves but before the turn emits 'result'.
-        if (provider === 'claude-tui') {
+        // claude-tui OR a persistent claude-cli — both track the turn via the
+        // shared in-memory busy flag on the StructuredClient (honest signal even
+        // for turns >30s, unlike the exit-file sentinel).
+        if (usesClaudeTuiClient(provider)) {
           return isClaudeTuiBusy(this._workspaceRoot);
         }
-        if (provider === 'copilot-sdk') {
+        if (usesCopilotSdkSession(provider)) {
           return isCopilotSdkBusy(this._workspaceRoot);
         }
-        if (provider === 'opencode-sdk') {
+        if (usesOpencodeSdkServer(provider)) {
           return isOpencodeSdkBusy(this._workspaceRoot);
         }
         // grok-tui: like claude-tui, it runs a PERSISTENT session (tmux PTY, or a
@@ -1883,7 +1913,7 @@ export class TaskLoopRunner {
         // The exit-code file is written only after the shell command completes,
         // so a non-empty file guarantees the stdout file is fully flushed.
         const activeProvider = this._cb?.getActiveProvider();
-        if (this._workspaceRoot && activeProvider === 'claude-tui') {
+        if (this._workspaceRoot && usesClaudeTuiClient(activeProvider)) {
           // claude-tui: _waitForTaskCompletion resolves as soon as the task is
           // marked [x] in TODO.md, but the persistent async turn may still be
           // running (Claude executing further tool calls, marking other tasks [~],
@@ -1911,7 +1941,7 @@ export class TaskLoopRunner {
             this._cb?.log('⚠️ Claude TUI turn: no streaming activity for 10 minutes — force-clearing busy state and moving on');
             forceIdleClaudeTui(this._workspaceRoot);
           }
-        } else if (this._workspaceRoot && activeProvider === 'copilot-sdk') {
+        } else if (this._workspaceRoot && usesCopilotSdkSession(activeProvider)) {
           const tuiDeadline = Date.now() + 10 * 60_000;
           while (isCopilotSdkBusy(this._workspaceRoot) && Date.now() < tuiDeadline) {
             if (this._state !== 'running') { break; }
@@ -1920,7 +1950,7 @@ export class TaskLoopRunner {
           if (isCopilotSdkBusy(this._workspaceRoot)) {
             this._cb?.log('⚠️ Copilot TUI turn did not complete within 10 minutes — moving on');
           }
-        } else if (this._workspaceRoot && activeProvider === 'opencode-sdk') {
+        } else if (this._workspaceRoot && usesOpencodeSdkServer(activeProvider)) {
           // opencode-sdk: same pattern as claude-tui — wait for the in-flight
           // fire-and-forget async to fully complete (session.idle received).
           // Use activity-based deadline: reset the 30-minute window on each tool
@@ -1996,7 +2026,7 @@ export class TaskLoopRunner {
 
         // Capture and persist CLI session ID so the next task can resume it
         if (this._workspaceRoot && activeProvider && PROVIDERS[activeProvider]?.isCli) {
-          if (activeProvider === 'opencode-cli') {
+          if (activeProvider === 'opencode-cli' && !opencodeCliIsPersistent(activeProvider)) {
             // Prefer the session ID from hooks events (fast, no subprocess);
             // fall back to `opencode session list` if hooks haven't fired yet.
             // Pass taskStartTime so we ignore stale/foreign hooks events from
@@ -2010,15 +2040,21 @@ export class TaskLoopRunner {
                 .then(id => { if (id && this._workspaceRoot) { saveSessionId(this._workspaceRoot, 'opencode-cli', id); } })
                 .catch(() => {});
             }
-          } else if (activeProvider === 'claude-tui') {
+          } else if (usesClaudeTuiClient(activeProvider)) {
+            // claude-tui OR a persistent claude-cli — the StructuredClient owns the
+            // real ~/.claude session uuid; persist it under the ACTIVE provider key
+            // so a (re)start resumes the same session (works for command fallback too).
             const sid = getClaudeTuiLatestSessionId(this._workspaceRoot);
-            if (sid) { saveSessionId(this._workspaceRoot, 'claude-tui', sid); }
+            if (sid) { saveSessionId(this._workspaceRoot, activeProvider, sid); }
           } else if (activeProvider === 'copilot-sdk') {
             const sid = getLatestCopilotSdkSessionId(this._workspaceRoot);
             if (sid) { saveSessionId(this._workspaceRoot, 'copilot-sdk', sid); }
-          } else if (activeProvider === 'opencode-sdk') {
+          } else if (usesOpencodeSdkServer(activeProvider)) {
+            // opencode-sdk OR a persistent opencode-cli — persist the real SDK
+            // session id under the ACTIVE provider key so the next turn RESUMES it
+            // (never mints a fresh session — see memory opencode-session-explosion).
             const sid = getOpencodeSdkLatestSessionId(this._workspaceRoot);
-            if (sid) { saveSessionId(this._workspaceRoot, 'opencode-sdk', sid); }
+            if (sid) { saveSessionId(this._workspaceRoot, activeProvider, sid); }
           } else {
             const jsonlFallback = activeProvider === 'claude-cli'
               ? findLatestClaudeSession(this._workspaceRoot)
@@ -2194,7 +2230,7 @@ export class TaskLoopRunner {
           this._cb?.log(`🗜 Auto-compact triggered after ${compactInterval} tasks (provider: ${acProvider})`);
           this._notifyDiscord(`🗜 Auto-compact triggered after ${compactInterval} tasks`);
           try {
-            if (acProvider === 'claude-cli') {
+            if (acProvider === 'claude-cli' && !claudeCliIsPersistent(acProvider)) {
               let sid = getSessionId(this._workspaceRoot!, 'claude-cli');
               if (!sid) { sid = findLatestClaudeSession(this._workspaceRoot!); }
               if (sid) {
@@ -2203,8 +2239,9 @@ export class TaskLoopRunner {
               } else {
                 this._cb?.log('⚠️ Auto-compact: no Claude session ID found — skipping');
               }
-            } else if (acProvider === 'claude-tui') {
-              let sid = getSessionId(this._workspaceRoot!, 'claude-tui');
+            } else if (usesClaudeTuiClient(acProvider)) {
+              // claude-tui OR a persistent claude-cli — compact the LIVE client.
+              let sid = getSessionId(this._workspaceRoot!, acProvider as ProviderId);
               if (!sid) { sid = getClaudeTuiLatestSessionId(this._workspaceRoot!); }
               if (sid) {
                 await runClaudeTuiCompact(this._workspaceRoot!, sid, msg => this._cb?.log(msg));
@@ -2212,9 +2249,9 @@ export class TaskLoopRunner {
               } else {
                 this._cb?.log('⚠️ Auto-compact: no Claude TUI session ID found — skipping');
               }
-            } else if (acProvider === 'copilot-sdk') {
+            } else if (usesCopilotSdkSession(acProvider)) {
               this._cb?.log('ℹ️ Auto-compact not supported for copilot-sdk — skipping');
-            } else if (acProvider === 'opencode-cli') {
+            } else if (acProvider === 'opencode-cli' && !opencodeCliIsPersistent(acProvider)) {
               let sid = getSessionId(this._workspaceRoot!, 'opencode-cli');
               if (!sid) { sid = await getLatestOpenCodeSessionId(this._workspaceRoot!, msg => this._cb?.log(msg)); }
               if (sid) {
@@ -2223,7 +2260,7 @@ export class TaskLoopRunner {
               } else {
                 this._cb?.log('⚠️ Auto-compact: no OpenCode session ID found — skipping');
               }
-            } else if (acProvider === 'opencode-sdk') {
+            } else if (usesOpencodeSdkServer(acProvider)) {
               await runOpencodeSdkCompact(this._workspaceRoot!, msg => this._cb?.log(msg));
               this._cb?.log('🗜 Auto-compact complete (opencode-sdk)');
             }
@@ -2348,9 +2385,11 @@ export class TaskLoopRunner {
           if (evictRoot) {
             try {
               const evictLog = (m: string) => this._cb?.log(m);
-              if (currentProvider === 'claude-tui') { closeClaudeTuiClient(evictRoot, evictLog); }
-              else if (currentProvider === 'opencode-sdk') { closeOpencodeSdkClient(evictRoot, evictLog); }
-              else if (currentProvider === 'copilot-sdk') { closeCopilotSdkSession(evictRoot, evictLog); }
+              // Also evict the persistent CLI variants (Phase 2) — they hold the
+              // same live sibling process, which is likewise clutching the dead token.
+              if (usesClaudeTuiClient(currentProvider)) { closeClaudeTuiClient(evictRoot, evictLog); }
+              else if (usesOpencodeSdkServer(currentProvider)) { closeOpencodeSdkClient(evictRoot, evictLog); }
+              else if (usesCopilotSdkSession(currentProvider)) { closeCopilotSdkSession(evictRoot, evictLog); }
               else if (currentProvider === 'grok-tui') { closeGrokTuiSession(evictRoot, evictLog); }
             } catch (evictErr) {
               this._cb?.log(`⚠️ Failed to evict ${currentProvider} client before reauth pause: ${evictErr instanceof Error ? evictErr.message : String(evictErr)}`);
@@ -2473,7 +2512,7 @@ export class TaskLoopRunner {
           this._cb?.log(`🗑 Autocompact thrashing (${provider}) — running /clear to reset session…\n${rawMsg}`);
           this._notifyDiscord(`🗑 **Autocompact thrashing** (${provider}) — running \`/clear\` to reset session…\n\`\`\`\n${rawMsg}\n\`\`\``);
 
-          if (provider === 'claude-cli') {
+          if (provider === 'claude-cli' && !claudeCliIsPersistent(provider)) {
             let sessionId = getSessionId(this._workspaceRoot!, 'claude-cli');
             if (!sessionId) { sessionId = findLatestClaudeSession(this._workspaceRoot!); }
             if (sessionId) {
@@ -2488,13 +2527,14 @@ export class TaskLoopRunner {
             } else {
               this._cb?.log('⚠️ No Claude session ID found for /clear — retrying anyway');
             }
-          } else if (provider === 'claude-tui') {
-            let sessionId = getSessionId(this._workspaceRoot!, 'claude-tui');
+          } else if (usesClaudeTuiClient(provider)) {
+            const claudeProvider = provider as ProviderId;
+            let sessionId = getSessionId(this._workspaceRoot!, claudeProvider);
             if (!sessionId) { sessionId = getClaudeTuiLatestSessionId(this._workspaceRoot!); }
             if (sessionId) {
               try {
                 await runClaudeTuiClear(this._workspaceRoot!, sessionId, msg => this._cb?.log(msg));
-                clearSessionId(this._workspaceRoot!, 'claude-tui');
+                clearSessionId(this._workspaceRoot!, claudeProvider);
                 this._cb?.log('🗑 /clear (TUI) complete — session reset, retrying task');
                 this._notifyDiscord('🗑 `/clear` (TUI) complete — session reset, retrying task');
               } catch (e) {
@@ -2516,7 +2556,7 @@ export class TaskLoopRunner {
           this._cb?.log(`🗜 Context length exceeded (${provider}) — running /compact: ${rawMsg}`);
           this._notifyDiscord(`🗜 **Context length exceeded** (${provider}) — running \`/compact\`…\n\`\`\`\n${rawMsg}\n\`\`\``);
 
-          if (provider === 'claude-cli') {
+          if (provider === 'claude-cli' && !claudeCliIsPersistent(provider)) {
             // Resolve a Claude session ID — prefer the saved one, else scan
             // the .claude/projects jsonl folder for the most recent.
             let sessionId = getSessionId(this._workspaceRoot!, 'claude-cli');
@@ -2533,8 +2573,9 @@ export class TaskLoopRunner {
             } else {
               this._cb?.log('⚠️ No Claude session ID found for compact — retrying task without compact');
             }
-          } else if (provider === 'claude-tui') {
-            let sessionId = getSessionId(this._workspaceRoot!, 'claude-tui');
+          } else if (usesClaudeTuiClient(provider)) {
+            const claudeProvider = provider as ProviderId;
+            let sessionId = getSessionId(this._workspaceRoot!, claudeProvider);
             if (!sessionId) { sessionId = getClaudeTuiLatestSessionId(this._workspaceRoot!); }
             if (sessionId) {
               try {
@@ -2705,6 +2746,11 @@ export class TaskLoopRunner {
     const iscopilotSdkProvider = this._cb?.getActiveProvider() === 'copilot-sdk';
     const isOpenCodeCli = this._cb?.getActiveProvider() === 'opencode-cli';
     const isOpencodeSdk = this._cb?.getActiveProvider() === 'opencode-sdk';
+    // opencode-cli running PERSISTENT (Phase 2) shares the opencode-sdk code path:
+    // its in-process server writes '0' to the exit file on session.idle, so it must
+    // be handled like opencode-sdk (resolve on !busy) — NOT via the CLI exit-file
+    // watcher, which would re-prompt in a loop. Command-mode opencode-cli is unaffected.
+    const isOpencodeSdkLike = isOpencodeSdk || (isOpenCodeCli && opencodeCliPersistentEnabled());
     // grok-cli / grok-tui / copilot-cli all tee stdout too — without these flags
     // the rate-limit / context-length / thrash detectors never ran for them, so
     // a throttled or context-blown turn was silently walked to give_up and the
@@ -2722,7 +2768,12 @@ export class TaskLoopRunner {
     // already tails. Feed that stdout (ANSI-stripped) through a narrator so each
     // chunk becomes a `Notification` hook event, giving line/chunk-granularity
     // live output. (Claude/grok/SDK providers already stream and are untouched.)
-    const cliNarrator = (this._workspaceRoot && (isCopilotCli || isOpenCodeCli))
+    // When copilot-cli / opencode-cli run PERSISTENT (Phase 2) their SDK sibling
+    // already streams assistant text as live Notification events, so the teed-stdout
+    // narrator here would DOUBLE every chunk — disable it in that mode.
+    const cliNarrateCopilot  = isCopilotCli  && !copilotCliPersistentEnabled();
+    const cliNarrateOpencode = isOpenCodeCli && !opencodeCliPersistentEnabled();
+    const cliNarrator = (this._workspaceRoot && (cliNarrateCopilot || cliNarrateOpencode))
       ? new LiveNarrationStreamer(
           this._cb!.getActiveProvider() ?? 'cli',
           this._workspaceRoot,
@@ -3230,7 +3281,7 @@ export class TaskLoopRunner {
       // exit file when session.idle fires, the poller sees it, calls onCliExit(),
       // which re-sends the prompt, which loops).  Instead, the poller resolves this
       // promise directly when isOpencodeSdkBusy() becomes false (see below).
-      if (!isOpencodeSdk && this._workspaceRoot) {
+      if (!isOpencodeSdkLike && this._workspaceRoot) {
         attachExitWatcher(exitFilePath(this._workspaceRoot, activeProvider));
       }
 
@@ -3262,13 +3313,13 @@ export class TaskLoopRunner {
         }
 
         const latestExit = exitFilePath(this._workspaceRoot, activeProvider);
-        if (!isOpencodeSdk && latestExit !== watchedExitFile) { attachExitWatcher(latestExit); }
+        if (!isOpencodeSdkLike && latestExit !== watchedExitFile) { attachExitWatcher(latestExit); }
 
         // opencode-sdk: resolve _waitForTaskCompletion as soon as the SDK
         // session goes idle (isOpencodeSdkBusy false).  This avoids the
         // CLI-style onCliExit() reminder re-prompt loop that the exit-file
         // mechanism would otherwise trigger.
-        if (isOpencodeSdk && this._workspaceRoot && !isOpencodeSdkBusy(this._workspaceRoot)) {
+        if (isOpencodeSdkLike && this._workspaceRoot && !isOpencodeSdkBusy(this._workspaceRoot)) {
           check(); // one last todo-file check before resolving
           if (!cancelled) { cleanup(); resolve(); }
           return;
@@ -3278,7 +3329,7 @@ export class TaskLoopRunner {
         // events (gitignored dirs, inotify limits, fast exits before re-attach).
         // Read the exit file directly every tick and trigger onCliExit() if it
         // became non-empty without the watcher firing.
-        if (!isOpencodeSdk && latestExit && latestExit !== handledExitFile) {
+        if (!isOpencodeSdkLike && latestExit && latestExit !== handledExitFile) {
           try {
             if (fs.readFileSync(latestExit, 'utf8').trim() !== '') {
               handledExitFile = latestExit;

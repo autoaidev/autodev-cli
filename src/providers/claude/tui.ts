@@ -138,6 +138,45 @@ function _getLib(): LibModule {
   return require('@raylin01/claude-client') as LibModule;
 }
 
+// ---------------------------------------------------------------------------
+// Persistent-process gate for claude-CLI (Phase 2).
+//
+// claude-cli historically spawned a fresh `claude --resume <id> -p` process
+// every turn. It now REUSES this same persistent StructuredClient transport
+// (the `_clients` Map above) across turns — one long-lived `claude` per
+// workspace, resumed only at (re)start — exactly like claude-tui. The seam is
+// stable + synchronous so both the dispatcher and the task loop agree on
+// whether a given turn is persistent (route to the sibling) or falls back to
+// the legacy per-turn command path.
+// ---------------------------------------------------------------------------
+
+/** Cached: is the persistent StructuredClient transport (@raylin01/claude-client) loadable? */
+let _claudeTuiTransportAvailable: boolean | null = null;
+export function claudeTuiTransportAvailable(): boolean {
+  if (_claudeTuiTransportAvailable !== null) { return _claudeTuiTransportAvailable; }
+  try { _getLib(); _claudeTuiTransportAvailable = true; }
+  catch { _claudeTuiTransportAvailable = false; }
+  return _claudeTuiTransportAvailable;
+}
+
+/**
+ * Whether claude-cli should run PERSISTENT (reuse the claude-tui StructuredClient
+ * across turns) instead of spawning a fresh `claude … -p` command each turn.
+ * Gated by AUTODEV_CLAUDE_CLI_PERSISTENT (default ON when the transport is
+ * loadable; set to false/0/off/no to force the legacy per-turn command path)
+ * AND the client library actually being requirable. When false, the CLI
+ * ProviderManager returns its `{command}` outcome and nothing regresses.
+ */
+let _claudeCliPersistentTestOverride: boolean | null = null;
+/** Test-only: force the persistence decision regardless of env/transport. */
+export function __setClaudeCliPersistentForTest(v: boolean | null): void { _claudeCliPersistentTestOverride = v; }
+export function claudeCliPersistentEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (_claudeCliPersistentTestOverride !== null) { return _claudeCliPersistentTestOverride; }
+  const raw = String(env['AUTODEV_CLAUDE_CLI_PERSISTENT'] ?? '').toLowerCase();
+  if (raw === 'false' || raw === '0' || raw === 'off' || raw === 'no') { return false; }
+  return claudeTuiTransportAvailable();
+}
+
 /** Returns the cached client, or starts a fresh one (resuming if sessionId given). */
 async function getOrCreateClient(
   root: string,

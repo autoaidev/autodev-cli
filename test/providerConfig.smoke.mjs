@@ -33,6 +33,9 @@ import { buildOpenCodeCliCommand } from '../out/providers/opencodeCliProvider.js
 import { providerRegistry } from '../out/core/provider/ProviderRegistry.js';
 import { PROVIDERS } from '../out/providers.js';
 import { SETTINGS_DEFAULTS, parseWsUrl } from '../out/core/settingsLoader.js';
+import { __setClaudeCliPersistentForTest } from '../out/providers/claudeTuiProvider.js';
+import { __setCopilotCliPersistentForTest } from '../out/providers/copilotSdkProvider.js';
+import { __setOpencodeCliPersistentForTest } from '../out/providers/opencodeSdkProvider.js';
 import { getSessionId, saveSessionId } from '../out/sessionState.js';
 
 let pass = 0;
@@ -166,6 +169,11 @@ ok('registry: get() on an unknown id throws; has() is honest', () => {
 });
 
 ok('registry dispatch: each CLI provider maps to its correct binary', async () => {
+  // Phase 2 defaults these CLI providers to the persistent in-process path (which
+  // returns no shell command). Force the legacy command builder to assert binaries.
+  __setClaudeCliPersistentForTest(false);
+  __setCopilotCliPersistentForTest(false);
+  __setOpencodeCliPersistentForTest(false);
   const root = tmpRoot('dispatch');
   const baseReq = (over) => ({
     root,
@@ -199,6 +207,9 @@ ok('registry dispatch: each CLI provider maps to its correct binary', async () =
       assert.ok(o.command.includes('echo $? >'), 'exit code captured');
     }
   }
+  __setClaudeCliPersistentForTest(null);
+  __setCopilotCliPersistentForTest(null);
+  __setOpencodeCliPersistentForTest(null);
 });
 
 // ---------------------------------------------------------------------------

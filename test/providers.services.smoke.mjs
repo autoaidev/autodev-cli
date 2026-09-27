@@ -18,6 +18,7 @@ import { ClaudeProviderModels } from '../out/providers/claude/ProviderModels.js'
 import { ClaudeProviderUsage, extractClaudeUsage } from '../out/providers/claude/ProviderUsage.js';
 import { ClaudeProviderSessions } from '../out/providers/claude/ProviderSessions.js';
 import { ClaudeCliProviderState } from '../out/providers/claude/ProviderState.js';
+import { __setClaudeCliPersistentForTest } from '../out/providers/claude/tui.js';
 import { ClaudeProviderNormalizer } from '../out/providers/claude/ProviderNormalizer.js';
 import { CopilotProviderEvents } from '../out/providers/copilot/ProviderEvents.js';
 import { CopilotProviderModels } from '../out/providers/copilot/ProviderModels.js';
@@ -130,12 +131,17 @@ ok('dummy usage: synthesize from prompt length', () => {
   assert.ok(usage.contextPct >= 0 && usage.contextPct <= 100);
 });
 
-ok('claude/cli manager dispatch still builds a claude command', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-svc-'));
-  const req = DispatchRequestFactory.make({ root, settings: { hooksEnabled: false, claudeModel: 'sonnet' } });
-  const out = await providerRegistry.get('claude-cli').dispatch(req, DispatchRequestFactory.context());
-  assert.ok(out.command.includes('claude '));
-  assert.ok(out.command.includes('--model sonnet'));
+ok('claude/cli manager dispatch still builds a claude command (persistent off)', async () => {
+  // Phase 2 defaults claude-cli to the persistent claude-tui client; force OFF
+  // to assert the legacy per-turn command builder is intact for fallback.
+  __setClaudeCliPersistentForTest(false);
+  try {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autodev-svc-'));
+    const req = DispatchRequestFactory.make({ root, settings: { hooksEnabled: false, claudeModel: 'sonnet' } });
+    const out = await providerRegistry.get('claude-cli').dispatch(req, DispatchRequestFactory.context());
+    assert.ok(out.command.includes('claude '));
+    assert.ok(out.command.includes('--model sonnet'));
+  } finally { __setClaudeCliPersistentForTest(null); }
 });
 
 ok('dummy manager is registered as sdk and has service objects', () => {

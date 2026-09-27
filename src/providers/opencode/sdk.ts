@@ -131,6 +131,45 @@ function _findSdkEntryPath(): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Persistent-process gate for opencode-CLI (Phase 2).
+//
+// opencode-cli historically spawned a fresh `opencode run -s <id>` process
+// every turn. It now REUSES this same persistent in-process createOpencode
+// server + session (the `_state` Map above) across turns — one long-lived
+// server per workspace, resuming the SAME session id (never minting a new
+// session per turn; see memory opencode-session-explosion) — exactly like
+// opencode-sdk. Stable + synchronous gate so the dispatcher and task loop
+// agree on persistent-vs-command per turn.
+// ---------------------------------------------------------------------------
+
+/** Cached: is the @opencode-ai/sdk entry resolvable from a node_modules above us? */
+let _opencodeSdkTransportAvailable: boolean | null = null;
+export function opencodeSdkTransportAvailable(): boolean {
+  if (_opencodeSdkTransportAvailable !== null) { return _opencodeSdkTransportAvailable; }
+  try { _findSdkEntryPath(); _opencodeSdkTransportAvailable = true; }
+  catch { _opencodeSdkTransportAvailable = false; }
+  return _opencodeSdkTransportAvailable;
+}
+
+/**
+ * Whether opencode-cli should run PERSISTENT (reuse the opencode-sdk server +
+ * session across turns) instead of spawning a fresh `opencode run` command each
+ * turn. Gated by AUTODEV_OPENCODE_CLI_PERSISTENT (default ON when the SDK is
+ * resolvable; set to false/0/off/no to force the legacy per-turn command path)
+ * AND the SDK entry being resolvable. When false the CLI ProviderManager returns
+ * its `{command}` outcome and nothing regresses.
+ */
+let _opencodeCliPersistentTestOverride: boolean | null = null;
+/** Test-only: force the persistence decision regardless of env/transport. */
+export function __setOpencodeCliPersistentForTest(v: boolean | null): void { _opencodeCliPersistentTestOverride = v; }
+export function opencodeCliPersistentEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (_opencodeCliPersistentTestOverride !== null) { return _opencodeCliPersistentTestOverride; }
+  const raw = String(env['AUTODEV_OPENCODE_CLI_PERSISTENT'] ?? '').toLowerCase();
+  if (raw === 'false' || raw === '0' || raw === 'off' || raw === 'no') { return false; }
+  return opencodeSdkTransportAvailable();
+}
+
 // Use new Function() to prevent esbuild from transforming import(path) to require(path).
 // require() cannot load ESM files; a native ESM import() is required.
 const _dynamicImport = new Function('p', 'return import(p)') as (p: string) => Promise<unknown>;

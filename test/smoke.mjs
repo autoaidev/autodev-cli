@@ -17,6 +17,7 @@ import { isSafeChildSegment } from '../out/agentBackup/sessionProviders.js';
 import { emailPassesAuth } from '../out/emailPoller.js';
 import { CLI_VERSION } from '../out/version.js';
 import { buildWsUpgradeRequest } from '../out/wsHandshake.js';
+import { __setOpencodeCliPersistentForTest } from '../out/providers/opencode/sdk.js';
 import { LiveNarrationStreamer, buildNotificationEvent, stripAnsi } from '../out/core/liveNarration.js';
 import { createRequire } from 'node:module';
 
@@ -39,13 +40,18 @@ for (const [id, kind] of Object.entries(expected)) {
 }
 ok('unknown provider throws', () => assert.throws(() => providerRegistry.get('nope')));
 
-// CLI provider builds a non-empty shell command from a DispatchRequest.
-ok('opencode-cli builds a command', async () => {
-  const req = { root: '/tmp/x', agentProfileFile: '/tmp/x/p.md', messageFile: '/tmp/x/m.md',
-    combinedFile: '/tmp/x/c.md', includeProfile: true, settings: { opencodeModel: 'm', hooksEnabled: false },
-    stdoutFile: '/tmp/x/o.txt', exitFile: '/tmp/x/e.txt' };
-  const out = await providerRegistry.get('opencode-cli').dispatch(req, { log: () => {}, launcher: { launch() {} } });
-  assert.ok(out.command && out.command.includes('opencode run'), 'command should run opencode');
+// CLI provider builds a non-empty shell command from a DispatchRequest when the
+// persistent-process path is disabled (Phase 2 defaults persistent ON when the
+// SDK is present; force it OFF here to exercise the legacy command builder).
+ok('opencode-cli builds a command (persistent off)', async () => {
+  __setOpencodeCliPersistentForTest(false);
+  try {
+    const req = { root: '/tmp/x', agentProfileFile: '/tmp/x/p.md', messageFile: '/tmp/x/m.md',
+      combinedFile: '/tmp/x/c.md', includeProfile: true, settings: { opencodeModel: 'm', hooksEnabled: false },
+      stdoutFile: '/tmp/x/o.txt', exitFile: '/tmp/x/e.txt' };
+    const out = await providerRegistry.get('opencode-cli').dispatch(req, { log: () => {}, launcher: { launch() {} } });
+    assert.ok(out.command && out.command.includes('opencode run'), 'command should run opencode');
+  } finally { __setOpencodeCliPersistentForTest(null); }
 });
 
 // todo parsing.

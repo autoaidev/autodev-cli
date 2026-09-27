@@ -10,7 +10,7 @@ import { buildCopilotCliCommand, probeCopilotSession } from './providers/copilot
 import { buildOpenCodeCliCommand, getLatestOpenCodeSessionId } from './providers/opencodeCliProvider';
 import { sendClaudeTuiPrompt } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, getLatestCopilotSdkSessionId, setCopilotSettingsToken } from './providers/copilotSdkProvider';
-import { sendOpencodeSdkPrompt } from './providers/opencodeSdkProvider';
+import { sendOpencodeSdkPrompt, opencodeCliPersistentEnabled } from './providers/opencodeSdkProvider';
 import { sendGrokTuiPrompt } from './providers/grokTuiProvider';
 import { getGrokLatestSessionId } from './providers/grok/sessions';
 import { isOpenCodeHooksInstalled, installOpenCodeHooks } from './openCodeHooksManager';
@@ -206,8 +206,10 @@ export async function sendPromptToAi(
     };
 
     // Enforce a minimum cooldown between consecutive opencode-cli process starts
-    // to avoid racing a still-disposing previous server (immediate STOP).
-    if (providerId === 'opencode-cli') {
+    // to avoid racing a still-disposing previous server (immediate STOP). Skipped
+    // when opencode-cli runs PERSISTENT (Phase 2): there is no per-turn process
+    // start to space out — the in-process server is reused across turns.
+    if (providerId === 'opencode-cli' && !opencodeCliPersistentEnabled()) {
       const elapsed = Date.now() - _lastOpenCodeCliStart;
       if (elapsed < OPENCODE_CLI_COOLDOWN_MS && _lastOpenCodeCliStart > 0) {
         const wait = OPENCODE_CLI_COOLDOWN_MS - elapsed;

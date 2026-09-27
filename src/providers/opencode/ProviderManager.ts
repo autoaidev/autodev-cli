@@ -11,7 +11,15 @@ import { OpencodeCliProviderState, OpencodeSdkProviderState } from './ProviderSt
 import { OpencodeProviderNormalizer } from './ProviderNormalizer';
 import { OpencodeProviderUsage } from './ProviderUsage';
 import { buildOpenCodeCliCommand, getLatestOpenCodeSessionId } from './cli';
-import { sendOpencodeSdkPrompt } from './sdk';
+import { sendOpencodeSdkPrompt, opencodeCliPersistentEnabled } from './sdk';
+
+// Test seam: the persistent-sibling sender opencode-cli routes to when persistent.
+// Swappable so a unit test can assert the routing without starting a server.
+type OpencodeSdkSender = typeof sendOpencodeSdkPrompt;
+let _opencodeCliPersistentSender: OpencodeSdkSender = sendOpencodeSdkPrompt;
+export function __setOpencodeCliSenderForTest(fn: OpencodeSdkSender | null): void {
+  _opencodeCliPersistentSender = fn ?? sendOpencodeSdkPrompt;
+}
 
 export class OpenCodeCliProvider extends ProviderManager {
   readonly id: ProviderId = 'opencode-cli';
@@ -29,7 +37,21 @@ export class OpenCodeCliProvider extends ProviderManager {
     return getLatestOpenCodeSessionId(root, log, getSessionClearedAt(root, 'opencode-cli'));
   }
 
-  async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
+  async dispatch(req: DispatchRequest, ctx?: { log: Logger; showOutput?: () => void }): Promise<DispatchOutcome> {
+    // PERSISTENT path (Phase 2): reuse the opencode-sdk in-process server +
+    // session across turns — one long-lived server per workspace, RESUMING the
+    // same session id (resolvedSessionId) so opencode never mints a new session
+    // per turn (memory opencode-session-explosion). Falls back to the per-turn
+    // command below when the gate is off or the SDK is unavailable.
+    if (opencodeCliPersistentEnabled()) {
+      _opencodeCliPersistentSender(
+        req.root, req.combinedFile, req.resolvedSessionId,
+        req.stdoutFile, req.exitFile, ctx?.log ?? (() => {}),
+        req.settings.opencodeModel || undefined, ctx?.showOutput,
+      );
+      return {};
+    }
+
     let cmd = buildOpenCodeCliCommand(req.combinedFile, req.resolvedSessionId, req.settings.opencodeModel || undefined, req.settings.sessionName || undefined);
     cmd = teeCommand(cmd, req.stdoutFile);
     if (req.settings.hooksEnabled) {

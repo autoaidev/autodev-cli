@@ -66,6 +66,43 @@ function _sdkPath(): string {
   return path.join(_copilotNpmRoot(), 'sdk', 'index.js');
 }
 
+// ---------------------------------------------------------------------------
+// Persistent-process gate for copilot-CLI (Phase 2).
+//
+// copilot-cli historically spawned a fresh `copilot --resume=<id> -p` process
+// every turn. It now REUSES this same persistent @github/copilot LocalSession
+// (the `_sessions` Map below) across turns — one long-lived in-process session
+// per workspace — exactly like copilot-sdk. Stable + synchronous gate so the
+// dispatcher and task loop agree on persistent-vs-command per turn.
+// ---------------------------------------------------------------------------
+
+/** Cached: is the @github/copilot SDK entry present on disk (LocalSession loadable)? */
+let _copilotSdkTransportAvailable: boolean | null = null;
+export function copilotSdkTransportAvailable(): boolean {
+  if (_copilotSdkTransportAvailable !== null) { return _copilotSdkTransportAvailable; }
+  try { _copilotSdkTransportAvailable = fs.existsSync(_sdkPath()); }
+  catch { _copilotSdkTransportAvailable = false; }
+  return _copilotSdkTransportAvailable;
+}
+
+/**
+ * Whether copilot-cli should run PERSISTENT (reuse the copilot-sdk LocalSession
+ * across turns) instead of spawning a fresh `copilot … -p` command each turn.
+ * Gated by AUTODEV_COPILOT_CLI_PERSISTENT (default ON when the SDK is installed;
+ * set to false/0/off/no to force the legacy per-turn command path) AND the SDK
+ * entry existing on disk. When false the CLI ProviderManager returns its
+ * `{command}` outcome and nothing regresses.
+ */
+let _copilotCliPersistentTestOverride: boolean | null = null;
+/** Test-only: force the persistence decision regardless of env/transport. */
+export function __setCopilotCliPersistentForTest(v: boolean | null): void { _copilotCliPersistentTestOverride = v; }
+export function copilotCliPersistentEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (_copilotCliPersistentTestOverride !== null) { return _copilotCliPersistentTestOverride; }
+  const raw = String(env['AUTODEV_COPILOT_CLI_PERSISTENT'] ?? '').toLowerCase();
+  if (raw === 'false' || raw === '0' || raw === 'off' || raw === 'no') { return false; }
+  return copilotSdkTransportAvailable();
+}
+
 function _keytarPath(): string | null {
   const p = path.join(_copilotNpmRoot(), 'prebuilds', process.platform + '-' + process.arch, 'keytar.node');
   return fs.existsSync(p) ? p : null;

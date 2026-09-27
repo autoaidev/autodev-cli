@@ -12,7 +12,15 @@ import { CopilotCliProviderState, CopilotSdkProviderState } from './ProviderStat
 import { CopilotProviderNormalizer } from './ProviderNormalizer';
 import { CopilotProviderUsage } from './ProviderUsage';
 import { buildCopilotCliCommand, probeCopilotSession } from './cli';
-import { sendCopilotSdkPrompt, setCopilotSettingsToken } from './sdk';
+import { sendCopilotSdkPrompt, setCopilotSettingsToken, copilotCliPersistentEnabled } from './sdk';
+
+// Test seam: the persistent-sibling sender copilot-cli routes to when persistent.
+// Swappable so a unit test can assert the routing without loading the SDK.
+type CopilotSdkSender = typeof sendCopilotSdkPrompt;
+let _copilotCliPersistentSender: CopilotSdkSender = sendCopilotSdkPrompt;
+export function __setCopilotCliSenderForTest(fn: CopilotSdkSender | null): void {
+  _copilotCliPersistentSender = fn ?? sendCopilotSdkPrompt;
+}
 
 export class CopilotCliProvider extends ProviderManager {
   readonly id: ProviderId = 'copilot-cli';
@@ -28,11 +36,24 @@ export class CopilotCliProvider extends ProviderManager {
 
   override resolveSession(root: string, log: Logger) { return probeCopilotSession(root, log); }
 
-  async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
+  async dispatch(req: DispatchRequest, ctx?: { log: Logger; showOutput?: () => void }): Promise<DispatchOutcome> {
     if (req.settings.copilotGithubToken) {
       process.env['COPILOT_GITHUB_TOKEN'] = req.settings.copilotGithubToken;
       if (! process.env['GH_TOKEN']) { process.env['GH_TOKEN'] = req.settings.copilotGithubToken; }
     }
+
+    // PERSISTENT path (Phase 2): reuse the copilot-sdk LocalSession across turns
+    // — one long-lived in-process session per workspace. Falls back to the
+    // per-turn command below when the gate is off or the SDK is unavailable.
+    if (copilotCliPersistentEnabled()) {
+      setCopilotSettingsToken(req.settings.copilotGithubToken || undefined);
+      _copilotCliPersistentSender(
+        req.root, req.combinedFile, req.resolvedSessionId,
+        req.stdoutFile, req.exitFile, ctx?.log ?? (() => {}), ctx?.showOutput,
+      );
+      return {};
+    }
+
     const mcpCfg = copilotMcpConfigPath(req.root);
     const mcpCfgFile = fs.existsSync(mcpCfg) ? mcpCfg : undefined;
 

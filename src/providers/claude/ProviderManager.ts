@@ -10,7 +10,16 @@ import { ClaudeCliProviderState, ClaudeTuiProviderState } from './ProviderState'
 import { ClaudeProviderNormalizer } from './ProviderNormalizer';
 import { ClaudeProviderUsage } from './ProviderUsage';
 import { buildClaudeCliCommand, probeClaudeSession } from './cli';
-import { sendClaudeTuiPrompt } from './tui';
+import { sendClaudeTuiPrompt, claudeCliPersistentEnabled } from './tui';
+
+// Test seam: the persistent-sibling sender claude-cli routes to when persistent.
+// Swappable so a unit test can assert the routing (args + `{}` outcome) without
+// spawning a real `claude` process. Defaults to the real claude-tui sender.
+type ClaudeTuiSender = typeof sendClaudeTuiPrompt;
+let _claudeCliPersistentSender: ClaudeTuiSender = sendClaudeTuiPrompt;
+export function __setClaudeCliSenderForTest(fn: ClaudeTuiSender | null): void {
+  _claudeCliPersistentSender = fn ?? sendClaudeTuiPrompt;
+}
 
 export class ClaudeCliProvider extends ProviderManager {
   readonly id: ProviderId = 'claude-cli';
@@ -26,10 +35,25 @@ export class ClaudeCliProvider extends ProviderManager {
 
   override resolveSession(root: string, log: Logger) { return probeClaudeSession(root, log); }
 
-  async dispatch(req: DispatchRequest): Promise<DispatchOutcome> {
+  async dispatch(req: DispatchRequest, ctx?: { log: Logger; showOutput?: () => void }): Promise<DispatchOutcome> {
     // Give slow MCP servers time to start (claude default is 30s). The launcher
-    // spawns the CLI inheriting process.env, so setting it here propagates.
+    // spawns the CLI inheriting process.env, so setting it here propagates. The
+    // persistent StructuredClient path passes MCP_TIMEOUT through explicitly too.
     applyMcpStartupEnv('claude', req.settings);
+
+    // PERSISTENT path (Phase 2): reuse the claude-tui StructuredClient across
+    // turns — one long-lived `claude` per workspace, resumed only at (re)start.
+    // Falls back to the per-turn command below when the gate is off or the
+    // transport is unavailable, so nothing regresses.
+    if (claudeCliPersistentEnabled()) {
+      _claudeCliPersistentSender(
+        req.root, req.combinedFile, req.resolvedSessionId,
+        req.stdoutFile, req.exitFile,
+        ctx?.log ?? (() => {}), req.settings.claudeModel || undefined, ctx?.showOutput,
+      );
+      return {};
+    }
+
     let cmd = buildClaudeCliCommand(
       req.agentProfileFile, req.messageFile, req.resolvedSessionId,
       req.includeProfile, req.settings.claudeModel || undefined,

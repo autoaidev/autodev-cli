@@ -49,7 +49,7 @@ import { RateLimitDetector } from '../../rateLimit';
 import { saveSessionId, getSessionId, clearSessionId } from '../../sessionState';
 import { MCP_STARTUP_TIMEOUT_DEFAULT_SEC } from '../../core/mcpStartupTimeout';
 import { killProcessTree } from '../../core/killProcessTree';
-import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE } from './authClassify';
+import { classifyGrokTurn, GROK_AUTH_MARKERS, GROK_REAUTH_MESSAGE, isGrokAuthFailure } from './authClassify';
 import { scanGrokTurnEnd, scanGrokFirstToken, scanGrokTurnStart, grokLoopForwardHooks } from '../../core/grokEvents';
 import { newestGrokSessionDir, grokSessionDirFor, getGrokLatestSessionId } from './sessions';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
@@ -212,6 +212,36 @@ function _emitGrokHook(root: string, hookEventName: string, extra: Record<string
     const ev = { hook_event_name: hookEventName, event_type: eventTypeFor(hookEventName), provider: 'grok-tui', cwd: root, timestamp: new Date().toISOString(), ...extra };
     fs.appendFileSync(path.join(dir, 'hooks-events.jsonl'), JSON.stringify(ev) + '\n', 'utf8');
   } catch { /* non-critical */ }
+}
+
+/**
+ * Surface a grok NOT-SIGNED-IN / auth failure from the HEADLESS or ACP error
+ * surface (no tmux pane) LOUDLY and non-retryably. Emits the first-class
+ * `reauth_required` hook (→ cliExit maps it to a NON-retryable hard-failure and
+ * the desktop app / office read it from hooks-events.jsonl as the 🔑 needs-auth
+ * state) AND writes the GROK_REAUTH_MESSAGE sentinel into the stdout capture (→
+ * the loop's AuthDetector raises an AuthError and takes its dedicated reauth
+ * PAUSE with the accurate active provider). The caller still owns writing the
+ * exit file. `providerLabel` tags the hook so grok-cli vs grok-tui is correct;
+ * `_emitGrokHook`'s default provider is overridden by the spread.
+ */
+function _emitGrokReauthHook(
+  root: string,
+  stdoutFile: string,
+  log: (msg: string) => void,
+  where: string,
+  providerLabel: string,
+  diag?: string,
+): void {
+  const detail = diag ? ` — grok said: "${diag.slice(0, 160)}"` : '';
+  log(`Grok: reauthentication required — ${where}${detail}`);
+  _emitGrokHook(root, 'reauth_required', {
+    provider: providerLabel,
+    message: `${GROK_REAUTH_MESSAGE}${detail}`,
+    title: 'Authentication required',
+    tool_name: '',
+  });
+  try { fs.appendFileSync(stdoutFile, `\n[Grok: ${GROK_REAUTH_MESSAGE}]\n`, 'utf8'); } catch { /* ignore */ }
 }
 
 /**
@@ -1493,6 +1523,7 @@ export function sendGrokPrompt(
   // channel, and finish PROMPTLY on a clean turn_ended. Never throws / never
   // blocks; a no-op until the session dir resolves.
   let _endSeen = false;
+  let _grokReauthEmitted = false;          // reauth_required already surfaced this turn (never double-emit / retry)
   let _forcedExit: number | null = null;   // set by a session-log turn_ended finish
   let _grokFilesActive = false;            // once true, session logs own narration
   // Best diagnostic grok gave us THIS turn, so a fast-failing resume/continue is no
@@ -1597,6 +1628,27 @@ export function sendGrokPrompt(
   // so `close` writes the exit file promptly.
   const finishFromTurnEnd = (clean: boolean): void => {
     if (_endSeen || killed) { return; }
+    // AUTH failure short-circuit: grok is NOT signed in (token expired / auth.json
+    // gone → "Not signed in … grok login --device-code" / XAI_API_KEY). This can
+    // NEVER be retried or relaunched away, so surface reauth_required and STOP —
+    // BEFORE the resume-hang stateless relaunch below (which would just re-hit the
+    // same logged-out gate) or a retryable StopFailure. The stdout sentinel also
+    // makes the loop's AuthDetector raise its dedicated reauth PAUSE.
+    if (!clean && !_grokReauthEmitted && isGrokAuthFailure(grokFailDiag())) {
+      _grokReauthEmitted = true;
+      _endSeen = true;
+      _forcedExit = 1;
+      flushOutputLine();
+      flushActivity();
+      _emitGrokReauthHook(root, stdoutFile, log, 'headless turn failed (not signed in)', opts.providerId ?? 'grok-tui', grokFailDiag());
+      if (grokFilePoll) { clearInterval(grokFilePoll); }
+      if (watchdog) { clearTimeout(watchdog); }
+      if (resumeProbeTimer) { clearTimeout(resumeProbeTimer); resumeProbeTimer = null; }
+      killed = true;
+      if (child.pid) { killProcessTree(child.pid); }
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      return;
+    }
     // Recovery: a RESUME turn that ERRORED before producing any real output (no
     // first_token) means the resume itself is broken (grok 1.0.41's `--resume`
     // failing fast, a poisoned/stale session, or any unrecoverable resume error).
@@ -1855,6 +1907,17 @@ export function sendGrokPrompt(
     // A session-log turn_ended already reported the true outcome via _forcedExit;
     // don't let the SIGKILL exit code (1) override a clean finish.
     const exitCode = _forcedExit ?? code ?? 1;
+    // AUTH failure short-circuit for a fast non-zero exit that bypassed
+    // finishFromTurnEnd (grok printed "Not signed in … grok login --device-code"
+    // to stderr / an error record and quit — the live grok-token-expiry bug). Never
+    // retryable: emit reauth_required (and the stdout sentinel for the loop's
+    // AuthDetector) and set _endSeen so the retryable StopFailure below is skipped.
+    const _closeAuthDiag = grokFailDiag();
+    if (exitCode !== 0 && !_grokReauthEmitted && isGrokAuthFailure(_closeAuthDiag)) {
+      _grokReauthEmitted = true;
+      _endSeen = true;
+      _emitGrokReauthHook(root, stdoutFile, log, `headless exit ${exitCode} (not signed in)`, opts.providerId ?? 'grok-tui', _closeAuthDiag);
+    }
     // A resume/continue that FAILED FAST by exiting non-zero directly (grok printed to
     // stderr and quit, e.g. "Session <id> not found locally … 404 Not Found") never
     // wrote a session-log turn_ended, so it bypassed finishFromTurnEnd's diagnostic.
@@ -1967,12 +2030,21 @@ export function sendGrokAcpPrompt(
     try {
       await sess.ensureReady();
     } catch (err) {
-      // ACP unavailable / handshake failed → clean fallback to the one-shot path
-      // (which writes its own stdout/exit + hooks). Nothing regresses.
+      const startupErr = `${(err as Error)?.message ?? err} ${sess.stderrSnapshot}`;
       log(`Grok ACP: startup failed (${(err as Error)?.message ?? err}); stderr="${sess.stderrSnapshot.slice(0, 200)}" — falling back to headless one-shot`);
       try { sess.close(); } catch { /* ignore */ }
       _acpSessions.delete(root);
       _busyRoots.delete(root);
+      // AUTH failure at ACP startup (grok not signed in): the headless fallback
+      // would just re-hit the same logged-out gate, so short-circuit to
+      // reauth_required (non-retryable) instead of falling through.
+      if (isGrokAuthFailure(startupErr)) {
+        _emitGrokReauthHook(root, stdoutFile, log, 'ACP startup (not signed in)', providerId, sess.stderrSnapshot.slice(0, 160));
+        try { fs.writeFileSync(exitFile, '1\n', 'utf8'); } catch { /* ignore */ }
+        return;
+      }
+      // ACP unavailable / handshake failed → clean fallback to the one-shot path
+      // (which writes its own stdout/exit + hooks). Nothing regresses.
       sendGrokPersistentHeadless(root, promptFilePath, resolvedSessionId, stdoutFile, exitFile, log, providerId, model, showOutput);
       return;
     }
@@ -1983,6 +2055,12 @@ export function sendGrokAcpPrompt(
     catch (err) { res = { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) }; }
     if (!res.clean && res.error) {
       try { fs.appendFileSync(stdoutFile, `\n[Grok ACP: turn ended ${res.stopReason} — ${res.error}]\n`, 'utf8'); } catch { /* ignore */ }
+      // AUTH failure mid-turn (token expired between turns): surface reauth_required
+      // so the loop pauses into 🔑 needs-auth instead of retrying a login it can't
+      // satisfy. The stdout line above also feeds the loop's AuthDetector.
+      if (isGrokAuthFailure(res.error)) {
+        _emitGrokReauthHook(root, stdoutFile, log, `ACP turn ${res.stopReason} (not signed in)`, providerId, res.error);
+      }
     }
     try { fs.writeFileSync(exitFile, `${res.clean ? 0 : 1}\n`, 'utf8'); } catch { /* ignore */ }
     _busyRoots.delete(root);

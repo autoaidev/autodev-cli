@@ -22,6 +22,8 @@ const {
   GROK_AUTH_MARKERS,
   GROK_TURN_FAIL_MARKERS,
   GROK_REAUTH_MESSAGE,
+  isGrokAuthFailure,
+  GROK_NOT_SIGNED_IN_MARKERS,
 } = await import('../out/providers/grok/authClassify.js');
 const { AuthDetector } = await import('../out/rateLimit.js');
 const { shouldRetryHardFail } = await import('../out/core/retryBackoff.js');
@@ -116,6 +118,64 @@ ok('transient turn-failed IS retryable under budget', () => {
 });
 ok('reauth_required is NEVER retried (distinct pause/re-login path)', () => {
   assert.strictEqual(shouldRetryHardFail('reauth_required', 1, 10), false);
+});
+
+// ---------------------------------------------------------------------------
+// 6. NEW: the HEADLESS / ACP not-signed-in surface (grok token expired). The
+//    1.4.187 error-surfacing revealed grok's real reason in the log:
+//      "Not signed in. To authenticate without a browser, run: grok login --device-code"
+//    but it was treated as a generic retryable error → `retry 1/10…10/10`. The
+//    classifier + AuthDetector now recognize it so the loop pauses into reauth
+//    instead of spinning. Precision: a normal tool error / a 404 session-not-found
+//    (NOT auth) must NOT match.
+// ---------------------------------------------------------------------------
+const GROK_NOT_SIGNED_IN =
+  'Not signed in. To authenticate without a browser, run: grok login --device-code';
+
+ok('isGrokAuthFailure: the live "Not signed in … grok login --device-code" banner', () => {
+  assert.ok(isGrokAuthFailure(GROK_NOT_SIGNED_IN));
+  assert.ok(GROK_NOT_SIGNED_IN_MARKERS.test(GROK_NOT_SIGNED_IN));
+});
+ok('isGrokAuthFailure: XAI_API_KEY guidance', () => {
+  assert.ok(isGrokAuthFailure('Error: not authenticated. Set XAI_API_KEY or run grok login.'));
+  assert.ok(isGrokAuthFailure('set the XAI_API_KEY environment variable'));
+});
+ok('isGrokAuthFailure: bare --device-code / grok login remediation', () => {
+  assert.ok(isGrokAuthFailure('run: grok login'));
+  assert.ok(isGrokAuthFailure('pass --device-code to sign in'));
+});
+ok('isGrokAuthFailure: an xAI 401 / Unauthorized (guarded)', () => {
+  assert.ok(isGrokAuthFailure('xAI API returned 401 Unauthorized: invalid api key'));
+  assert.ok(isGrokAuthFailure('Unauthorized: your xAI token is invalid'));
+});
+ok('isGrokAuthFailure: NEGATIVE — a normal tool error is not auth', () => {
+  assert.ok(!isGrokAuthFailure('tool_output_error: ENOENT: no such file or directory'));
+  assert.ok(!isGrokAuthFailure('TypeError: cannot read properties of undefined'));
+});
+ok('isGrokAuthFailure: NEGATIVE — 404 session-not-found is NOT auth', () => {
+  assert.ok(!isGrokAuthFailure('Session 01a0d333 not found locally … 404 Not Found'));
+});
+ok('isGrokAuthFailure: NEGATIVE — empty / whitespace / undefined', () => {
+  assert.ok(!isGrokAuthFailure(''));
+  assert.ok(!isGrokAuthFailure('   '));
+  assert.ok(!isGrokAuthFailure(undefined));
+  assert.ok(!isGrokAuthFailure(null));
+});
+ok('isGrokAuthFailure: NEGATIVE — ordinary prose mentioning a bare 401/auth', () => {
+  // No xai/grok/key/token/auth qualifier next to the number → not flagged.
+  assert.ok(!isGrokAuthFailure('the endpoint returns 404 on a missing record'));
+  assert.ok(!isGrokAuthFailure('I refactored the login form component'));
+});
+
+// The whole point: the loop's AuthDetector (run on grok's non-zero stdout capture)
+// now raises an AuthError for the not-signed-in surface → the reauth PAUSE, not a retry.
+ok('AuthDetector matches the not-signed-in surface (→ loop reauth pause)', () => {
+  assert.ok(AuthDetector.matches(GROK_NOT_SIGNED_IN));
+  assert.ok(AuthDetector.matches(`[Grok error: ${GROK_NOT_SIGNED_IN}]`));
+  assert.ok(AuthDetector.detect(GROK_NOT_SIGNED_IN) !== null);
+});
+ok('AuthDetector still ignores a 404 session-not-found (no false pause)', () => {
+  assert.ok(!AuthDetector.matches('Session 01a0d333 not found locally … 404 Not Found'));
 });
 
 console.log(`\ngrok auth-classify smoke: ${pass} checks passed`);

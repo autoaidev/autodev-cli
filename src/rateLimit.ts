@@ -4,6 +4,8 @@
 // (RateLimitDetector.PHRASES) and every call site picks it up.
 // ---------------------------------------------------------------------------
 
+import { GROK_NOT_SIGNED_IN_MARKERS } from './providers/grok/authClassify';
+
 export class RateLimitError extends Error {
   constructor(readonly rawMessage: string, readonly resetAt: Date | undefined) {
     super(rawMessage);
@@ -74,6 +76,13 @@ const AUTH_PHRASES: ReadonlyArray<RegExp> = [
   // so a logged-out grok never reached the loop's reauth PAUSE (🔑 state).
   /reauthentication required/i,                          // grok-tui reauth sentinel
   /Failed\(\s*ManualLogin\s*\)/i,                         // grok manual-login outcome
+  // grok's HEADLESS / ACP not-signed-in surface (token expired / auth.json gone):
+  // "Not signed in. To authenticate without a browser, run: grok login --device-code",
+  // "set XAI_API_KEY", an xAI 401. These are grok-native logged-out strings and are
+  // only consulted on a NON-ZERO grok exit (taskLoop gates AuthDetector on exitedNonZero),
+  // so they never trip on a successful answer. Sourced from the shared grok classifier
+  // so tui.ts and AuthDetector agree on exactly what counts as a grok auth failure.
+  GROK_NOT_SIGNED_IN_MARKERS,
 ];
 
 export class AuthDetector {

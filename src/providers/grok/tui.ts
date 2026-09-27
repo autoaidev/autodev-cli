@@ -133,6 +133,14 @@ const _tmuxSessions = new Map<string, TmuxSession>();
  */
 const _acpSessions = new Map<string, GrokAcpSession>();
 
+/** Roots where the leader backend FAILED to come up this run (e.g. the AF_UNIX
+ *  socket never appeared — a known risk on Windows, where grok 1.0.41 has no TCP
+ *  alternative to `--leader-socket`). Once a root is in here we STOP re-spawning a
+ *  leader every turn (no retry-churn) and quietly use the non-leader ACP path for
+ *  the rest of the run. Cleared by `recoverLeaderPoison` so a deliberate reap can
+ *  try a fresh leader again. */
+const _leaderUnavailable = new Set<string>();
+
 /** Cached probe: does this grok build expose `agent stdio` (the ACP transport)? */
 let _grokAgentStdioSupported: boolean | null = null;
 export function grokAgentStdioSupported(): boolean {
@@ -2015,7 +2023,7 @@ async function ensureAcpSession(
   root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
   resolvedSessionId: string | undefined,
 ): Promise<GrokAcpSession> {
-  if (leaderModeEnabled()) {
+  if (leaderModeEnabled() && !_leaderUnavailable.has(root)) {
     const cached = _acpSessions.get(root);
     if (cached && cached.isAlive()) { return cached; }
     if (cached) { try { cached.close(); } catch { /* ignore */ } _acpSessions.delete(root); }
@@ -2028,7 +2036,13 @@ async function ensureAcpSession(
       _acpSessions.set(root, sess);
       return sess;
     }
-    log('grok leader: backend unavailable — falling back to the non-leader ACP path');
+    // Leader couldn't be established (see the detailed ensureLeader failure log
+    // above). CACHE that for this run so we DON'T thrash a leader spawn every turn,
+    // then fall through — ONCE, quietly — to the non-leader ACP path, which still
+    // resumes context via a quiet session/load. On Windows this is the expected
+    // steady state until grok exposes a cross-platform leader transport.
+    _leaderUnavailable.add(root);
+    log('grok leader: backend unavailable — using the non-leader ACP path for the rest of this run (will not retry the leader; set AUTODEV_GROK_LEADER_SOCKET_MS to extend the socket wait)');
   }
   return getOrCreateAcpSession(root, providerId, model, log, resolvedSessionId);
 }
@@ -2042,6 +2056,7 @@ async function ensureAcpSession(
 function recoverLeaderPoison(root: string, providerId: 'grok-cli' | 'grok-tui', log: (msg: string) => void): void {
   try { stopLeader(root, log); } catch { /* ignore */ }
   try { clearSessionId(root, providerId); } catch { /* ignore */ }
+  _leaderUnavailable.delete(root); // a deliberate reap → allow one fresh leader spawn
   const s = _acpSessions.get(root);
   if (s) {
     if (s.pid) { try { killProcessTree(s.pid); } catch { /* ignore */ } }

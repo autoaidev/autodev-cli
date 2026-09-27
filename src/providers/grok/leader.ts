@@ -138,6 +138,33 @@ function openLogFd(file: string): number | 'ignore' {
   try { return fs.openSync(file, 'a'); } catch { return 'ignore'; }
 }
 
+/** Env-tunable wait (ms) for the leader's AF_UNIX socket to appear after spawn.
+ *  Default raised to 30s (was a hard 15s) — a cold, Electron-bundled grok on a
+ *  slow / Windows box can take longer to bind. Env: AUTODEV_GROK_LEADER_SOCKET_MS. */
+export function leaderSocketWaitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number.parseInt(String(env['AUTODEV_GROK_LEADER_SOCKET_MS'] ?? ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+}
+
+/** Env-tunable wait (ms) for the keepalive client to establish/session-load a warm
+ *  session. Env: AUTODEV_GROK_LEADER_KEEPALIVE_MS (default 30s). */
+export function leaderKeepaliveWaitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number.parseInt(String(env['AUTODEV_GROK_LEADER_KEEPALIVE_MS'] ?? ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+}
+
+/** Best-effort tail of the leader's stderr log — surfaced in the failure log so a
+ *  "socket never appeared" is diagnosable (auth gate, crash, unsupported platform)
+ *  instead of silent. Returns a trimmed one-liner (or '' if empty/absent). */
+function tailErr(root: string, max = 240): string {
+  try {
+    const s = fs.readFileSync(path.join(root, '.autodev', 'grok-leader.err'), 'utf8').trim();
+    if (!s) { return ''; }
+    const last = s.slice(-max).replace(/\s+/g, ' ').trim();
+    return last;
+  } catch { return ''; }
+}
+
 /** Resolve the minimal keepalive entry (out/providers/grok/keepaliveMain.js) so a
  *  detached keepalive loads with NO commander/CLI graph. Overridable for odd
  *  packagings via AUTODEV_KEEPALIVE_ENTRY. */
@@ -199,8 +226,21 @@ export async function ensureLeader(opts: EnsureLeaderOpts): Promise<LeaderInfo |
   leaderChild.unref();
   const leaderPid = leaderChild.pid;
   if (!leaderPid) { log('grok leader: no pid after spawn'); return null; }
-  const sockOk = await waitUntil(() => { try { return fs.existsSync(socket); } catch { return false; } }, 15_000);
-  if (!sockOk) { log('grok leader: socket never appeared — reaping'); try { killProcessTree(leaderPid); } catch { /* ignore */ } return null; }
+  const sockWaitMs = leaderSocketWaitMs();
+  const sockOk = await waitUntil(() => { try { return fs.existsSync(socket); } catch { return false; } }, sockWaitMs);
+  if (!sockOk) {
+    // The leader never bound a filesystem-visible AF_UNIX socket within the window.
+    // grok 1.0.41 exposes ONLY `--leader-socket <PATH>` (no TCP/port alternative),
+    // so on a platform where grok can't create a visible UDS at this path (a known
+    // risk on Windows) always-open can't engage. Log WHY (is the leader still alive?
+    // what did it print?) so it's diagnosable, then reap + let the caller fall back
+    // ONCE to the non-leader ACP path (no retry-churn — see tui `_leaderUnavailable`).
+    const stillAlive = isPidAlive(leaderPid);
+    const err = tailErr(root);
+    log(`grok leader: socket never appeared after ${Math.round(sockWaitMs / 1000)}s at ${socket} (leader pid ${leaderPid} ${stillAlive ? 'still running' : 'already exited'}${err ? `; stderr: ${err}` : '; no stderr'}) — reaping`);
+    try { killProcessTree(leaderPid); } catch { /* ignore */ }
+    return null;
+  }
 
   // 2) Spawn the KEEPALIVE client, detached — it holds the session warm. Seed it
   //    with the persisted id so a cold start does its ONE session/load here.
@@ -220,10 +260,12 @@ export async function ensureLeader(opts: EnsureLeaderOpts): Promise<LeaderInfo |
   } catch (err) { log(`grok leader: keepalive spawn failed (${(err as Error)?.message ?? err})`); try { killProcessTree(leaderPid); } catch { /* ignore */ } return null; }
   kaChild.unref();
   const keepalivePid = kaChild.pid;
-  const gotSid = await waitUntil(() => readSidFile(sidFile) !== null, 25_000);
+  const kaWaitMs = leaderKeepaliveWaitMs();
+  const gotSid = await waitUntil(() => readSidFile(sidFile) !== null, kaWaitMs);
   const sessionId = readSidFile(sidFile) || undefined;
   if (!keepalivePid || !gotSid || !sessionId) {
-    log('grok leader: keepalive failed to establish a session — reaping');
+    const err = tailErr(root);
+    log(`grok leader: keepalive failed to establish a session within ${Math.round(kaWaitMs / 1000)}s (keepalive pid ${keepalivePid ?? 'none'}${err ? `; leader stderr: ${err}` : ''}) — reaping`);
     if (keepalivePid) { try { killProcessTree(keepalivePid); } catch { /* ignore */ } }
     try { killProcessTree(leaderPid); } catch { /* ignore */ }
     return null;

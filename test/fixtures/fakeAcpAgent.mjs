@@ -97,6 +97,27 @@ function pump() {
     }, 40);
     return;
   }
+  // ACTIVE: a legitimately LONG, actively-WORKING turn — emit periodic tool
+  // activity (tool_call + completed tool_call_update) every FAKE_ACP_ACTIVE_STEP_MS
+  // for FAKE_ACP_ACTIVE_TICKS iterations, OUT-LASTING the idle window, then resolve
+  // end_turn cleanly. The client's activity-based watchdog must NOT cancel it: each
+  // update resets the idle timer. (Proves a working turn survives past the window.)
+  if (job.text.includes('ACTIVE')) {
+    const total = Number(process.env.FAKE_ACP_ACTIVE_TICKS ?? 30);
+    const stepMs = Number(process.env.FAKE_ACP_ACTIVE_STEP_MS ?? 30);
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: job.text + '\n' } });
+    let n = 0;
+    const tick = () => {
+      if (n >= total) { reply(job.id, { stopReason: 'end_turn' }); running = false; pump(); return; }
+      const id = `tc-active-${n}`;
+      update({ sessionUpdate: 'tool_call', toolCallId: id, title: 'search_replace', rawInput: {} });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'text', text: 'ok' }] });
+      n++;
+      setTimeout(tick, stepMs);
+    };
+    setTimeout(tick, stepMs);
+    return;
+  }
   update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: job.text + '\n' } });
   if (job.text.includes('HANG')) {
     // Never resolve this prompt — the client's per-turn watchdog must fire.

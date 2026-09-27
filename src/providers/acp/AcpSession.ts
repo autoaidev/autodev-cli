@@ -226,6 +226,12 @@ export class AcpSession {
   private _activity: string | undefined;
   /** Did the active turn produce ANY assistant text or tool call? (empty-turn guard) */
   private _turnHadOutput = false;
+  /** Timestamp (ms) of the LAST agent activity this turn — bumped on every
+   *  session/update (tool_call, tool_call_update, message/thought chunk, plan).
+   *  The activity-based watchdog (runTurn) reads this: a turn that keeps producing
+   *  activity is healthy no matter how long it runs; only TOTAL SILENCE for the
+   *  idle window is a stall. */
+  private _lastActivityAt = 0;
   /** ALL outstanding session/prompt promises — the primary turn AND any steered
    *  (queued) continuation prompts. The turn is not "done" until this drains, so
    *  the loop keeps the agent WORKING through steers instead of going idle while
@@ -249,15 +255,73 @@ export class AcpSession {
     this._attachWithoutLoad = opts.attachWithoutLoad ?? false;
   }
 
-  /** Per-turn watchdog budget (ms). Env: AUTODEV_ACP_MAX_RUN_MS, else GROK_MAX_RUN_MS
-   *  (parity with the headless path), else 20 minutes. A 0/negative value disables. */
-  static maxRunMs(): number {
-    const raw = process.env['AUTODEV_ACP_MAX_RUN_MS'] ?? process.env['GROK_MAX_RUN_MS'] ?? '';
+  /** ACTIVITY-BASED watchdog IDLE window (ms). The per-turn watchdog is RESET on
+   *  ANY agent session/update this turn (tool_call, tool_call_update, agent_message
+   *  /thought chunk, plan updates — see `_bumpActivity`), so a legitimately LONG,
+   *  actively-WORKING turn (e.g. a QA pass firing dozens of search_replace/read_file
+   *  tool calls) runs as long as it keeps making progress. Only a TRUE STALL — no
+   *  activity at all for this whole window — cancels + reconnects.
+   *
+   *  This replaces the old TOTAL-runtime cap (1.4.194 and earlier), which wrongly
+   *  killed active long turns ("timing out too early, the agent is working").
+   *
+   *  Env, first set wins: AUTODEV_ACP_IDLE_MS (preferred), else the legacy per-turn
+   *  caps AUTODEV_ACP_MAX_RUN_MS / GROK_MAX_RUN_MS (now REINTERPRETED as the idle
+   *  window — back-compat: a value that used to be a runtime cap is still a safe,
+   *  strictly-more-permissive idle window), else 15 minutes. A 0/negative value
+   *  disables the idle guard.
+   *
+   *  Default 15 min: observed real stalls (grok `waiting_for_model` hang with no
+   *  output) were ~2.5 min, so 15 minutes of TOTAL SILENCE is unambiguously a hang
+   *  and never a working turn, while still bounding a genuine wedge. */
+  static idleMs(): number {
+    const raw = process.env['AUTODEV_ACP_IDLE_MS'] ?? process.env['AUTODEV_ACP_MAX_RUN_MS'] ?? process.env['GROK_MAX_RUN_MS'] ?? '';
     const n = Number.parseInt(String(raw), 10);
     if (Number.isFinite(n) && n > 0) { return n; }
     if (Number.isFinite(n) && n <= 0 && String(raw).trim() !== '') { return 2147483647; } // disabled
-    return 20 * 60 * 1000;
+    return 15 * 60 * 1000;
   }
+
+  /** Absolute per-turn CEILING (ms) — a hard stop regardless of activity, as a last
+   *  resort. OFF by default (0): the idle window above is the real guard, so a
+   *  productive turn is NEVER killed on wall-clock alone. Set AUTODEV_ACP_ABS_MAX_MS
+   *  to a large value (e.g. hours) only if a hard cap is genuinely wanted. */
+  static absMaxMs(): number {
+    const raw = process.env['AUTODEV_ACP_ABS_MAX_MS'] ?? '';
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0) { return n; }
+    return 0; // disabled — idle timeout is the guard
+  }
+
+  /** @deprecated back-compat shim — the watchdog is now activity-based (idle
+   *  timeout). Returns the idle window so any external caller keeps working. */
+  static maxRunMs(): number { return AcpSession.idleMs(); }
+
+  /** PURE watchdog verdict, extracted so the activity-reset logic is unit-testable
+   *  deterministically without real timers. Cancels iff there has been NO agent
+   *  activity for the whole idle window (a true stall), OR — when an absolute
+   *  ceiling is enabled — the turn has run past it. */
+  static watchdogVerdict(p: {
+    now: number; lastActivityAt: number; turnStart: number; idleMs: number; absMs: number;
+  }): { cancel: boolean; reason: string } {
+    if (p.idleMs > 0) {
+      const idleFor = p.now - p.lastActivityAt;
+      if (idleFor >= p.idleMs) {
+        return { cancel: true, reason: `idle/stalled — no agent activity for ${Math.round(idleFor / 1000)}s (idle window ${Math.round(p.idleMs / 1000)}s)` };
+      }
+    }
+    if (p.absMs > 0) {
+      const ranFor = p.now - p.turnStart;
+      if (ranFor >= p.absMs) {
+        return { cancel: true, reason: `absolute ceiling ${Math.round(p.absMs / 1000)}s exceeded (ran ${Math.round(ranFor / 1000)}s)` };
+      }
+    }
+    return { cancel: false, reason: '' };
+  }
+
+  /** Reset the watchdog: record that the agent just made progress. Called on every
+   *  session/update (past the loading-replay guard). */
+  private _bumpActivity(): void { this._lastActivityAt = Date.now(); }
 
   /** Grace window (ms) to wait for a TRAILING agent_message_chunk after a clean
    *  end_turn before declaring the turn empty. gpt-oss:20b (and some slow local
@@ -446,6 +510,7 @@ export class AcpSession {
 
   private _onUpdate(u: AcpUpdate): void {
     if (this._loading) { return; } // Layer A.1: drop session/load replay silently
+    this._bumpActivity(); // any live update = the turn is progressing → reset the idle watchdog
     if (u.kind === 'assistant') {
       this._turnHadOutput = true;
       if (this._sink) { try { this._sink(u.text); } catch { /* ignore */ } }
@@ -521,13 +586,41 @@ export class AcpSession {
     this._busy = true;
     this._sink = sink;
     this._turnHadOutput = false;
-    // Layer A.3: per-turn watchdog — a wedged always-open turn must never hang the
-    // loop forever. If the turn (primary + drained steers) blows the budget we
-    // cancel + reconnect and surface it as a FAILURE (never a false success).
-    const budget = AcpSession.maxRunMs();
+    // Layer A.3 (1.4.195): ACTIVITY-BASED per-turn watchdog. A wedged always-open
+    // turn must never hang the loop forever — BUT a legitimately LONG, actively-
+    // WORKING turn (dozens of tool calls over 20+ min) must never be cancelled
+    // either (the 1.4.194 TOTAL-runtime cap wrongly did: "timing out too early, the
+    // agent is working"). So this is an IDLE timeout: it is reset on ANY agent
+    // activity (`_bumpActivity` in `_onUpdate`) and only fires after a full idle
+    // window of TOTAL SILENCE — a true stall. An absolute ceiling (off by default)
+    // is a last-resort hard cap only. On fire we cancel + reconnect and surface it
+    // as a FAILURE (never a false success); durable steers survive the reconnect.
+    const idleMs = AcpSession.idleMs();
+    const absMs = AcpSession.absMaxMs();
+    const turnStart = Date.now();
+    this._bumpActivity(); // arm: the turn has just started (counts as activity)
     let timedOut = false;
+    let timeoutReason = '';
     let timer: NodeJS.Timeout | undefined;
-    const watchdog = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve('timeout'); }, budget); });
+    const watchdog = new Promise<'timeout'>((resolve) => {
+      const bothOff = !(idleMs > 0) && !(absMs > 0);
+      if (bothOff) { return; } // watchdog fully disabled → never fires
+      const tick = (): void => {
+        const now = Date.now();
+        const v = AcpSession.watchdogVerdict({ now, lastActivityAt: this._lastActivityAt, turnStart, idleMs, absMs });
+        if (v.cancel) { timedOut = true; timeoutReason = v.reason; resolve('timeout'); return; }
+        // Not yet — re-arm for the SOONER of (idle window since last activity) and
+        // (absolute ceiling since turn start). Any activity that arrives meanwhile
+        // has already pushed `_lastActivityAt` forward, so the next tick finds the
+        // turn healthy and the idle countdown effectively restarts.
+        const untilIdle = idleMs > 0 ? (this._lastActivityAt + idleMs) - now : Number.MAX_SAFE_INTEGER;
+        const untilAbs = absMs > 0 ? (turnStart + absMs) - now : Number.MAX_SAFE_INTEGER;
+        const next = Math.min(untilIdle, untilAbs);
+        timer = setTimeout(tick, Math.max(50, Math.min(next, 2147483647)));
+      };
+      const first = idleMs > 0 ? idleMs : absMs;
+      timer = setTimeout(tick, Math.max(50, Math.min(first, 2147483647)));
+    });
     let res: AcpTurnResult;
     try {
       const outcome = await Promise.race([
@@ -542,10 +635,10 @@ export class AcpSession {
         watchdog,
       ]);
       if (outcome === 'timeout') {
-        this.hooks.log(`ACP: turn exceeded ${budget}ms watchdog — cancelling + reconnecting`);
+        this.hooks.log(`ACP: turn watchdog fired — ${timeoutReason} — cancelling + reconnecting`);
         try { this.cancel(); } catch { /* ignore */ }
         try { this.close(); } catch { /* ignore */ } // next turn respawns + session/load restores context
-        res = { clean: false, stopReason: 'timeout', error: `turn exceeded ${budget}ms watchdog` };
+        res = { clean: false, stopReason: 'timeout', error: `turn watchdog: ${timeoutReason}` };
       } else {
         res = outcome;
       }

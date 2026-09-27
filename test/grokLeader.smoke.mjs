@@ -89,6 +89,15 @@ ok('decideLeaderAction: spawn / adopt / reap-stale', () => {
   assert.equal(leader.decideLeaderAction({ pid: 1, socket: 's', startedAt: '' }, { leader: true, keepalive: false, socket: true }), 'adopt');
 });
 
+// --- socket/keepalive wait timeouts: env-tunable, robust defaults ----------
+ok('leaderSocketWaitMs/leaderKeepaliveWaitMs: default 30s, env-tunable', () => {
+  assert.equal(leader.leaderSocketWaitMs({}), 30_000, 'default socket wait raised to 30s');
+  assert.equal(leader.leaderSocketWaitMs({ AUTODEV_GROK_LEADER_SOCKET_MS: '60000' }), 60_000);
+  assert.equal(leader.leaderSocketWaitMs({ AUTODEV_GROK_LEADER_SOCKET_MS: 'bogus' }), 30_000, 'bad value → default');
+  assert.equal(leader.leaderKeepaliveWaitMs({}), 30_000);
+  assert.equal(leader.leaderKeepaliveWaitMs({ AUTODEV_GROK_LEADER_KEEPALIVE_MS: '45000' }), 45_000);
+});
+
 // --- isPidAlive ------------------------------------------------------------
 ok('isPidAlive: self alive, bogus dead', () => {
   assert.equal(leader.isPidAlive(process.pid), true);

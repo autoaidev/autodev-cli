@@ -85,25 +85,66 @@ await okAsync('A.1: session/load replay emits ZERO hooks (quiet reload)', async 
   sess.close();
 });
 
-// --- LAYER A.3: per-turn watchdog cancels + fails truthfully ---------------
-ok('A.3: maxRunMs honours env override + defaults to 20m', () => {
-  process.env.AUTODEV_ACP_MAX_RUN_MS = '150';
-  assert.equal(AcpSession.maxRunMs(), 150);
-  delete process.env.AUTODEV_ACP_MAX_RUN_MS;
-  assert.equal(AcpSession.maxRunMs(), 20 * 60 * 1000, 'default 20m when unset');
+// --- LAYER A.3 (1.4.195): ACTIVITY-BASED watchdog (idle timeout, not runtime) ---
+ok('A.3: idleMs — AUTODEV_ACP_IDLE_MS wins, legacy MAX_RUN_MS/GROK back-compat, default 15m', () => {
+  for (const k of ['AUTODEV_ACP_IDLE_MS', 'AUTODEV_ACP_MAX_RUN_MS', 'GROK_MAX_RUN_MS', 'AUTODEV_ACP_ABS_MAX_MS']) delete process.env[k];
+  assert.equal(AcpSession.idleMs(), 15 * 60 * 1000, 'default 15m when unset');
+  process.env.GROK_MAX_RUN_MS = '111';
+  assert.equal(AcpSession.idleMs(), 111, 'legacy GROK_MAX_RUN_MS reinterpreted as idle window');
+  process.env.AUTODEV_ACP_MAX_RUN_MS = '222';
+  assert.equal(AcpSession.idleMs(), 222, 'legacy AUTODEV_ACP_MAX_RUN_MS beats GROK_MAX_RUN_MS');
+  process.env.AUTODEV_ACP_IDLE_MS = '333';
+  assert.equal(AcpSession.idleMs(), 333, 'AUTODEV_ACP_IDLE_MS is the preferred name');
+  assert.equal(AcpSession.maxRunMs(), 333, 'maxRunMs back-compat shim === idleMs');
+  for (const k of ['AUTODEV_ACP_IDLE_MS', 'AUTODEV_ACP_MAX_RUN_MS', 'GROK_MAX_RUN_MS']) delete process.env[k];
+  assert.equal(AcpSession.absMaxMs(), 0, 'absolute ceiling OFF by default');
+  process.env.AUTODEV_ACP_ABS_MAX_MS = '5000';
+  assert.equal(AcpSession.absMaxMs(), 5000);
+  delete process.env.AUTODEV_ACP_ABS_MAX_MS;
 });
-await okAsync('A.3: a wedged turn hits the watchdog → clean=false stopReason=timeout, tool flushed', async () => {
-  process.env.AUTODEV_ACP_MAX_RUN_MS = '400'; // tiny budget
+ok('A.3: watchdogVerdict — pure timer-reset logic is deterministic', () => {
+  const idleMs = 1000, absMs = 0, turnStart = 0;
+  // Fresh activity → healthy.
+  assert.deepEqual(AcpSession.watchdogVerdict({ now: 900, lastActivityAt: 500, turnStart, idleMs, absMs }).cancel, false);
+  // Activity 999ms ago, under the 1000ms window → still healthy (a working turn).
+  assert.equal(AcpSession.watchdogVerdict({ now: 5000, lastActivityAt: 4001, turnStart, idleMs, absMs }).cancel, false, 'recent activity resets the window no matter how long the turn has run');
+  // No activity for >= the idle window → cancel (a true stall).
+  const v = AcpSession.watchdogVerdict({ now: 5000, lastActivityAt: 4000, turnStart, idleMs, absMs });
+  assert.equal(v.cancel, true, 'idle >= window → cancel');
+  assert.match(v.reason, /idle\/stalled/);
+  // Absolute ceiling: fires only when enabled and blown, regardless of activity.
+  assert.equal(AcpSession.watchdogVerdict({ now: 100, lastActivityAt: 100, turnStart, idleMs, absMs: 50 }).cancel, true, 'abs ceiling blown → cancel');
+  assert.match(AcpSession.watchdogVerdict({ now: 100, lastActivityAt: 100, turnStart, idleMs, absMs: 50 }).reason, /absolute ceiling/);
+  // idleMs=0 disables the idle guard entirely.
+  assert.equal(AcpSession.watchdogVerdict({ now: 1e9, lastActivityAt: 0, turnStart, idleMs: 0, absMs: 0 }).cancel, false, 'both guards off → never cancel');
+});
+await okAsync('A.3: a LONG turn that keeps emitting activity is NOT cancelled (works past the idle window)', async () => {
+  // Idle window 300ms; the fake emits tool activity every 30ms for 25 ticks (~750ms
+  // > 2x the window), then ends clean. An activity-based watchdog must let it run.
+  process.env.AUTODEV_ACP_IDLE_MS = '300';
+  process.env.FAKE_ACP_ACTIVE_STEP_MS = '30';
+  process.env.FAKE_ACP_ACTIVE_TICKS = '25';
+  const { sess, events } = makeSession();
+  const res = await sess.runTurn('run a long ACTIVE QA pass', () => {});
+  assert.equal(res.clean, true, 'a continuously-active long turn completes cleanly (not cancelled)');
+  assert.equal(res.stopReason !== 'timeout', true, 'never hit the watchdog');
+  assert.equal(events.filter(e => e.name === 'PreToolUse').length >= 20, true, 'all the periodic tool calls ran');
+  for (const k of ['AUTODEV_ACP_IDLE_MS', 'FAKE_ACP_ACTIVE_STEP_MS', 'FAKE_ACP_ACTIVE_TICKS']) delete process.env[k];
+  sess.close();
+});
+await okAsync('A.3: a SILENT stalled turn (no activity for the idle window) IS cancelled + flushed', async () => {
+  process.env.AUTODEV_ACP_IDLE_MS = '400'; // tiny idle window
   const { sess, events } = makeSession();
   const res = await sess.runTurn('please HANG forever', () => {});
-  assert.equal(res.clean, false, 'wedged turn is NOT a false success');
+  assert.equal(res.clean, false, 'a genuine stall is NOT a false success');
   assert.equal(res.stopReason, 'timeout');
+  assert.match(res.error, /idle\/stalled/);
   // The tool opened by the hung turn must not be left "running".
   const dangling = events.filter(e => e.name === 'PreToolUse' && e.extra.tool_use_id === 'tc-hang')
     .filter(pre => !events.some(end => /PostToolUse/.test(end.name) && end.extra.tool_use_id === 'tc-hang'));
   assert.equal(dangling.length, 0, 'hung tool flushed to an end hook');
   assert.equal(events.filter(e => e.name === 'StopFailure').length >= 1, true, 'surfaced as StopFailure');
-  delete process.env.AUTODEV_ACP_MAX_RUN_MS;
+  delete process.env.AUTODEV_ACP_IDLE_MS;
   sess.close();
 });
 

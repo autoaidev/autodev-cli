@@ -19,8 +19,9 @@ import { getOpenCodeSessionIdFromHooks, isOpenCodeCliActive, openCodeExitedClean
 import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider';
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient, claudeCliPersistentEnabled } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk, copilotCliPersistentEnabled } from './providers/copilotSdkProvider';
-import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk, opencodeCliPersistentEnabled } from './providers/opencodeSdkProvider';
-import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy } from './providers/grokTuiProvider';
+import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk, opencodeCliPersistentEnabled, opencodeAcpEnabled, hasOpencodeAcpSession, steerOpencodeAcpTracked, ensureOpencodeAcpSteer } from './providers/opencodeSdkProvider';
+import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy, grokAcpEnabled, hasGrokAcpSession, steerGrokAcpTracked, ensureGrokAcpSteer } from './providers/grokTuiProvider';
+import { enqueuePendingSteer, readPendingSteers, removePendingSteer } from './pendingSteers';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -695,7 +696,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setRdpEnabled(settings.rdpEnabled ?? false);
       // Wake the idle no-task sleep instantly when a WS-pushed task arrives.
       this._webhookPoller.setOnTaskAppend(() => this._wakeIdleSleep());
-      this._webhookPoller.setOnSteer((text, onDelivered) => void this._handleSteer(text, onDelivered));
+      this._webhookPoller.setOnSteer((text, onDelivered, id) => void this._handleSteer(text, onDelivered, id));
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
       this._webhookPoller.setOnSkillUpdate((skills) => this._handleSkillUpdate(skills));
@@ -1132,13 +1133,25 @@ export class TaskLoopRunner {
    *     and wake the idle sleep so it runs at the very next turn boundary rather
    *     than waiting for a poll interval. This is the documented fallback.
    */
-  private async _handleSteer(text: string, onDelivered?: () => void): Promise<void> {
+  private async _handleSteer(text: string, onDelivered?: () => void, steerId?: string): Promise<void> {
     const clean = text.trim();
     // Malformed/empty steer: nothing to deliver — treat as terminally handled so
     // the server doesn't keep replaying it.
     if (!clean) { onDelivered?.(); return; }
     const root = this._workspaceRoot;
     const provider = this._cb?.getActiveProvider() ?? '';
+
+    // DURABLE-STEER path (persistent ACP: grok-cli/grok-tui + opencode via the
+    // shared AcpSession). A steer here is PERSISTED to .autodev/pending-steers.jsonl
+    // BEFORE it is acked, delivered to the live process as a loop-tracked turn, and
+    // acked (+ de-queued) only when that steered turn COMPLETES — so a restart mid-
+    // steer re-delivers it (at-least-once) instead of silently losing it. Requires a
+    // delivery id (the A2A id) for restart-safe dedup; without one we fall through to
+    // the buffer path below (unchanged). NOT TODO.md — grok rewrites TODO.md mid-turn.
+    if (root && steerId && this._acpSteerKind(provider)) {
+      this._deliverAcpSteerDurable(root, provider, steerId, clean, onDelivered);
+      return;
+    }
 
     // True mid-turn injection — only claude-tui keeps a live steerable session,
     // and only while a turn is actually running. Await the injection: mark the
@@ -1244,6 +1257,103 @@ export class TaskLoopRunner {
         this._cb?.log(`⚡ Steer append failed (will retry): ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
+
+  // --- Durable-across-restart STEER (persistent ACP: grok + opencode) --------
+  // Ids currently being delivered/awaited — prevents a concurrent restart-drain
+  // AND a server reconnect-replay from delivering the SAME steer twice.
+  private readonly _acpSteerInflight = new Set<string>();
+  // id → onDelivered (the server outbox ack). The latest replay's callback wins;
+  // fired ONLY when the steered turn completes.
+  private readonly _acpSteerAcks = new Map<string, () => void>();
+
+  /** Which persistent-ACP steer path applies to this provider (null = none). */
+  private _acpSteerKind(provider: string): 'grok' | 'opencode' | null {
+    if ((provider === 'grok-cli' || provider === 'grok-tui') && grokAcpEnabled()) { return 'grok'; }
+    if (usesOpencodeSdkServer(provider) && opencodeAcpEnabled()) { return 'opencode'; }
+    return null;
+  }
+
+  /** Effective model string for a (re)spawned ACP session on the restart-drain. */
+  private _effectiveModel(): string | undefined {
+    try { return this._settings ? resolveConfiguredModel(this._settings) : undefined; }
+    catch { return undefined; }
+  }
+
+  /**
+   * Persist a steer to the durable queue, deliver it to the LIVE ACP session, and
+   * ack (+ de-queue) it only when the steered turn COMPLETES. If no live session
+   * exists right now, it stays queued and the next-boundary drain re-delivers it.
+   */
+  private _deliverAcpSteerDurable(root: string, provider: string, id: string, text: string, onDelivered?: () => void): void {
+    // Dedup: already in-flight (a reconnect-replay of a steer we're still running)
+    // → just refresh the ack callback; do NOT deliver a second copy.
+    if (this._acpSteerInflight.has(id)) {
+      if (onDelivered) { this._acpSteerAcks.set(id, onDelivered); }
+      return;
+    }
+    // Persist BEFORE ack. enqueue is a no-op (returns false) if already queued.
+    enqueuePendingSteer(root, { id, text, ts: Date.now() });
+    if (onDelivered) { this._acpSteerAcks.set(id, onDelivered); }
+    const kind = this._acpSteerKind(provider);
+    const p = kind === 'opencode'
+      ? steerOpencodeAcpTracked(root, text, m => this._cb?.log(m))
+      : steerGrokAcpTracked(root, text, m => this._cb?.log(m));
+    if (!p) {
+      // No live session this instant — leave it queued; the boundary drain (which
+      // can spawn + session/load the process) will (re)deliver it. Not acked.
+      this._cb?.log(`⚡ Durable steer queued (no live ${kind} session yet): "${text.slice(0, 80)}"`);
+      return;
+    }
+    this._acpSteerInflight.add(id);
+    this._cb?.log(`⚡ Steered live (durable, ${kind}): "${text.slice(0, 80)}"`);
+    void p.then(() => this._settleAcpSteer(root, id), () => this._settleAcpSteer(root, id));
+  }
+
+  /**
+   * Drain the durable steer queue into the live ACP session — called at each turn
+   * boundary and so covers restart: a steer interrupted by a restart is still on
+   * disk and gets (re)delivered here (spawning + session/load-ing the process when
+   * needed), completing at-least-once. In-flight ids are skipped.
+   */
+  private _drainDurableAcpSteers(root: string, provider: string): void {
+    const kind = this._acpSteerKind(provider);
+    if (!kind) { return; }
+    const pending = readPendingSteers(root);
+    if (!pending.length) { return; }
+    const model = this._effectiveModel();
+    for (const s of pending) {
+      if (this._acpSteerInflight.has(s.id)) { continue; }
+      this._acpSteerInflight.add(s.id);
+      void (async () => {
+        try {
+          const res = kind === 'opencode'
+            ? await ensureOpencodeAcpSteer(root, model, s.text, m => this._cb?.log(m))
+            : await ensureGrokAcpSteer(root, provider as 'grok-cli' | 'grok-tui', model, s.text, m => this._cb?.log(m));
+          if (res === null) {
+            // Couldn't bring up a session — keep it queued, retry next boundary.
+            this._acpSteerInflight.delete(s.id);
+            return;
+          }
+          this._settleAcpSteer(root, s.id);
+        } catch {
+          this._acpSteerInflight.delete(s.id);
+        }
+      })();
+    }
+  }
+
+  /** A steered turn completed: de-queue, stop the server replay, fire the ack. */
+  private _settleAcpSteer(root: string, id: string): void {
+    removePendingSteer(root, id);
+    // Mark the delivery seen so the server stops re-delivering it even if the ack
+    // callback for this instance is gone (a restart-drain has no server callback).
+    try { this._webhookPoller?.markDeliverySeen(id); } catch { /* ignore */ }
+    this._acpSteerInflight.delete(id);
+    const cb = this._acpSteerAcks.get(id);
+    this._acpSteerAcks.delete(id);
+    try { cb?.(); } catch { /* ignore */ }
+    this._cb?.log(`⚡ Durable steer completed + de-queued (id=${id})`);
   }
 
   // -------------------------------------------------------------------------
@@ -1500,6 +1610,14 @@ export class TaskLoopRunner {
       // it survive — a provider like grok rewrites TODO.md itself as it works, and
       // a task appended during its turn gets clobbered by that rewrite.
       await this._drainPendingSteers(todoPath);
+
+      // Durable-across-restart steers (persistent ACP): (re)deliver any steer left
+      // on disk by a prior run — the restart-survival drain. Fire-and-forget; each
+      // completes + de-queues on its own turn boundary.
+      if (this._workspaceRoot) {
+        const prov = this._cb?.getActiveProvider() ?? '';
+        this._drainDurableAcpSteers(this._workspaceRoot, prov);
+      }
 
       const tasks = parseTodo(todoPath);
       let task = pickNextTask(tasks); // first [ ] task

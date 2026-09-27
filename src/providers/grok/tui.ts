@@ -2089,6 +2089,48 @@ export function isGrokAcpBusy(root: string): boolean {
   return !!sess && sess.isBusy();
 }
 
+/** True when a LIVE (alive) persistent grok ACP session is held for this root. */
+export function hasGrokAcpSession(root: string): boolean {
+  const sess = _acpSessions.get(root);
+  return !!sess && sess.isAlive();
+}
+
+/**
+ * Durable-steer delivery to an EXISTING live grok ACP session. Returns a promise
+ * that resolves when the steered turn COMPLETES (so the caller can ack + de-queue
+ * only then), or null when no live session exists (the caller keeps it queued and
+ * retries via {@link ensureGrokAcpSteer} at the next boundary).
+ */
+export function steerGrokAcpTracked(root: string, text: string, log: (msg: string) => void): Promise<import('./GrokAcpSession').AcpTurnResult> | null {
+  const sess = _acpSessions.get(root);
+  if (!sess || !sess.isAlive()) { return null; }
+  const p = sess.steerTracked(text);
+  if (p) { log(`Grok ACP: durable steer delivered to live session (${text.length} chars) — awaiting completion`); }
+  return p;
+}
+
+/**
+ * Restart-drain delivery: ENSURE a live grok ACP session (spawn + session/load if
+ * none is held — e.g. right after a loop restart with an empty TODO), then deliver
+ * the steer and await its completion. Returns the turn result, or null when the
+ * session could not be brought up (caller keeps the steer queued for a later
+ * boundary). Grok stays ALIVE between turns, so the common case just reuses the
+ * live session.
+ */
+export async function ensureGrokAcpSteer(
+  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, text: string, log: (msg: string) => void,
+): Promise<import('./GrokAcpSession').AcpTurnResult | null> {
+  if (!grokAcpEnabled()) { return null; }
+  const sess = getOrCreateAcpSession(root, providerId, model, log, undefined);
+  try { await sess.ensureReady(); }
+  catch (err) { log(`Grok ACP: durable-steer ensureReady failed (${(err as Error)?.message ?? err})`); return null; }
+  if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
+  const p = sess.steerTracked(text);
+  if (!p) { return null; }
+  log(`Grok ACP: durable steer (re)delivered on restart-drain (${text.length} chars) — awaiting completion`);
+  return p;
+}
+
 /**
  * grok-tui: persistent — run the turn in the per-workspace tmux session so
  * grok's in-process context accumulates across tasks. Falls back to the old

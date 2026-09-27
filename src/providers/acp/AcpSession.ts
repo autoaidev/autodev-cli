@@ -520,6 +520,21 @@ export class AcpSession {
     return true;
   }
 
+  /**
+   * Like {@link steer}, but returns a promise that resolves when THAT steered
+   * turn actually COMPLETES (grok/opencode runs the queued session/prompt to its
+   * stopReason) — or null if it can't be delivered (dead/no session). The prompt
+   * is tracked in `_inflight` exactly like `steer()`, so an active runTurn drains
+   * it (Bug A). Used by the durable-steer queue to ack / de-queue a steer only on
+   * completion, so a restart mid-steer re-delivers it (at-least-once).
+   */
+  steerTracked(text: string): Promise<AcpTurnResult> | null {
+    if (!this.isAlive() || !this._sessionId) { return null; }
+    const t = text.trim();
+    if (!t) { return null; }
+    return this._promptRequest(t).then((r) => classifyAcpResult(r));
+  }
+
   /** Send a tracked session/prompt (primary or steer) and register it in
    *  `_inflight` until it resolves. */
   private _promptRequest(text: string): Promise<{ result?: Record<string, unknown>; error?: { message?: string } }> {

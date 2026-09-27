@@ -26,7 +26,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as child_process from 'child_process';
 import { AcpSession, decodeAcpUpdateStandard } from '../acp/AcpSession';
-import type { AcpHostHooks, AcpLaunchSpec } from '../acp/AcpSession';
+import type { AcpHostHooks, AcpLaunchSpec, AcpTurnResult } from '../acp/AcpSession';
 import { eventTypeFor } from '../base/ProviderNormalizer';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 
@@ -225,6 +225,38 @@ export function steerOpencodeAcp(root: string, text: string, log: (msg: string) 
   const ok = sess.steer(text);
   if (ok) { log(`OpenCode ACP: steered live process (${text.length} chars) — queued to the running session`); }
   return ok;
+}
+
+/**
+ * Durable-steer delivery to an EXISTING live opencode ACP session. Resolves when
+ * the steered turn COMPLETES; null when no live session exists (caller keeps the
+ * steer queued and retries via {@link ensureOpencodeAcpSteer}).
+ */
+export function steerOpencodeAcpTracked(root: string, text: string, log: (msg: string) => void): Promise<AcpTurnResult> | null {
+  const sess = _acpSessions.get(root);
+  if (!sess || !sess.isAlive()) { return null; }
+  const p = sess.steerTracked(text);
+  if (p) { log(`OpenCode ACP: durable steer delivered to live session (${text.length} chars) — awaiting completion`); }
+  return p;
+}
+
+/**
+ * Restart-drain delivery: ENSURE a live opencode ACP session (spawn + session/load
+ * if none is held), then deliver the steer and await completion. Returns the turn
+ * result, or null when the session could not be brought up.
+ */
+export async function ensureOpencodeAcpSteer(
+  root: string, model: string | undefined, text: string, log: (msg: string) => void,
+): Promise<AcpTurnResult | null> {
+  if (!opencodeAcpEnabled()) { return null; }
+  const sess = _getOrCreate(root, model, log, undefined);
+  try { await sess.ensureReady(); }
+  catch (err) { log(`OpenCode ACP: durable-steer ensureReady failed (${(err as Error)?.message ?? err})`); return null; }
+  if (sess.sessionId) { _latestSessionIds.set(root, sess.sessionId); }
+  const p = sess.steerTracked(text);
+  if (!p) { return null; }
+  log(`OpenCode ACP: durable steer (re)delivered on restart-drain (${text.length} chars) — awaiting completion`);
+  return p;
 }
 
 /** Best-effort /compact on the live opencode ACP session (quiet, no Stop hook). */

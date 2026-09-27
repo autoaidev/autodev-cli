@@ -46,7 +46,7 @@ export class WebSocketPoller {
   private _fragChunks: Buffer[] = [];
   private _onConnect: (() => void) | null = null;
   private _onTaskAppend: (() => void) | null = null;
-  private _onSteer: ((text: string, onDelivered: () => void) => void) | null = null;
+  private _onSteer: ((text: string, onDelivered: () => void, id?: string) => void) | null = null;
   private _onCommand: ((cmd: string) => void) | null = null;
   private _onMcpUpdate: ((entries: Record<string, unknown>) => void) | null = null;
   private _onSkillUpdate: ((skills: unknown[]) => void) | null = null;
@@ -84,8 +84,13 @@ export class WebSocketPoller {
   /** Called whenever a task is successfully appended to TODO.md via a WS push. */
   setOnTaskAppend(cb: () => void): void { this._onTaskAppend = cb; }
 
-  /** Called when an instant/steer message arrives — delivered live, NOT queued to TODO. */
-  setOnSteer(cb: (text: string, onDelivered: () => void) => void): void { this._onSteer = cb; }
+  /** Called when an instant/steer message arrives — delivered live, NOT queued to TODO.
+   *  The 3rd arg is the A2A delivery id (dedup key for the durable-steer queue). */
+  setOnSteer(cb: (text: string, onDelivered: () => void, id?: string) => void): void { this._onSteer = cb; }
+
+  /** Mark a delivery id seen (dedup) — used by the durable-steer queue when a
+   *  steered turn completes on a restart-drain that has no server ack callback. */
+  markDeliverySeen(id: string): void { if (id) { this._markSeenDelivery(id); } }
 
   /** Called when a slash command (e.g. /restart) is received via WS push. */
   setOnCommand(cb: (cmd: string) => void): void { this._onCommand = cb; }
@@ -622,7 +627,7 @@ export class WebSocketPoller {
         // seen only AFTER the steer is durably handled — mid-turn injection or a
         // successful TODO append. On failure we leave it unseen so the server's
         // reconnect replay re-delivers it instead of silently dropping it.
-        this._onSteer?.(steerText, () => { if (taskId) { this._markSeenDelivery(taskId); } });
+        this._onSteer?.(steerText, () => { if (taskId) { this._markSeenDelivery(taskId); } }, taskId);
         return;
       }
 

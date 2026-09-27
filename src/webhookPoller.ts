@@ -154,9 +154,17 @@ export class WebhookPoller {
   }
 
   /** Register a callback for instant/steer messages (delivered live, not queued). */
-  setOnSteer(cb: (text: string, onDelivered: () => void) => void): void {
+  setOnSteer(cb: (text: string, onDelivered: () => void, id?: string) => void): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setOnSteer(cb);
+    }
+  }
+
+  /** Mark a delivery id seen (dedup) — used by the durable-steer queue. No-op for
+   *  the HTTP poller (steers only arrive over the WebSocket transport). */
+  markDeliverySeen(id: string): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.markDeliverySeen(id);
     }
   }
 

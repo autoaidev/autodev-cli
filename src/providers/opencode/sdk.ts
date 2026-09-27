@@ -20,7 +20,11 @@ import {
   opencodeAcpEnabled, sendOpencodeAcpPrompt, steerOpencodeAcp, isOpencodeAcpBusy,
   getOpencodeAcpActivity, getOpencodeAcpLatestSessionId, hasOpencodeAcpSession,
   compactOpencodeAcp, forceIdleOpencodeAcp, closeOpencodeAcp, closeAllOpencodeAcp,
+  steerOpencodeAcpTracked, ensureOpencodeAcpSteer,
 } from './acp';
+// Re-export the durable-steer primitives so the task loop can reach them through
+// the same opencodeSdkProvider barrel it already uses.
+export { opencodeAcpEnabled, hasOpencodeAcpSession, steerOpencodeAcpTracked, ensureOpencodeAcpSteer } from './acp';
 
 // ---------------------------------------------------------------------------
 // Minimal TypeScript interfaces for the parts of the SDK we use.

@@ -414,6 +414,12 @@ and subsystems), see **[docs/architecture.md](docs/architecture.md)**.
 
 ---
 
+## Author / Maintainer
+
+**Peter Ivanov** <peter@microweber.com>
+
+---
+
 ## License
 
 MIT.

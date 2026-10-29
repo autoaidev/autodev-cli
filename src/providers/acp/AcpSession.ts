@@ -85,6 +85,15 @@ export interface AcpLaunchSpec {
   narrationTitle: string;
   /** Forward agent_thought_chunk as narration too (default false). */
   narrateReasoning?: boolean;
+  /** This agent requires an explicit `authenticate` before session/new|load
+   *  (grok ≥1.0.41 does: `initialize` advertises `authMethods` and session/new
+   *  otherwise fails "Authentication required: no auth method id provided").
+   *  When true AND the agent advertises auth methods but none is usable
+   *  headlessly, startup throws a clear reauth error instead of hanging on an
+   *  interactive sign-in. Agents that don't gate on auth (opencode) leave it
+   *  false; the authenticate call is still made when a non-interactive method is
+   *  advertised, and skipped entirely when none is. */
+  authRequired?: boolean;
 }
 
 /**
@@ -356,7 +365,8 @@ export class AcpSession {
 
   private async _startup(): Promise<void> {
     this._spawnChild();
-    await this._request('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    const init = await this._request('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    await this._authenticate(init);
     const want = this._wantSessionId;
     if (want && this._attachWithoutLoad) {
       // Layer B (1.4.193): a live keepalive client holds this session warm in the
@@ -397,6 +407,50 @@ export class AcpSession {
     }
     this._wantSessionId = this._sessionId;
     this.hooks.emitHook('SessionStart', { source: this._startCount > 1 ? 'resume' : 'startup' });
+  }
+
+  /**
+   * Headless ACP authentication. grok ≥1.0.41 advertises `authMethods` from
+   * `initialize` and REQUIRES `authenticate({ methodId, _meta:{headless:true} })`
+   * before session/new|load — otherwise session/new fails with
+   * "Authentication required: no auth method id provided". We pick a
+   * NON-INTERACTIVE method so this never opens a browser and hangs:
+   *   1. an API-key method (`xai.api_key` / `*api_key*`) when XAI_API_KEY or
+   *      GROK_API_KEY is set,
+   *   2. else a cached-token method (`cached_token` / `*cached*`, present once the
+   *      user has logged in via `grok login`),
+   *   3. else, when the agent gates on auth (`spec.authRequired`) and only an
+   *      interactive method (e.g. `grok.com` sign-in) is offered, throw a clear
+   *      reauth error instead of hanging. `_meta.headless:true` keeps the chosen
+   *      method non-interactive. Agents that advertise NO auth methods (opencode)
+   *      skip this entirely, so this is safe for every AcpSession consumer.
+   */
+  private async _authenticate(
+    init: { result?: Record<string, unknown>; error?: { message?: string } },
+  ): Promise<void> {
+    const methods = ((init?.result?.['authMethods'] as Array<{ id?: string }> | undefined) ?? [])
+      .map((m) => m?.id)
+      .filter((id): id is string => typeof id === 'string');
+    if (methods.length === 0) { return; }   // nothing to authenticate (e.g. opencode)
+    const hasKey = !!(process.env['XAI_API_KEY'] || process.env['GROK_API_KEY']);
+    const methodId =
+      (hasKey ? methods.find((m) => m.includes('api_key')) : undefined)
+      ?? methods.find((m) => m === 'cached_token' || m.includes('cached'))
+      ?? (hasKey ? methods.find((m) => m.includes('api_key')) : undefined);
+    if (!methodId) {
+      if (this.spec.authRequired) {
+        throw new Error(
+          `ACP: no non-interactive auth method available (advertised: ${methods.join(', ')}). `
+          + 'Set XAI_API_KEY, or run `grok login` so a cached token is offered.',
+        );
+      }
+      return;   // non-gating agent offering only interactive methods — best-effort skip
+    }
+    const r = await this._request('authenticate', { methodId, _meta: { headless: true } });
+    if (r.error) {
+      throw new Error(`ACP: authenticate(${methodId}) failed: ${r.error.message ?? 'unknown error'}`);
+    }
+    this.hooks.log(`ACP: authenticated via ${methodId}`);
   }
 
   /** True when this session is in LEADER attach-without-load mode. */

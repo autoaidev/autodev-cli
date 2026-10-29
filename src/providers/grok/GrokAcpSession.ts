@@ -36,6 +36,7 @@ export const GROK_ACP_SPEC: AcpLaunchSpec = {
   decodeUpdate: decodeAcpUpdateStandard,
   narrationTitle: 'grok',
   narrateReasoning: false,
+  authRequired: true,
 };
 
 /**
@@ -57,6 +58,7 @@ export function grokLeaderClientSpec(socket: string): AcpLaunchSpec {
     decodeUpdate: decodeAcpUpdateStandard,
     narrationTitle: 'grok',
     narrateReasoning: false,
+    authRequired: true,
   };
 }
 

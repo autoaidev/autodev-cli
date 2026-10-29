@@ -206,3 +206,89 @@ export function catalogEntry(app: CreativeAppId, platform: NodeJS.Platform): Mcp
   if (!e) { throw new Error(`Unknown creative app: ${app}`); }
   return e;
 }
+
+// ---------------------------------------------------------------------------
+// Remote catalog — hosted, Streamable-HTTP MCP endpoints (NOT local apps). These
+// require a per-agent bearer key in an Authorization header, so unlike the
+// creative entries they can't be one-click "Add"ed without a key. The catalog
+// SERVER spec here NEVER carries a key (no secret baked into the shared catalog
+// JSON); the key is injected at enable-time via remoteServerSpec(entry, key) and
+// stored only in the owner-only .mcp.json. SyntheticMem is the first entry.
+// ---------------------------------------------------------------------------
+
+/** SyntheticMem — permanent, provenance-aware agent memory over remote MCP. */
+export const SYNTHETICMEM_MCP_URL = 'https://syntheticmem.com/api/mcp';
+/** POST here (no body needed) for a free, anonymous 24h demo key. Rate-limited 5/hr/IP. */
+export const SYNTHETICMEM_DEMO_KEY_URL = 'https://syntheticmem.com/api/demo-key';
+/** Register here to mint a permanent per-agent key (demo keys expire in 24h). */
+export const SYNTHETICMEM_REGISTER_URL = 'https://syntheticmem.com/app';
+/** The bearer key prefix SyntheticMem issues. */
+export const SYNTHETICMEM_KEY_PREFIX = 'agt_';
+
+export interface RemoteCatalogEntry {
+  /** Stable id (the .mcp.json key the server is written under). */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** One-line description for pickers. */
+  description: string;
+  /** The remote Streamable-HTTP MCP endpoint. */
+  url: string;
+  /** Header name carrying the bearer key (e.g. 'Authorization'). */
+  authHeader: string;
+  /** Expected key prefix (e.g. 'agt_') — used for a soft validation hint only. */
+  keyPrefix: string;
+  /** Optional endpoint that POSTs back a free ephemeral key `{ key, mcp_url, ttl_hours }`. */
+  demoKeyUrl?: string;
+  /** Where to register for a permanent key. */
+  registerUrl?: string;
+  /** Caveats worth surfacing. */
+  notes: string[];
+}
+
+/** The known remote (hosted) MCP servers the UIs offer as OPTIONAL, off-by-default entries. */
+export function getRemoteCatalog(): RemoteCatalogEntry[] {
+  return [
+    {
+      id: 'syntheticmem',
+      name: 'SyntheticMem — permanent agent memory',
+      description: 'Permanent, provenance-aware memory + semantic recall (remote MCP)',
+      url: SYNTHETICMEM_MCP_URL,
+      authHeader: 'Authorization',
+      keyPrefix: SYNTHETICMEM_KEY_PREFIX,
+      demoKeyUrl: SYNTHETICMEM_DEMO_KEY_URL,
+      registerUrl: SYNTHETICMEM_REGISTER_URL,
+      notes: [
+        `Needs a per-agent key (${SYNTHETICMEM_KEY_PREFIX}…). Get one free (no signup, 24h) with a demo key, or register at ${SYNTHETICMEM_REGISTER_URL} for a permanent key.`,
+        'Demo keys are EPHEMERAL: memories saved under a demo key expire in 24h. Register to keep them permanently.',
+      ],
+    },
+  ];
+}
+
+/** Lookup a single remote catalog entry by id (undefined if not a known remote server). */
+export function remoteCatalogEntry(id: string): RemoteCatalogEntry | undefined {
+  return getRemoteCatalog().find((e) => e.id === id);
+}
+
+/**
+ * The remote McpJsonEntry for a remote catalog entry. When `key` is given, the
+ * bearer is written into the auth header; without it the entry carries NO headers
+ * (the shared catalog JSON never embeds a secret). The key is trimmed and, if it
+ * doesn't already look like a scheme, prefixed with `Bearer `.
+ */
+export function remoteServerSpec(entry: RemoteCatalogEntry, key?: string): McpJsonEntry {
+  const k = (key ?? '').trim();
+  if (!k) { return { type: 'http', url: entry.url }; }
+  const value = /^bearer\s/i.test(k) ? k : `Bearer ${k}`;
+  return { type: 'http', url: entry.url, headers: { [entry.authHeader]: value } };
+}
+
+/** Mask a bearer/agt key for safe display/logging: keep the prefix + last 4, redact the middle. */
+export function maskKey(key: string | undefined): string {
+  const k = (key ?? '').trim();
+  if (!k) { return '(none)'; }
+  const tail = k.slice(-4);
+  const head = k.length > 8 ? k.slice(0, 4) : '';
+  return `${head}…${tail}`;
+}

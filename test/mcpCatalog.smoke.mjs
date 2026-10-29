@@ -10,7 +10,10 @@
 
 import { buildCatalog } from '../out/commands/mcp.js';
 import { DEFAULT_MCP_SERVERS } from '../out/mcpManager.js';
-import { GIMP_CLIENT_PLACEHOLDER } from '../out/core/mcpCatalog.js';
+import {
+  GIMP_CLIENT_PLACEHOLDER, getRemoteCatalog, remoteCatalogEntry,
+  remoteServerSpec, maskKey, SYNTHETICMEM_MCP_URL,
+} from '../out/core/mcpCatalog.js';
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { failures++; console.error('  ✗ ' + msg); } else { console.log('  ✓ ' + msg); } };
@@ -97,6 +100,41 @@ const nonEmptyServer = (s) =>
      wBlender.server.args.some((a) => a.includes('projects.blender.org/lab/blender_mcp')) &&
      JSON.stringify(wBlender.server.args) === JSON.stringify(blender.server.args),
     'blender server is bare uvx --from …lab… on win32 too (no cmd/c, no path)');
+}
+
+// ── remote: syntheticmem (hosted MCP, needs a bearer key, no secret in catalog)
+{
+  const { servers } = buildCatalog('linux');
+  const sm = servers.find((s) => s.id === 'syntheticmem');
+  ok(sm && sm.kind === 'remote' && sm.transport === 'http' && sm.experimental === false,
+    'syntheticmem kind:remote, transport:http, non-experimental');
+  ok(sm && sm.server.type === 'http' && sm.server.url === SYNTHETICMEM_MCP_URL,
+    'syntheticmem server = http @ syntheticmem.com/api/mcp');
+  // CRITICAL: the shared catalog NEVER bakes a key/header (no secret leakage).
+  ok(sm && !sm.server.headers, 'syntheticmem catalog server carries NO headers (no secret baked in)');
+  ok(sm && sm.auth && sm.auth.header === 'Authorization' && sm.auth.keyPrefix === 'agt_' &&
+     typeof sm.auth.demoKeyUrl === 'string' && typeof sm.auth.registerUrl === 'string',
+    'syntheticmem carries auth metadata (header, keyPrefix, demoKeyUrl, registerUrl)');
+
+  // remoteServerSpec injects the bearer header ONLY when a key is given.
+  const entry = remoteCatalogEntry('syntheticmem');
+  ok(entry && entry.id === 'syntheticmem', 'remoteCatalogEntry resolves syntheticmem');
+  const keyless = remoteServerSpec(entry);
+  ok(keyless.type === 'http' && keyless.url === SYNTHETICMEM_MCP_URL && !keyless.headers,
+    'remoteServerSpec(entry) with no key → no headers');
+  const withKey = remoteServerSpec(entry, 'agt_abc123def456');
+  ok(withKey.headers && withKey.headers.Authorization === 'Bearer agt_abc123def456',
+    'remoteServerSpec(entry, key) → Authorization: Bearer <key>');
+  // Already-prefixed "Bearer …" is not double-prefixed.
+  const pre = remoteServerSpec(entry, 'Bearer agt_zzz');
+  ok(pre.headers && pre.headers.Authorization === 'Bearer agt_zzz', 'remoteServerSpec does not double-prefix Bearer');
+
+  // maskKey never reveals the middle of the key.
+  const masked = maskKey('agt_SECRETMIDDLE_9999');
+  ok(!masked.includes('SECRETMIDDLE') && masked.endsWith('9999') && masked.includes('…'),
+    'maskKey hides the middle, keeps a short tail');
+
+  ok(getRemoteCatalog().length >= 1, 'getRemoteCatalog returns >= 1 entry');
 }
 
 // ── JSON round-trips cleanly ────────────────────────────────────────────────

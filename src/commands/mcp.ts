@@ -11,7 +11,8 @@ import { DEFAULT_MCP_SERVERS, CORE_BUILTIN_NAMES } from '../mcpManager';
 import { detectApp, detectBinOnPath, type BinDetectDeps, type DetectAppResult } from '../core/binDetect';
 import {
   getCatalog, serverSpecFor, catalogEntry, GIMP_MCP_PIN,
-  type CreativeAppId,
+  getRemoteCatalog, remoteCatalogEntry, remoteServerSpec, maskKey,
+  type CreativeAppId, type RemoteCatalogEntry,
 } from '../core/mcpCatalog';
 import {
   loadSettingsForRoot, settingsWritePath, type AutodevSettings,
@@ -148,7 +149,7 @@ export function buildDetect(root: string, deps?: Partial<BinDetectDeps>): Detect
 // Keep this shape stable — external consumers depend on it.
 // ---------------------------------------------------------------------------
 
-export type CatalogKind = 'builtin' | 'common' | 'creative';
+export type CatalogKind = 'builtin' | 'common' | 'creative' | 'remote';
 
 /** The concrete server config a picker would write (stdio or remote McpJsonEntry). */
 export interface CatalogEntry {
@@ -161,6 +162,17 @@ export interface CatalogEntry {
   experimental: boolean;
   /** Present for 'creative' entries — the host app this server drives. */
   requiresApp?: CreativeAppId;
+  /**
+   * Present for 'remote' entries that require a bearer key. Tells the UIs to show
+   * a key field + (optional) a one-click demo-key button + a register link — the
+   * server spec above NEVER carries a key, so a keyless one-click add is invalid.
+   */
+  auth?: {
+    header: string;
+    keyPrefix: string;
+    demoKeyUrl?: string;
+    registerUrl?: string;
+  };
 }
 
 export interface CatalogResult {
@@ -243,7 +255,93 @@ export function buildCatalog(platform: NodeJS.Platform = process.platform): Cata
     });
   }
 
+  // 4) remote — hosted MCP endpoints (SyntheticMem, …) that need a per-agent
+  // bearer key. The server spec carries NO key (no secret in the shared catalog);
+  // `auth` tells the UIs to collect a key / offer a demo key before enabling.
+  for (const entry of getRemoteCatalog()) {
+    servers.push({
+      id: entry.id,
+      name: entry.name,
+      kind: 'remote',
+      transport: 'http',
+      server: remoteServerSpec(entry),
+      description: entry.description,
+      experimental: false,
+      auth: {
+        header: entry.authHeader,
+        keyPrefix: entry.keyPrefix,
+        demoKeyUrl: entry.demoKeyUrl,
+        registerUrl: entry.registerUrl,
+      },
+    });
+  }
+
   return { servers };
+}
+
+// ---------------------------------------------------------------------------
+// Remote-server key handling — fetch a free ephemeral demo key, and write a
+// remote catalog server (SyntheticMem) with its Authorization header. The key is
+// NEVER logged; only a masked form is ever printed.
+// ---------------------------------------------------------------------------
+
+export interface DemoKeyResult {
+  key: string;
+  mcpUrl?: string;
+  ttlHours?: number;
+}
+
+/**
+ * POST the remote server's demo-key endpoint for a free, anonymous, ephemeral key.
+ * Throws a readable error on a non-2xx (incl. the 429 rate limit) or a response
+ * that doesn't carry a plausible key. Uses the global `fetch` (Node 18+).
+ */
+export async function fetchRemoteDemoKey(entry: RemoteCatalogEntry): Promise<DemoKeyResult> {
+  if (!entry.demoKeyUrl) { throw new Error(`"${entry.id}" has no demo-key endpoint.`); }
+  let res: Response;
+  try {
+    res = await fetch(entry.demoKeyUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: '{}',
+    });
+  } catch (e) {
+    throw new Error(`could not reach ${entry.demoKeyUrl}: ${(e as Error).message}`);
+  }
+  if (!res.ok) {
+    if (res.status === 429) {
+      throw new Error('demo-key rate limit reached (5/hour per IP) — try again later, or paste an existing key.');
+    }
+    throw new Error(`demo-key request failed (HTTP ${res.status}).`);
+  }
+  let data: unknown;
+  try { data = await res.json(); } catch { throw new Error('demo-key response was not valid JSON.'); }
+  const obj = (data && typeof data === 'object') ? data as Record<string, unknown> : {};
+  const key = typeof obj.key === 'string' ? obj.key.trim() : '';
+  if (!key || !key.startsWith(entry.keyPrefix)) {
+    throw new Error(`demo-key response did not include a valid ${entry.keyPrefix}… key.`);
+  }
+  return {
+    key,
+    mcpUrl: typeof obj.mcp_url === 'string' ? obj.mcp_url : undefined,
+    ttlHours: typeof obj.ttl_hours === 'number' ? obj.ttl_hours : undefined,
+  };
+}
+
+/** Write a remote catalog server (with its bearer key) into .mcp.json + propagate. Key never logged. */
+function enableRemote(root: string, entry: RemoteCatalogEntry, key: string, opts?: { demo?: boolean; ttlHours?: number }): void {
+  const server = remoteServerSpec(entry, key);
+  server._meta = { ...(server._meta || {}), catalogId: entry.id };
+  const user = loadProjectUserMcp(root);
+  user[entry.id] = server;
+  saveProjectUserMcp(root, user);
+  sync(root);
+  log.success(`Added MCP server "${entry.id}" (${entry.url}) with key ${maskKey(key)} and propagated to all providers.`);
+  if (opts?.demo) {
+    const ttl = opts.ttlHours ?? 24;
+    log.warn(`⚠  This is an EPHEMERAL demo key — memories saved under it expire in ~${ttl}h.`);
+    log.gray(`   Register at ${entry.registerUrl} for a permanent key, then re-add with --key <your key>.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -376,24 +474,55 @@ export function mcpCommand(program: Command): void {
   // autodev mcp add <name> [options] [path]
   cmd
     .command('add <name> [path]')
-    .description('Add a user MCP server (stdio via --command, or remote via --url)')
+    .description('Add a user MCP server (stdio via --command, remote via --url, or a known catalog server by name + --key/--demo-key)')
     .option('--command <c>', 'stdio launcher (e.g. uvx, npx, python)')
     .option('--arg <a>', 'stdio argument (repeatable; use --arg=-y for dash-prefixed values)', collect, [])
     .option('--env <kv>', 'stdio env var KEY=VALUE (repeatable)', collect, [])
     .option('--url <u>', 'remote MCP endpoint URL (http/sse)')
     .option('--header <kv>', 'remote header KEY=VALUE (repeatable)', collect, [])
     .option('--sse', 'remote transport is SSE (default http)')
-    .action((name: string, p: string | undefined, opts: {
+    .option('--key <k>', 'bearer key for a known remote catalog server (e.g. a SyntheticMem agt_ key)')
+    .option('--demo-key', 'fetch a free ephemeral key for a known remote catalog server (SyntheticMem)')
+    .action(async (name: string, p: string | undefined, opts: {
       command?: string; arg?: string[]; env?: string[];
       url?: string; header?: string[]; sse?: boolean;
+      key?: string; demoKey?: boolean;
     }) => {
       const root = resolveRoot(p);
+
+      // Catalog shortcut: `mcp add <knownRemote>` (no --command/--url) writes the
+      // remote server from the catalog, injecting the user's bearer key. This is
+      // the single, CLI-owned writer the app + extension reuse — not a parallel one.
+      if (!opts.command && !opts.url) {
+        const remote = remoteCatalogEntry(name);
+        if (remote) {
+          let key = (opts.key ?? '').trim();
+          let usedDemo = false;
+          let ttlHours: number | undefined;
+          if (!key && opts.demoKey) {
+            try {
+              const demo = await fetchRemoteDemoKey(remote);
+              key = demo.key; usedDemo = true; ttlHours = demo.ttlHours;
+            } catch (e) {
+              log.error(`Could not fetch a demo key: ${(e as Error).message}`);
+              process.exit(1);
+            }
+          }
+          if (!key) {
+            log.error(`"${name}" is a remote server that needs a key. Pass --key <${remote.keyPrefix}…> (register at ${remote.registerUrl}) or --demo-key for a free 24h key.`);
+            process.exit(1);
+          }
+          enableRemote(root, remote, key, { demo: usedDemo, ttlHours });
+          return;
+        }
+      }
+
       if (opts.command && opts.url) {
         log.error('Provide EITHER --command (stdio) OR --url (remote), not both.');
         process.exit(1);
       }
       if (!opts.command && !opts.url) {
-        log.error('Provide --command <c> for a stdio server or --url <u> for a remote server.');
+        log.error('Provide --command <c> for a stdio server, --url <u> for a remote server, or a known catalog name (e.g. syntheticmem) with --key/--demo-key.');
         process.exit(1);
       }
       let entry: McpJsonEntry;
@@ -480,6 +609,48 @@ export function mcpCommand(program: Command): void {
       log.plain('');
       log.gray('  Built-ins are the always-applied baseline (toggle via mcp enable/disable).');
       log.gray('  Add a common/creative one with:  autodev mcp add <name> --command <c> --arg <a>');
+    });
+
+  // autodev mcp demo-key [--json] [--server <id>]
+  // Fetch a free ephemeral key for a remote catalog server (SyntheticMem). Used
+  // by the app/extension "Get a free 24h demo key" button to fill the key field.
+  cmd
+    .command('demo-key')
+    .description('Fetch a free ephemeral (24h) demo key for a remote catalog server (default: syntheticmem)')
+    .option('--json', 'Output { key, mcp_url, ttl_hours } as JSON (for the app/extension to consume)')
+    .option('--server <id>', 'Remote catalog server id', 'syntheticmem')
+    .action(async (opts: { json?: boolean; server?: string }) => {
+      const id = (opts.server || 'syntheticmem').trim();
+      const remote = remoteCatalogEntry(id);
+      if (!remote) {
+        log.error(`"${id}" is not a known remote catalog server.`);
+        process.exit(1);
+      }
+      let demo;
+      try {
+        demo = await fetchRemoteDemoKey(remote);
+      } catch (e) {
+        if (opts.json) {
+          process.stdout.write(JSON.stringify({ error: (e as Error).message }) + '\n');
+        } else {
+          log.error(`Could not fetch a demo key: ${(e as Error).message}`);
+        }
+        process.exit(1);
+        return;
+      }
+      if (opts.json) {
+        // The demo key is ephemeral + requested explicitly; emit it for the UI to
+        // fill its field. This is the command's RESULT, not a log line.
+        process.stdout.write(JSON.stringify({
+          key: demo.key,
+          mcp_url: demo.mcpUrl ?? remote.url,
+          ttl_hours: demo.ttlHours ?? 24,
+        }) + '\n');
+        return;
+      }
+      log.success(`Fetched a free demo key for ${remote.name} (${maskKey(demo.key)}, ~${demo.ttlHours ?? 24}h).`);
+      log.plain(`  Enable it with:  autodev mcp add ${id} --demo-key`);
+      log.gray(`  (or paste this key into the app/extension SyntheticMem field; register at ${remote.registerUrl} to keep memories permanently)`);
     });
 
   // autodev mcp gimp-install-plugin [dir]

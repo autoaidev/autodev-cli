@@ -20,7 +20,7 @@ import { runClaudeCompact, runClaudeClear } from './providers/claudeCliProvider'
 import { runClaudeTuiCompact, runClaudeTuiClear, getClaudeTuiLatestSessionId, isClaudeTuiBusy, getClaudeTuiLastActivity, forceIdleClaudeTui, steerClaudeTui, closeClaudeTuiClient, claudeCliPersistentEnabled } from './providers/claudeTuiProvider';
 import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, readCopilotSdkOutputSince, closeCopilotSdkSession, closeAllCopilotSdkSessions, steerCopilotSdk, copilotCliPersistentEnabled } from './providers/copilotSdkProvider';
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk, opencodeCliPersistentEnabled, opencodeAcpEnabled, hasOpencodeAcpSession, steerOpencodeAcpTracked, ensureOpencodeAcpSteer } from './providers/opencodeSdkProvider';
-import { isGrokTuiBusy, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy, grokAcpEnabled, hasGrokAcpSession, steerGrokAcpTracked, ensureGrokAcpSteer } from './providers/grokTuiProvider';
+import { isGrokTuiBusy, getGrokTuiLastActivity, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy, grokAcpEnabled, hasGrokAcpSession, steerGrokAcpTracked, ensureGrokAcpSteer } from './providers/grokTuiProvider';
 import { enqueuePendingSteer, readPendingSteers, removePendingSteer } from './pendingSteers';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
@@ -58,6 +58,16 @@ function usesClaudeTuiClient(p?: string): boolean { return p === 'claude-tui' ||
 function usesCopilotSdkSession(p?: string): boolean { return p === 'copilot-sdk' || copilotCliIsPersistent(p); }
 /** Provider runs on the persistent opencode-sdk server (native or opencode-cli routed). */
 function usesOpencodeSdkServer(p?: string): boolean { return p === 'opencode-sdk' || opencodeCliIsPersistent(p); }
+/** Provider runs on the persistent grok ACP session (`grok agent stdio`, kind 'sdk').
+ *  Like opencode-sdk, ONE long-lived process serves every turn — no per-turn child
+ *  CLI is spawned, so the turn completes when AcpSession.runTurn() RESOLVES (its
+ *  busy flag clears) rather than when a per-message exit file appears. The
+ *  exit-file/sentinel fallback below is a per-turn-spawn concept that ACP never
+ *  satisfies, so grok-acp must be carved out of it. grok-cli/grok-tui are NOT
+ *  included: they preserve the exit-file contract byte-for-byte even over ACP
+ *  (grok-tui tracked by its own busy flag at line ~1790), so they stay on the
+ *  legacy path unchanged. */
+export function usesGrokAcpSession(p?: string): boolean { return p === 'grok-acp'; }
 
 // ---------------------------------------------------------------------------
 // TaskLoopRunner — mirrors PHP Loop.php
@@ -1776,6 +1786,15 @@ export class TaskLoopRunner {
         if (usesOpencodeSdkServer(provider)) {
           return isOpencodeSdkBusy(this._workspaceRoot);
         }
+        // grok-acp: a PERSISTENT ACP session (`grok agent stdio`). Its turn is
+        // tracked by the ACP session's in-memory busy flag (set for the whole
+        // runTurn, cleared when it resolves) — the honest signal, exactly like the
+        // sdk siblings above. The exit-file heuristic below would read STALE-TRUE
+        // between turns (the per-message exit file is only written when runTurn
+        // resolves), so grok-acp must use the busy flag here too.
+        if (usesGrokAcpSession(provider)) {
+          return isGrokAcpBusy(this._workspaceRoot);
+        }
         // grok-tui: like claude-tui, it runs a PERSISTENT session (tmux PTY, or a
         // headless `grok --resume` spawn when tmux is unavailable) whose turn is
         // tracked by an in-memory busy flag cleared at the turn's finish() on EVERY
@@ -2242,6 +2261,36 @@ export class TaskLoopRunner {
             this._cb?.log('⚠️ OpenCode SDK turn: no activity for 30 minutes — force-clearing busy state and moving on');
             forceIdleOpencodeSdk(this._workspaceRoot);
           }
+        } else if (this._workspaceRoot && usesGrokAcpSession(activeProvider)) {
+          // grok-acp: a PERSISTENT ACP session (`grok agent stdio`). No per-turn
+          // child CLI is spawned, so the exit-file/sentinel branch below is
+          // meaningless here — the turn is complete when AcpSession.runTurn()
+          // RESOLVES (its busy flag clears; sendGrokAcpPrompt also writes the
+          // exit file 0/1 at that point, which onCliExit still reads to classify
+          // clean/error). We therefore wait on the busy flag — the same signal the
+          // sdk siblings use — instead of polling for an exit file and then warning
+          // "CLI exit file never written" (spurious for ACP) and adding the 30s
+          // exit-file latency. runTurn has its own activity-based watchdog (it
+          // always resolves), so this is a backstop; reset the inactivity deadline
+          // on streamed activity so a long-but-active turn is never cut short
+          // (mirrors the claude-tui / opencode-sdk branches above).
+          const INACTIVITY_MS_ACP = 30 * 60_000;
+          let lastSeenActivity = getGrokTuiLastActivity(this._workspaceRoot);
+          let acpDeadline = Date.now() + INACTIVITY_MS_ACP;
+          while (isGrokAcpBusy(this._workspaceRoot) && Date.now() < acpDeadline) {
+            if (this._state !== 'running') { break; }
+            await this._sleepAbortable(500);
+            const nowActivity = getGrokTuiLastActivity(this._workspaceRoot);
+            if (nowActivity > lastSeenActivity) {
+              lastSeenActivity = nowActivity;
+              acpDeadline = Date.now() + INACTIVITY_MS_ACP;
+            }
+          }
+          if (isGrokAcpBusy(this._workspaceRoot)) {
+            this._cb?.log('⚠️ Grok ACP turn: no activity for 30 minutes — moving on');
+          }
+          // NO sentinel write: runTurn wrote the real exit code when it resolved,
+          // and a persistent session has no trailing `echo $? > exitFile` to miss.
         } else if (this._workspaceRoot && activeProvider && PROVIDERS[activeProvider]?.isCli) {
           const exitFile = exitFilePath(this._workspaceRoot, activeProvider);
           // Do NOT clear the file here. Each dispatch allocates a fresh

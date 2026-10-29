@@ -2103,7 +2103,15 @@ export function sendGrokAcpPrompt(
   }
   _busyRoots.add(root);
   if (showOutput) { try { showOutput(); } catch { /* ignore */ } }
-  const sink = (text: string): void => { try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ } };
+  // Bump the per-root activity heartbeat on every streamed chunk so
+  // getGrokTuiLastActivity() reflects the ACP turn too. The taskLoop's grok-acp
+  // completion wait uses it to reset its inactivity deadline, so a long-but-active
+  // turn is never cut off. (grok-cli/grok-tui complete via the exit file and do not
+  // read this on the ACP path, so this only makes the heartbeat accurate.)
+  const sink = (text: string): void => {
+    try { fs.appendFileSync(stdoutFile, text, 'utf8'); } catch { /* ignore */ }
+    _lastActivityMs.set(root, Date.now());
+  };
   void (async () => {
     let sess: GrokAcpSession;
     try {

@@ -241,6 +241,10 @@ export class AcpSession {
    *  activity is healthy no matter how long it runs; only TOTAL SILENCE for the
    *  idle window is a stall. */
   private _lastActivityAt = 0;
+  /** True when the session was just session/load-RESTORED and its first turn has
+   *  not yet produced any activity — armed in _startup, cleared on the first real
+   *  _onUpdate. runTurn uses it to apply the short resume-first-activity deadline. */
+  private _resumeNeedsVerify = false;
   /** ALL outstanding session/prompt promises — the primary turn AND any steered
    *  (queued) continuation prompts. The turn is not "done" until this drains, so
    *  the loop keeps the agent WORKING through steers instead of going idle while
@@ -305,6 +309,23 @@ export class AcpSession {
   /** @deprecated back-compat shim — the watchdog is now activity-based (idle
    *  timeout). Returns the idle window so any external caller keeps working. */
   static maxRunMs(): number { return AcpSession.idleMs(); }
+
+  /** FIRST-ACTIVITY deadline (ms) for the first turn on a freshly session/load-
+   *  RESTORED session. Grok sometimes hangs in `waiting_for_model` right after a
+   *  session/load (resume) and produces NO activity at all — a true stall that the
+   *  15-min idle watchdog would only catch after 15 min. So the first turn after a
+   *  resume gets this MUCH shorter deadline: if it has produced ZERO activity by
+   *  then, treat the resume as poisoned, drop it, and recover with a fresh
+   *  session/new. Only the FIRST post-resume turn is subject to it; once any
+   *  activity lands the session is proven healthy and the normal idle watchdog
+   *  takes over. 0/negative disables it. Default 90s. */
+  static resumeFirstActivityMs(): number {
+    const raw = process.env['AUTODEV_ACP_RESUME_FIRST_ACTIVITY_MS'] ?? '';
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0) { return n; }
+    if (Number.isFinite(n) && n <= 0 && String(raw).trim() !== '') { return 0; } // disabled
+    return 90 * 1000;
+  }
 
   /** PURE watchdog verdict, extracted so the activity-reset logic is unit-testable
    *  deterministically without real timers. Cancels iff there has been NO agent
@@ -385,6 +406,9 @@ export class AcpSession {
         const r = await this._request('session/load', { sessionId: want, cwd: this.root, mcpServers: [] });
         if (!r.error) {
           this._sessionId = want;
+          // A restored session's FIRST turn gets the short resume-first-activity
+          // deadline (grok can hang in waiting_for_model after a session/load).
+          this._resumeNeedsVerify = true;
           this.hooks.log(`ACP: restored session ${want.slice(0, 8)}… (session/load, quiet) — context intact`);
         }
       } catch (err) {
@@ -565,6 +589,7 @@ export class AcpSession {
   private _onUpdate(u: AcpUpdate): void {
     if (this._loading) { return; } // Layer A.1: drop session/load replay silently
     this._bumpActivity(); // any live update = the turn is progressing → reset the idle watchdog
+    this._resumeNeedsVerify = false; // real activity ⇒ the resume is healthy; drop the short deadline
     if (u.kind === 'assistant') {
       this._turnHadOutput = true;
       if (this._sink) { try { this._sink(u.text); } catch { /* ignore */ } }
@@ -675,6 +700,16 @@ export class AcpSession {
       const first = idleMs > 0 ? idleMs : absMs;
       timer = setTimeout(tick, Math.max(50, Math.min(first, 2147483647)));
     });
+    // FIRST-ACTIVITY deadline for a freshly session/load-RESTORED session: if this
+    // resume's first turn produces ZERO activity within resumeMs, the resume is
+    // poisoned (grok waiting_for_model hang) — drop it so the caller recovers with a
+    // fresh session/new, instead of waiting out the 15-min idle watchdog.
+    let resumeTimer: NodeJS.Timeout | undefined;
+    const resumeMs = AcpSession.resumeFirstActivityMs();
+    const resumeDeadline = new Promise<'resume-stall'>((resolve) => {
+      if (!this._resumeNeedsVerify || resumeMs <= 0) { return; } // not a resume-verify turn → never fires
+      resumeTimer = setTimeout(() => { if (this._resumeNeedsVerify) { resolve('resume-stall'); } }, resumeMs);
+    });
     let res: AcpTurnResult;
     try {
       const outcome = await Promise.race([
@@ -687,12 +722,18 @@ export class AcpSession {
           return c;
         })(),
         watchdog,
+        resumeDeadline,
       ]);
       if (outcome === 'timeout') {
         this.hooks.log(`ACP: turn watchdog fired — ${timeoutReason} — cancelling + reconnecting`);
         try { this.cancel(); } catch { /* ignore */ }
         try { this.close(); } catch { /* ignore */ } // next turn respawns + session/load restores context
         res = { clean: false, stopReason: 'timeout', error: `turn watchdog: ${timeoutReason}` };
+      } else if (outcome === 'resume-stall') {
+        this.hooks.log(`ACP: resume stall — no activity ${resumeMs}ms after session/load (grok waiting_for_model hang); dropping the poisoned session for a fresh start`);
+        try { this.cancel(); } catch { /* ignore */ }
+        try { this.close(); } catch { /* ignore */ }
+        res = { clean: false, stopReason: 'resume-stall', error: 'resumed session produced no activity within the first-activity deadline — poisoned resume dropped' };
       } else {
         res = outcome;
       }
@@ -700,6 +741,7 @@ export class AcpSession {
       res = { clean: false, stopReason: 'exception', error: (err as Error)?.message ?? String(err) };
     } finally {
       if (timer) { clearTimeout(timer); }
+      if (resumeTimer) { clearTimeout(resumeTimer); }
     }
     // gpt-oss:20b empty-turn race: a clean end_turn can be followed a beat later
     // by the model's FINAL agent_message_chunk. If the turn ended clean but no

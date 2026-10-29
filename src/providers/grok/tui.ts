@@ -2149,6 +2149,23 @@ export function sendGrokAcpPrompt(
         res = await runTurnSafe(sess);
       } catch (err) { res = { clean: false, stopReason: 'poison-recover-failed', error: (err as Error)?.message ?? String(err) }; }
     }
+    // RESUME-STALL ESCAPE: a session/load-restored session produced ZERO activity
+    // within the first-activity deadline (grok hung in waiting_for_model after the
+    // resume). runTurn already cancelled+closed it. Drop the poisoned session id so
+    // we don't resume it again, start a FRESH session/new, and retry the prompt ONCE
+    // — recovering in ~90s instead of waiting out the 15-min idle watchdog.
+    if (res.stopReason === 'resume-stall') {
+      log('Grok ACP: resume stalled (no activity after session/load) — dropping the session id and retrying on a fresh session');
+      try { clearSessionId(root, providerId); } catch { /* ignore */ }
+      try { _acpSessions.get(root)?.close(); } catch { /* ignore */ }
+      _acpSessions.delete(root);
+      try {
+        sess = await ensureAcpSession(root, providerId, model, log, undefined);
+        await sess.ensureReady();
+        if (sess.sessionId) { try { saveSessionId(root, providerId, sess.sessionId); } catch { /* ignore */ } }
+        res = await runTurnSafe(sess);
+      } catch (err) { res = { clean: false, stopReason: 'resume-recover-failed', error: (err as Error)?.message ?? String(err) }; }
+    }
     if (!res.clean && res.error) {
       try { fs.appendFileSync(stdoutFile, `\n[Grok ACP: turn ended ${res.stopReason} — ${res.error}]\n`, 'utf8'); } catch { /* ignore */ }
       // AUTH failure mid-turn (token expired between turns): surface reauth_required

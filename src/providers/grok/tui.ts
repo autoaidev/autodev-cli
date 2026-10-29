@@ -133,6 +133,13 @@ const _tmuxSessions = new Map<string, TmuxSession>();
  */
 const _acpSessions = new Map<string, GrokAcpSession>();
 
+// The three grok variants that drive the persistent ACP / headless-fallback path.
+// grok-cli / grok-tui use it only when grokAcpEnabled(); grok-acp (1.4.196) is the
+// dedicated first-class provider that ALWAYS runs over the persistent ACP session.
+// All three share the one per-root _acpSessions map (keyed by root, not id), so
+// steering + liveness helpers work for grok-acp with no extra branching.
+type GrokPersistentProviderId = 'grok-cli' | 'grok-tui' | 'grok-acp';
+
 /** Roots where the leader backend FAILED to come up this run (e.g. the AF_UNIX
  *  socket never appeared — a known risk on Windows, where grok 1.0.41 has no TCP
  *  alternative to `--leader-socket`). Once a root is in here we STOP re-spawning a
@@ -1994,7 +2001,7 @@ function makeAcpHooks(root: string, log: (msg: string) => void): AcpHostHooks {
 
 /** Get (or lazily create) the NON-LEADER persistent ACP session for a root. */
 function getOrCreateAcpSession(
-  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
+  root: string, providerId: GrokPersistentProviderId, model: string | undefined, log: (msg: string) => void,
   resolvedSessionId: string | undefined,
 ): GrokAcpSession {
   let sess = _acpSessions.get(root);
@@ -2020,7 +2027,7 @@ function getOrCreateAcpSession(
  * because ensuring the leader spawns detached processes on a cold start.
  */
 async function ensureAcpSession(
-  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, log: (msg: string) => void,
+  root: string, providerId: GrokPersistentProviderId, model: string | undefined, log: (msg: string) => void,
   resolvedSessionId: string | undefined,
 ): Promise<GrokAcpSession> {
   if (leaderModeEnabled() && !_leaderUnavailable.has(root)) {
@@ -2053,7 +2060,7 @@ async function ensureAcpSession(
  * backend, clear the persisted id, drop the thin client — the caller then
  * re-ensures a FRESH leader with session/new.
  */
-function recoverLeaderPoison(root: string, providerId: 'grok-cli' | 'grok-tui', log: (msg: string) => void): void {
+function recoverLeaderPoison(root: string, providerId: GrokPersistentProviderId, log: (msg: string) => void): void {
   try { stopLeader(root, log); } catch { /* ignore */ }
   try { clearSessionId(root, providerId); } catch { /* ignore */ }
   _leaderUnavailable.delete(root); // a deliberate reap → allow one fresh leader spawn
@@ -2081,7 +2088,7 @@ export function sendGrokAcpPrompt(
   stdoutFile: string,
   exitFile: string,
   log: (msg: string) => void,
-  providerId: 'grok-cli' | 'grok-tui',
+  providerId: GrokPersistentProviderId,
   model?: string,
   showOutput?: () => void,
 ): void {
@@ -2204,7 +2211,7 @@ export function steerGrokAcpTracked(root: string, text: string, log: (msg: strin
  * live session.
  */
 export async function ensureGrokAcpSteer(
-  root: string, providerId: 'grok-cli' | 'grok-tui', model: string | undefined, text: string, log: (msg: string) => void,
+  root: string, providerId: GrokPersistentProviderId, model: string | undefined, text: string, log: (msg: string) => void,
 ): Promise<import('./GrokAcpSession').AcpTurnResult | null> {
   if (!grokAcpEnabled()) { return null; }
   const sess = await ensureAcpSession(root, providerId, model, log, undefined);
@@ -2374,11 +2381,11 @@ function sendGrokPersistentHeadless(
   stdoutFile: string,
   exitFile: string,
   log: (msg: string) => void,
-  providerId: 'grok-cli' | 'grok-tui',
+  providerId: GrokPersistentProviderId,
   model?: string,
   showOutput?: () => void,
 ): void {
-  const label = providerId === 'grok-cli' ? 'Grok CLI' : 'Grok TUI';
+  const label = providerId === 'grok-cli' ? 'Grok CLI' : providerId === 'grok-acp' ? 'Grok ACP' : 'Grok TUI';
   const PROBE_MS = envNum('AUTODEV_GROK_RESUME_PROBE_MS', 90_000);
   // Continuity is decided by whether grok has a session on disk for THIS cwd — the same
   // signal `grok --continue` itself uses — NOT a stored id (a stale/mismatched id was the

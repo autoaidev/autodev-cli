@@ -6,5 +6,5 @@
 export { ClaudeCliProvider, ClaudeTuiProvider } from '../claude/ProviderManager';
 export { CopilotCliProvider, CopilotSdkProvider } from '../copilot/ProviderManager';
 export { OpenCodeCliProvider, OpenCodeSdkProvider } from '../opencode/ProviderManager';
-export { GrokCliProvider, GrokTuiProvider } from '../grok/ProviderManager';
+export { GrokCliProvider, GrokTuiProvider, GrokAcpProvider } from '../grok/ProviderManager';
 export { DummyProvider, dummyProvider } from '../dummy/ProviderManager';

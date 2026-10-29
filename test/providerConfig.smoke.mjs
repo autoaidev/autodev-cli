@@ -147,7 +147,7 @@ const KIND = {
   'claude-cli': 'cli', 'claude-tui': 'tui',
   'copilot-cli': 'cli', 'copilot-sdk': 'sdk',
   'opencode-cli': 'cli', 'opencode-sdk': 'sdk',
-  'grok-cli': 'cli', 'grok-tui': 'tui',
+  'grok-cli': 'cli', 'grok-tui': 'tui', 'grok-acp': 'sdk',
   'dummy': 'sdk',
 };
 

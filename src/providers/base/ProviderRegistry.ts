@@ -9,7 +9,7 @@ import { ProviderId } from '../../providers';
 import { IProvider } from './contract';
 import {
   ClaudeCliProvider, CopilotCliProvider, OpenCodeCliProvider,
-  ClaudeTuiProvider, CopilotSdkProvider, OpenCodeSdkProvider, GrokCliProvider, GrokTuiProvider,
+  ClaudeTuiProvider, CopilotSdkProvider, OpenCodeSdkProvider, GrokCliProvider, GrokTuiProvider, GrokAcpProvider,
   dummyProvider,
 } from './implementations';
 
@@ -42,5 +42,6 @@ export const providerRegistry = new ProviderRegistry([
   new OpenCodeSdkProvider(),
   new GrokCliProvider(),
   new GrokTuiProvider(),
+  new GrokAcpProvider(),
   dummyProvider,
 ]);

@@ -146,7 +146,7 @@ export async function sendPromptToAi(
     // context accumulates across turns): grok-tui always was, and grok-cli now
     // resumes too (user-requested). Both ignore the global resumeSession toggle —
     // grok persistence is independent of it. Every other provider honors it.
-    const isGrok = providerId === 'grok-tui' || providerId === 'grok-cli';
+    const isGrok = providerId === 'grok-tui' || providerId === 'grok-cli' || providerId === 'grok-acp';
     const wantResume = isGrok ? true : settings.resumeSession;
     const storedSessionId = wantResume ? getSessionId(root, providerId) : undefined;
 

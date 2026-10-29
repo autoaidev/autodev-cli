@@ -36,7 +36,7 @@ import { isUserStopped } from '../core/stopMarker';
 // (autodev-app/src/main/pixelOffice.ts).
 const VALID_PROVIDERS = new Set([
   'claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk',
-  'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui',
+  'opencode-cli', 'opencode-sdk', 'grok-cli', 'grok-tui', 'grok-acp',
   'dummy',
 ]);
 

@@ -9,7 +9,7 @@ import { GrokProviderSessions } from './ProviderSessions';
 import { GrokProviderState } from './ProviderState';
 import { GrokProviderNormalizer } from './ProviderNormalizer';
 import { GrokProviderUsage } from './ProviderUsage';
-import { sendGrokCliPrompt, sendGrokTuiPrompt } from './tui';
+import { sendGrokCliPrompt, sendGrokTuiPrompt, sendGrokAcpPrompt } from './tui';
 import { applyMcpStartupEnv } from '../../core/mcpStartupTimeout';
 
 export class GrokCliProvider extends ProviderManager {
@@ -65,6 +65,53 @@ export class GrokTuiProvider extends ProviderManager {
     applyMcpStartupEnv('grok', req.settings);
     sendGrokTuiPrompt(req.root, req.combinedFile, req.resolvedSessionId, req.stdoutFile, req.exitFile,
       ctx.log, req.settings.grokModel || undefined, ctx.showOutput);
+    return {};
+  }
+}
+
+/**
+ * grok-acp — first-class provider for grok's PERSISTENT ACP session (1.4.196).
+ * Where grok-cli / grok-tui use the ACP transport only when grokAcpEnabled()
+ * (and otherwise fall back to headless / tmux), grok-acp ALWAYS drives one
+ * long-lived `grok agent … stdio` process via GrokAcpSession (GROK_ACP_SPEC):
+ * initialize → session/new|load → session/prompt → streamed session/update →
+ * turn result. The process STAYS ALIVE between turns and session/load restores
+ * context, so conversation state accumulates. Mirrors the opencode persistent
+ * pattern (an in-process long-lived session that spawns inside dispatch() and
+ * returns {} rather than a shell command) — hence ProviderKind 'sdk'. If the ACP
+ * handshake can't be established (older grok / transient spawn failure),
+ * sendGrokAcpPrompt transparently falls back to the headless one-shot path so
+ * nothing regresses. Reuses the grok family's events/normalizer ('grok-acp'),
+ * model key (grokModel, via the 'grok' prefix), and session-id resume.
+ */
+export class GrokAcpProvider extends ProviderManager {
+  readonly id: ProviderId = 'grok-acp';
+  readonly label = 'Grok ACP';
+  // 'sdk': a persistent in-process session (spawns inside dispatch, returns {}),
+  // like opencode-sdk — NOT a VS Code terminal ('tui') or a per-turn shell ('cli').
+  readonly kind: ProviderKind = 'sdk';
+  readonly family = 'grok';
+  readonly events = new GrokProviderEvents('grok-acp');
+  readonly models = new GrokProviderModels();
+  readonly sessions = new GrokProviderSessions();
+  readonly state = new GrokProviderState();
+  readonly normalizer = new GrokProviderNormalizer('grok-acp');
+  readonly usage = new GrokProviderUsage();
+
+  // Resume the cwd's grok session across turns (same as grok-tui / grok-cli):
+  // prefer the persisted id, fall back to the newest grok session dir on disk.
+  override resolveSession(root: string) {
+    return Promise.resolve(getSessionId(root, 'grok-acp') ?? getGrokLatestSessionId(root));
+  }
+
+  async dispatch(req: DispatchRequest, ctx: { log: Logger; showOutput?: () => void }): Promise<DispatchOutcome> {
+    // Honor GROK_MCP_STARTUP_TIMEOUT_SECS (grok ignores config.toml's value).
+    applyMcpStartupEnv('grok', req.settings);
+    // ALWAYS the persistent ACP path — never gated by grokAcpEnabled(): that is
+    // the whole point of this provider. sendGrokAcpPrompt spawns/reuses the
+    // per-root GrokAcpSession, streams the turn to stdoutFile, and writes exitFile.
+    sendGrokAcpPrompt(req.root, req.combinedFile, req.resolvedSessionId, req.stdoutFile, req.exitFile,
+      ctx.log, 'grok-acp', req.settings.grokModel || undefined, ctx.showOutput);
     return {};
   }
 }

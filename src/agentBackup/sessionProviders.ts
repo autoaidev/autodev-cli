@@ -241,7 +241,7 @@ class CopilotSdkSessionBackup implements SessionBackupProvider {
  */
 class GrokSessionBackup implements SessionBackupProvider {
   readonly id = 'grok';
-  readonly sessionStateKeys = ['grok-cli', 'grok-tui'] as const;
+  readonly sessionStateKeys = ['grok-cli', 'grok-tui', 'grok-acp'] as const;
   readonly portability: Portability = 'none';
   readonly note = 'grok-cli is stateless; grok-tui persists a resumable session id (workspace-local), but grok transcripts (~/.grok) are not captured.';
 

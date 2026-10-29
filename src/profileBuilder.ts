@@ -77,6 +77,7 @@ export const PROFILE_SECTIONS: ProfileSection[] = [
       'Assume every recipient is context-degraded (different session, never saw your reasoning) — write each A2A message (send_message) and each task/TODO.md hand-off so an agent who saw NONE of your run could act AND verify: state the goal, the exact artifact (path/command/ticket id/office slug), and the objective acceptance criterion. No "the file"/"that bug"/"as discussed" — those are context-gap tells.',
       'Read as a detector: on check_messages/get_tasks look for the tells of a degraded sender (vague referents, missing acceptance criterion, stale refs). If you spot a gap, recover it (check_messages/get_events/agent_profile) or send ONE clarifying send_message BEFORE acting — never act on a degraded instruction and propagate the error downstream.',
       'Close the loop verifiably: complete_task/status reports the objective result (what changed, where, how checked, pass/fail with command+output) — never a bare "done". A report a fresh reader can verify keeps the thread honest; a vague "done" is the context-gap tell.',
+      'complete_task is the MANDATORY last step of a finished task — never end a turn, go idle, or call wait_for_events with a task you finished still in-progress. The office posts the completion + XP only when YOU call complete_task; a finished task left open loses its result from the feed and strands your status on "working". So: when a task is verifiably done, call complete_task for it FIRST, THEN wait_for_events.',
     ],
   },
   {

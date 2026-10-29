@@ -1291,7 +1291,9 @@ export function mcpOperateCommand(program: Command): void {
             await officeTool('start_task', { task_id: t.id });
             const result = await runWorker(`You are working as the office agent in this workspace. Complete this task using your own tools (edit/create files as needed), then briefly summarize what you did.\n\nTASK: ${t.title}`);
             // The worker summary is stored + shown in the office task feed — redact secrets.
-            await officeTool('complete_task', { task_id: t.id, result: redactSecrets((result || 'Done.').slice(0, 1500)) });
+            // NB: the office complete_task reads `output` (not `result`) — passing
+            // `result` silently dropped the worker's summary. Use the right key.
+            await officeTool('complete_task', { task_id: t.id, output: redactSecrets((result || 'Done.').slice(0, 1500)) });
             logErr(`🤖 autonomy: completed task ${t.id} (${t.title.slice(0, 40)})`);
           }
 
@@ -1375,6 +1377,36 @@ export function mcpOperateCommand(program: Command): void {
       // line reader and the HTTP handler call this, so wait_for_events blocking,
       // tools/list augmentation, and notification forwarding all live in ONE place
       // regardless of transport.
+      // ── Task-completion reconciliation (fixes missing "🎉 completed +XP") ──────
+      // An operate-agent (grok/opencode) drives the office tools itself through this
+      // bridge; unlike claude it has NO autonomy worker that guarantees a terminal
+      // complete_task (the claude-only worker is above). Grok routinely finishes a
+      // task, marks its own plan/TODO done, and calls wait_for_events to idle —
+      // WITHOUT an explicit complete_task — so the office task stays in-progress and
+      // the completion bubble/XP never posts. We observe start_task/complete_task as
+      // they proxy through, and when the agent goes to wait (wait_for_events: its
+      // "I'm done, now waiting" signal, per the operate contract "handle tasks, THEN
+      // wait") we auto-complete any task it started THIS SESSION and never completed.
+      const startedTasks = new Set<string>();
+      const taskIdOf = (req: { params?: unknown }): string | null => {
+        const a = (req.params as { arguments?: { task_id?: unknown } } | undefined)?.arguments;
+        const id = a?.task_id;
+        return typeof id === 'string' && id ? id : null;
+      };
+      const reconcileOpenTasks = async (): Promise<void> => {
+        if (startedTasks.size === 0) { return; }
+        for (const taskId of [...startedTasks]) {
+          startedTasks.delete(taskId);
+          try {
+            await callOffice({ id: `auto-complete-${++wsReqSeq}`, method: 'tools/call', params: { name: 'complete_task', arguments: {
+              task_id: taskId,
+              output: 'Task auto-finalized: the agent finished its work and began waiting for new events without an explicit complete_task.',
+            } } });
+            logErr(`🤖 reconcile: auto-completed task ${taskId} left in-progress before the agent went to wait`);
+          } catch { /* best effort — never block the agent's wait on reconciliation */ }
+        }
+      };
+
       const dispatch = async (req: { id?: unknown; method?: string; params?: unknown }): Promise<Record<string, unknown> | null> => {
         // Notifications (no id) are one-way — nothing to reply. Forward the
         // handshake ones opportunistically but never return a response for them.
@@ -1393,6 +1425,10 @@ export function mcpOperateCommand(program: Command): void {
         if (req.method === 'tools/call' && params?.name === 'wait_for_events') {
           inflight++;
           try {
+            // The agent is signalling it has handled its work and is going to wait —
+            // finalize any task it started this session but never completed, so the
+            // office posts the completion + XP instead of leaving it stuck working.
+            await reconcileOpenTasks();
             const secs = Math.max(1, Math.min(55, Number(params?.arguments?.timeout_seconds) || 25));
             if (eventQueue.length === 0) { await waitForEvent(secs * 1000); }
             const events = eventQueue.splice(0, eventQueue.length);
@@ -1537,6 +1573,14 @@ export function mcpOperateCommand(program: Command): void {
           if (req.method === 'tools/list') {
             const result = res['result'] as { tools?: unknown[] } | undefined;
             if (result && Array.isArray(result.tools)) { result.tools.push(WAIT_TOOL, ASK_USER_TOOL, ...GRAPH_TOOLS); }
+          }
+          // Track the agent's own start_task/complete_task so reconcileOpenTasks can
+          // finalize anything it starts but never completes (only on a successful
+          // office call — a rejected start_task never put the task in-progress).
+          if (req.method === 'tools/call' && !res['error']) {
+            const tid = taskIdOf(req);
+            if (tid && params?.name === 'start_task') { startedTasks.add(tid); }
+            else if (tid && params?.name === 'complete_task') { startedTasks.delete(tid); }
           }
           return res;
         } catch (e) {

@@ -317,7 +317,12 @@ export async function fetchRemoteDemoKey(entry: RemoteCatalogEntry): Promise<Dem
   let data: unknown;
   try { data = await res.json(); } catch { throw new Error('demo-key response was not valid JSON.'); }
   const obj = (data && typeof data === 'object') ? data as Record<string, unknown> : {};
-  const key = typeof obj.key === 'string' ? obj.key.trim() : '';
+  // SyntheticMem (and its ProvisionController family) return the minted key as
+  // `token`; read that canonically, with `key` as a back-compat fallback.
+  const rawKey = typeof obj.token === 'string' ? obj.token
+    : typeof obj.key === 'string' ? obj.key
+    : '';
+  const key = rawKey.trim();
   if (!key || !key.startsWith(entry.keyPrefix)) {
     throw new Error(`demo-key response did not include a valid ${entry.keyPrefix}… key.`);
   }

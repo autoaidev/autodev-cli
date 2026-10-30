@@ -10,10 +10,17 @@
 // warning and wrote an 'unknown' sentinel. This carved grok-acp onto the same
 // busy-flag completion path the other persistent 'sdk' providers already use.
 //
+// 1.4.202 GENERALIZATION: grok-cli/grok-tui route dispatch through the SAME persistent
+// `sendGrokAcpPrompt` as grok-acp when grokAcpEnabled(), so they hit the SAME 30s
+// exit-file stall at each turn boundary. The predicate now carves them out too — but
+// only over the ACP session (grokAcpEnabled()); the legacy one-shot/tmux path is
+// unchanged.
+//
 // This test asserts:
-//   (1) the loop PREDICATE usesGrokAcpSession() selects ONLY grok-acp — the
-//       per-turn-CLI providers (claude/grok/copilot/opencode *-cli, grok-tui)
-//       are NOT carved out and stay on the exit-file path unchanged;
+//   (1) the loop PREDICATE usesGrokAcpSession(): grok-acp is ALWAYS carved out;
+//       grok-cli/grok-tui are carved out when grokAcpEnabled() (persistent ACP ON)
+//       and stay on the exit-file path when it is disabled; all other providers
+//       (claude/copilot/opencode *, undefined) are never carved out;
 //   (2) grok-acp is isCli:true (so WITHOUT the carve-out it WOULD have fallen
 //       into the exit-file+sentinel branch — documenting WHY the branch exists);
 //   (3) the signal the loop now waits on — AcpSession.isBusy() — is true for the
@@ -29,7 +36,17 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE = path.join(__dirname, 'fixtures', 'fakeAcpAgent.mjs');
 
+// Deterministic grokAcpEnabled() seam — set BEFORE importing taskLoop/grok so the
+// module-load `GROK_BIN` const points at a fake `grok` whose `agent --help` output
+// contains "stdio". grokAgentStdioSupported() then resolves TRUE (and caches it) with
+// no real grok install, so the persistent-ACP branch is exercised offline. Env is
+// read on every grokAcpEnabled() call, so we can still toggle the disabled branch via
+// AUTODEV_GROK_PERSISTENT below without touching the cached probe.
+process.env.GROK_BIN = path.join(__dirname, 'fixtures', 'fakeGrokStdioBin.sh');
+delete process.env.AUTODEV_GROK_PERSISTENT; // default ON (supported ⇒ enabled)
+
 const { usesGrokAcpSession } = await import('../out/taskLoop.js');
+const { grokAcpEnabled } = await import('../out/providers/grokTuiProvider.js');
 const { PROVIDERS } = await import('../out/providers.js');
 const { AcpSession, decodeAcpUpdateStandard } = await import('../out/providers/acp/AcpSession.js');
 
@@ -41,15 +58,45 @@ async function waitFor(pred, ms = 4000) { const end = Date.now() + ms; while (Da
 
 console.log('grokAcpTurnCompletion: persistent-ACP turn-completion carve-out');
 
-// --- (1) predicate selects ONLY grok-acp -----------------------------------
-ok('usesGrokAcpSession is TRUE only for grok-acp', () => {
+// --- (1) predicate contract (1.4.202 generalization) -----------------------
+// grok-acp is ALWAYS carved onto the busy-flag path; grok-cli/grok-tui are carved
+// out too, but ONLY when they run over the persistent ACP session (grokAcpEnabled()).
+// The 1-arg (no-root) form answers the label question: grokAcpEnabled() for
+// grok-cli/grok-tui. The call sites pass a root to additionally require a LIVE ACP
+// session (hasGrokAcpSession) so an ACP→headless fallback stays on the exit-file
+// path; that is covered by the AcpSession busy-flag test (3) below.
+
+// --- enabled branch: persistent ACP is ON (fake GROK_BIN exposes `agent stdio`) ---
+ok('grokAcpEnabled() is TRUE with the fake stdio-capable grok (seam works)', () => {
+  assert.equal(grokAcpEnabled(), true);
+});
+ok('grok-acp is ALWAYS carved out (persistent-ACP by definition)', () => {
   assert.equal(usesGrokAcpSession('grok-acp'), true);
 });
-ok('per-turn-CLI providers are NOT carved out (stay on the exit-file path)', () => {
-  for (const p of ['grok-cli', 'grok-tui', 'claude-cli', 'claude-tui',
-                   'copilot-cli', 'copilot-sdk', 'opencode-cli', 'opencode-sdk',
-                   'dummy', undefined, '']) {
+ok('grok-cli / grok-tui ARE carved out when grokAcpEnabled()', () => {
+  assert.equal(usesGrokAcpSession('grok-cli'), true, 'grok-cli over ACP → busy-flag path');
+  assert.equal(usesGrokAcpSession('grok-tui'), true, 'grok-tui over ACP → busy-flag path');
+});
+ok('other / unknown providers are NEVER carved out (stay on the exit-file path)', () => {
+  for (const p of ['claude-cli', 'claude-tui', 'copilot-cli', 'copilot-sdk',
+                   'opencode-cli', 'opencode-sdk', 'dummy', undefined, '']) {
     assert.equal(usesGrokAcpSession(p), false, `${p} must not be treated as persistent-ACP`);
+  }
+});
+
+// --- disabled branch: AUTODEV_GROK_PERSISTENT forces the legacy one-shot path ---
+ok('grok-cli / grok-tui are NOT carved out when the persistent path is disabled', () => {
+  const prev = process.env.AUTODEV_GROK_PERSISTENT;
+  process.env.AUTODEV_GROK_PERSISTENT = 'off';
+  try {
+    assert.equal(grokAcpEnabled(), false, 'env override forces legacy headless/tmux');
+    assert.equal(usesGrokAcpSession('grok-cli'), false, 'grok-cli legacy → exit-file path');
+    assert.equal(usesGrokAcpSession('grok-tui'), false, 'grok-tui legacy → exit-file path');
+    // grok-acp is ACP by definition — the env toggle must never move it off the carve-out.
+    assert.equal(usesGrokAcpSession('grok-acp'), true, 'grok-acp stays carved out regardless');
+  } finally {
+    if (prev === undefined) { delete process.env.AUTODEV_GROK_PERSISTENT; }
+    else { process.env.AUTODEV_GROK_PERSISTENT = prev; }
   }
 });
 

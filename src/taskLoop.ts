@@ -33,6 +33,7 @@ import { EmailTaskPoller } from './emailPoller';
 import { resolveConfiguredModel } from './core/modelInfo';
 import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
 import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from './core/projectSkills';
+import { decideProfileInclusion, loadProfileTurns, saveProfileTurns, resetProfileTurns, DEFAULT_PROFILE_EVERY_N } from './core/profileCadence';
 import { ConfigManager } from './configManager';
 import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
 import { CLI_VERSION } from './version';
@@ -443,8 +444,12 @@ export class TaskLoopRunner {
   private _autoCompactCounter = 0;
   /** Counts completed tasks since the last session reset. */
   private _resetSessionCounter = 0;
-  /** Counts tasks dispatched since the last profile-included send. */
+  /** Counts tasks dispatched since the last profile-included send (diagnostics;
+   *  the authoritative cadence counter is persisted in .autodev/.profile-turns). */
   private _profileSentCounter = 0;
+  /** Set when a fresh session was just established (session reset): the next
+   *  dispatch must re-inject the profile because the carried context is gone. */
+  private _forceProfileNextTurn = false;
   /** Manages all "every N tasks" periodic action counters. */
   private readonly _periodicMgr = new PeriodicActionManager();
   // ── autoresearch verify_and_keep gate (opt-in via .autodev/CONTROL.md) ──
@@ -607,6 +612,7 @@ export class TaskLoopRunner {
     this._autoCompactCounter = 0;
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
+    this._forceProfileNextTurn = false;
     this._periodicMgr.resetAndPersist(callbacks.workspaceRoot);
     this._hookLineSeen.clear();
     // Load the opt-in control spec. Absent file ⇒ null ⇒ verify_and_keep gate,
@@ -2125,14 +2131,6 @@ export class TaskLoopRunner {
       this._currentTask = task.text;
       this._setState('running', task.text);
 
-      // Decide whether to include the full profile in this dispatch.
-      // Always include on first task; also re-include every profileEveryNTasks if set.
-      const profileInterval = settings.profileEveryNTasks ?? 0;
-      const includeProfile = this._iterations === 1
-        || (profileInterval > 0 && this._profileSentCounter >= profileInterval);
-      if (includeProfile) { this._profileSentCounter = 0; }
-      this._profileSentCounter++;
-
       // Resumed-turn signal for the message builder. Mirror the dispatcher's
       // `wantResume`: grok-cli/grok-tui always resume their workspace session;
       // every other provider resumes only when resumeSession is on. Past the first
@@ -2143,6 +2141,35 @@ export class TaskLoopRunner {
       const isResumingProvider = settings.provider === 'grok-tui' || settings.provider === 'grok-cli';
       const wantResume = isResumingProvider ? true : settings.resumeSession;
       const resumedTurn = wantResume && this._iterations > 1;
+
+      // Decide whether to inline the full profile/pillars in this dispatch.
+      // The profile is heavy; on a PERSISTENT/RESUMED session (wantResume) it stays
+      // in context from its last injection, so re-sending it every turn is pure
+      // waste — throttle it to every `profileEveryNTasks` turns (default 50). On a
+      // STATELESS turn (fresh context each turn, no resume) the agent genuinely
+      // needs the protocol every turn, so there it is sent every turn.
+      //
+      // The counter is PERSISTED to .autodev/.profile-turns so the cadence survives
+      // the agent's real execution model: a loop restart that resumes the same
+      // persistent session will NOT re-dump the profile (the user's "it sends the
+      // whole profile every message" report), and a per-turn-SPAWN provider still
+      // honors every-N instead of re-sending on every spawn. The very FIRST turn of
+      // a fresh workspace (counter absent → NEVER sentinel) still includes it.
+      const profileInterval = settings.profileEveryNTasks ?? DEFAULT_PROFILE_EVERY_N;
+      const prevProfileTurns = this._workspaceRoot ? loadProfileTurns(this._workspaceRoot) : -1;
+      const profileDecision = decideProfileInclusion({
+        turnsSinceProfile: prevProfileTurns,
+        profileInterval,
+        contextPersists: !!wantResume,
+        // A session the loop just reset/cleared has no carried context — force a
+        // re-inject for it. `_forceProfileNextTurn` is set by the session-reset path.
+        forceInclude: this._forceProfileNextTurn,
+      });
+      const includeProfile = profileDecision.includeProfile;
+      this._forceProfileNextTurn = false;
+      if (this._workspaceRoot) { saveProfileTurns(this._workspaceRoot, profileDecision.turnsSinceProfile); }
+      // Keep the legacy in-memory counter roughly in step (diagnostics only).
+      this._profileSentCounter = profileDecision.turnsSinceProfile;
 
       // Build prompt (needed even when not sending, for messageFile path)
       let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile, resumedTurn);
@@ -2726,6 +2753,11 @@ export class TaskLoopRunner {
             clearSessionId(this._workspaceRoot, rsProvider as import('./providers').ProviderId);
             this._cb?.log(`🔄 Session ID cleared — next task will start a new session`);
           }
+          // The fresh session has NO carried context, so the next dispatch must
+          // re-inject the profile/pillars (otherwise the every-N throttle would
+          // leave the new session protocol-less until the counter rolls over).
+          this._forceProfileNextTurn = true;
+          if (this._workspaceRoot) { resetProfileTurns(this._workspaceRoot); }
         }
 
         // --- Periodic actions: compact / pruneTodo / skill / memory / summary / etc. --

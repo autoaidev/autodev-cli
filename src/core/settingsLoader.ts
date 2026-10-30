@@ -243,9 +243,14 @@ export interface AutodevSettings {
    */
   summaryEveryNTasks: number;
   /**
-   * Re-send the full agent profile (includeProfile=true) every N completed tasks.
-   * 0 = only send on the first task of each loop start.
-   * Useful to keep long-running agents on protocol even in resumed sessions.
+   * Re-send the full agent profile/pillars (includeProfile=true) at most every N
+   * turns on a PERSISTENT/RESUMED session, where the profile stays in context from
+   * its last injection so re-sending every turn is pure waste. Default 50. The
+   * cadence counter is persisted to `.autodev/.profile-turns`, so the every-N
+   * schedule survives a loop restart / per-turn spawn (it is NOT re-dumped on every
+   * restart). 0 disables the periodic refresh (profile goes out only on the first
+   * turn of a fresh session). STATELESS turns (no resume) are never throttled — the
+   * profile is sent every turn there because the fresh context needs it.
    */
   profileEveryNTasks: number;
   /**
@@ -344,7 +349,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   maxStrandRetries: 3,
   pruneTodoEveryNTasks: 0,
   journalLearnEveryNTasks: 0,
-  profileEveryNTasks: 0,
+  profileEveryNTasks: 50,
   compactEveryNTasks: 0,
   skillEveryNTasks: 0,
   memoryEveryNTasks: 0,

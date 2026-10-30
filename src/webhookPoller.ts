@@ -188,6 +188,12 @@ export class WebhookPoller {
     }
   }
 
+  setOnSettingsUpdate(cb: (settings: Record<string, unknown>) => void): void {
+    if (this._impl instanceof WebSocketPoller) {
+      this._impl.setOnSettingsUpdate(cb);
+    }
+  }
+
   setOnExportRequest(cb: (agentId: string) => void): void {
     if (this._impl instanceof WebSocketPoller) {
       this._impl.setOnExportRequest(cb);

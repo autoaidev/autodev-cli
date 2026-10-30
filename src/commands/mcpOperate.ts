@@ -7,7 +7,7 @@ import * as readline from 'readline';
 import { spawn } from 'child_process';
 import { URL } from 'url';
 import { Command } from 'commander';
-import { loadSettingsForRoot } from '../core/settingsLoader';
+import { loadSettingsForRoot, mergeSettingsForRoot, whitelistRemoteSettingsUpdate } from '../core/settingsLoader';
 import { resolveConfiguredModel } from '../core/modelInfo';
 import { OfficeSocket } from '../officeSocket';
 import { foreignLoopOwner, readPresenceLock } from '../presenceGuard';
@@ -664,6 +664,34 @@ export function mcpOperateCommand(program: Command): void {
         }
       };
 
+      // ── Live settings toggle (settings_update frame) ─────────────────────────
+      // Lets the office remotely flip the mcpUpdateEnabled / skillUpdateEnabled
+      // opt-in gates for this bridge, without the user hand-editing settings.json.
+      //
+      // SECURITY: intentionally NOT gated — this frame IS the switch that flips
+      // those opt-ins. Trust boundary = the authenticated office WS channel (the
+      // same one carrying mcp_update / tasks / steers to this agent). A STRICT
+      // boolean whitelist means a frame can only set { mcpUpdateEnabled,
+      // skillUpdateEnabled } — never serverApiKey, provider, paths, etc. After
+      // persisting we reloadBridgeSettings() so the new gates take effect live.
+      const handleSettingsUpdate = (incoming: Record<string, unknown>): void => {
+        try {
+          const whitelisted = whitelistRemoteSettingsUpdate(incoming);
+          if (Object.keys(whitelisted).length === 0) {
+            logErr('⚙ settings_update ignored — no recognized keys (only mcpUpdateEnabled/skillUpdateEnabled are accepted)');
+            return;
+          }
+          mergeSettingsForRoot(cwd, whitelisted as Record<string, unknown>);
+          // Refresh the bridge's feature gates from disk so the flip is live
+          // (reloadBridgeSettings merges opts.* CLI flags over the fresh file).
+          reloadBridgeSettings();
+          const parts = Object.entries(whitelisted).map(([k, v]) => `${k}=${v}`).join(', ');
+          logErr(`⚙ settings_update applied: ${parts}`);
+        } catch (err) {
+          logErr(`⚠️ settings_update failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
       // ── Presence socket lifecycle (runtime-driven, self-healing) ─────────────
       // Whether the bridge holds the presence socket is decided at RUNTIME from
       // ACTUAL loop presence, NOT a static config flag. A co-located `autodev
@@ -803,6 +831,13 @@ export function mcpOperateCommand(program: Command): void {
             if (msgType === 'skill_update') {
               const skills = msg['skills'];
               if (Array.isArray(skills)) { handleSkillUpdate(skills); }
+              return;
+            }
+
+            // Live settings toggle from the office (flip mcp/skill opt-in gates).
+            if (msgType === 'settings_update') {
+              const settings = msg['settings'];
+              if (settings && typeof settings === 'object') { handleSettingsUpdate(settings as Record<string, unknown>); }
               return;
             }
 

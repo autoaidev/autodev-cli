@@ -468,3 +468,65 @@ export function loadSettingsForRoot(root: string): AutodevSettings {
     return { ...SETTINGS_DEFAULTS };
   }
 }
+
+/**
+ * Read the raw `.autodev/settings.json`, shallow-merge `partial` on top, and
+ * write it back as pretty (2-space) JSON — creating `.autodev/` if missing and
+ * preserving every other key already in the file (including ones this loader
+ * doesn't model, e.g. the documented aliases). Writes always go to the
+ * canonical path (`<root>/.autodev/settings.json`), migrating a legacy file.
+ *
+ * Crash-safe: a read/parse/write failure is swallowed (it never throws), so it
+ * is safe to call directly from a WS frame handler. Returns the fully-resolved
+ * settings after the write (`loadSettingsForRoot`), so callers see the merged,
+ * defaults-applied view.
+ */
+export function mergeSettingsForRoot(root: string, partial: Record<string, unknown>): AutodevSettings {
+  const writePath = settingsWritePath(root);
+  let raw: Record<string, unknown> = {};
+  try {
+    const readPath = settingsReadPath(root);
+    if (fs.existsSync(readPath)) {
+      raw = JSON.parse(fs.readFileSync(readPath, 'utf8')) as Record<string, unknown>;
+    }
+  } catch {
+    raw = {};
+  }
+  const merged = { ...raw, ...partial };
+  try {
+    fs.mkdirSync(path.dirname(writePath), { recursive: true });
+    fs.writeFileSync(writePath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  } catch {
+    // Never throw out of a frame handler — a failed persist just means the
+    // live-applied change won't survive a restart; the caller still logs.
+  }
+  return loadSettingsForRoot(root);
+}
+
+/**
+ * Keys a remote `settings_update` WS frame is ALLOWED to set. STRICT whitelist:
+ * these are the only two opt-in gates the authenticated office channel may flip
+ * remotely. A frame can therefore never reach arbitrary settings such as
+ * serverApiKey, provider, wsUrl or filesystem paths.
+ */
+export const REMOTE_SETTINGS_UPDATE_WHITELIST = ['mcpUpdateEnabled', 'skillUpdateEnabled'] as const;
+
+/**
+ * Coerce a remote `settings_update` payload down to ONLY the whitelisted
+ * boolean flags. Any other key is dropped; each present value is coerced to a
+ * strict boolean (`=== true`), so a non-boolean (e.g. `"true"`, `1`) becomes
+ * `false` rather than a truthy string. Keys that are absent stay absent, so the
+ * caller can tell "set it false" from "don't touch it".
+ */
+export function whitelistRemoteSettingsUpdate(
+  raw: Record<string, unknown>,
+): Partial<Pick<AutodevSettings, 'mcpUpdateEnabled' | 'skillUpdateEnabled'>> {
+  const out: Partial<Pick<AutodevSettings, 'mcpUpdateEnabled' | 'skillUpdateEnabled'>> = {};
+  if (!raw || typeof raw !== 'object') { return out; }
+  for (const key of REMOTE_SETTINGS_UPDATE_WHITELIST) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) {
+      out[key] = raw[key] === true;
+    }
+  }
+  return out;
+}

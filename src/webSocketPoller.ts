@@ -50,6 +50,7 @@ export class WebSocketPoller {
   private _onCommand: ((cmd: string) => void) | null = null;
   private _onMcpUpdate: ((entries: Record<string, unknown>) => void) | null = null;
   private _onSkillUpdate: ((skills: unknown[]) => void) | null = null;
+  private _onSettingsUpdate: ((settings: Record<string, unknown>) => void) | null = null;
   private _onExportRequest: ((agentId: string) => void) | null = null;
   private _onRestoreRequest: ((agentId: string, downloadUrl: string) => void) | null = null;
   private _onExportConfig: ((exportEnabled: boolean, exportDailyBackup: boolean, agentId: string) => void) | null = null;
@@ -100,6 +101,9 @@ export class WebSocketPoller {
 
   /** Called when a skill_update frame arrives — receives the agent's full effective skill set. */
   setOnSkillUpdate(cb: (skills: unknown[]) => void): void { this._onSkillUpdate = cb; }
+
+  /** Called when a settings_update frame arrives — receives the raw `settings` object (whitelisted downstream). */
+  setOnSettingsUpdate(cb: (settings: Record<string, unknown>) => void): void { this._onSettingsUpdate = cb; }
 
   /** Called when an export_request frame arrives — agent should create + upload a backup. */
   setOnExportRequest(cb: (agentId: string) => void): void { this._onExportRequest = cb; }
@@ -484,6 +488,19 @@ export class WebSocketPoller {
       const skills = msg['skills'];
       if (Array.isArray(skills)) {
         this._onSkillUpdate?.(skills);
+      }
+      return;
+    }
+
+    // ── Settings update from pixel-office ────────────────────────────────────
+    // Lets the office remotely flip the mcpUpdateEnabled / skillUpdateEnabled
+    // opt-in gates. Deliberately ungated (it IS the switch for those gates);
+    // the handler applies a strict boolean whitelist. See _handleSettingsUpdate.
+
+    if (msgType === 'settings_update') {
+      const settings = msg['settings'];
+      if (settings && typeof settings === 'object') {
+        this._onSettingsUpdate?.(settings as Record<string, unknown>);
       }
       return;
     }

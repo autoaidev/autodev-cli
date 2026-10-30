@@ -9,7 +9,7 @@ import { buildPrompt } from './prompt';
 import { rebuildProfile } from './messageBuilder';
 import { writeMessageFile } from './messageBuilder';
 import { WebhookClient, WebhookEvent, sendDiscordBotMessage } from './webhook';
-import { loadSettingsForRoot, AutodevSettings, hasExplicitSetting, settingsWritePath } from './core/settingsLoader';
+import { loadSettingsForRoot, AutodevSettings, hasExplicitSetting, settingsWritePath, mergeSettingsForRoot, whitelistRemoteSettingsUpdate } from './core/settingsLoader';
 import { loadControlSpec, isGateActive, runVerify, isMechanicalFailure, matchesAnyGlob, ControlSpec } from './core/controlSpec';
 import { appendJournalRow } from './journal';
 import { IFileWatcher, IDisposable } from './core/adapters';
@@ -822,6 +822,7 @@ export class TaskLoopRunner {
       this._webhookPoller.setOnCommand((cmd) => this._handleCommand(cmd));
       this._webhookPoller.setOnMcpUpdate((entries) => this._handleMcpUpdate(entries));
       this._webhookPoller.setOnSkillUpdate((skills) => this._handleSkillUpdate(skills));
+      this._webhookPoller.setOnSettingsUpdate((s) => this._handleSettingsUpdate(s));
       this._webhookPoller.setOnExportRequest((agentId) => void this._handleExportRequest(agentId));
       this._webhookPoller.setOnRestoreRequest((agentId, downloadUrl) => void this._handleRestoreRequest(agentId, downloadUrl));
       this._webhookPoller.setOnExportConfig((exportEnabled, exportDailyBackup, agentId) => this._handleExportConfig(exportEnabled, exportDailyBackup, agentId));
@@ -1075,6 +1076,40 @@ export class TaskLoopRunner {
       this._cb?.log(`✅ skills synced — wrote ${written.length}, removed ${removed.length} (.claude/skills). Live-reloads on the next run — no restart.`);
     } catch (err) {
       this._cb?.log(`⚠️ skill update failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Handle settings_update pushed from pixel-office: live-flip the opt-in gates
+   * that control mcp_update / skill_update, so the office can enable them
+   * WITHOUT the user hand-editing .autodev/settings.json or restarting the loop.
+   *
+   * SECURITY — this frame is intentionally NOT gated by any opt-in setting: it
+   * IS the mechanism that flips those opt-ins on. Its trust boundary is the
+   * authenticated office WS channel — the very same channel that already
+   * delivers mcp_update, tasks and steering to this agent. A STRICT whitelist
+   * (whitelistRemoteSettingsUpdate) means a frame can only ever set the two
+   * booleans { mcpUpdateEnabled, skillUpdateEnabled } — never arbitrary
+   * settings such as serverApiKey, provider, wsUrl or filesystem paths.
+   */
+  private _handleSettingsUpdate(settings: Record<string, unknown>): void {
+    const root = this._workspaceRoot;
+    if (!root) return;
+    try {
+      const whitelisted = whitelistRemoteSettingsUpdate(settings);
+      if (Object.keys(whitelisted).length === 0) {
+        this._cb?.log('⚙ settings_update ignored — no recognized keys (only mcpUpdateEnabled/skillUpdateEnabled are accepted)');
+        return;
+      }
+      // Persist so the flip survives a restart…
+      mergeSettingsForRoot(root, whitelisted as Record<string, unknown>);
+      // …and apply live so a subsequent mcp_update/skill_update frame is honored
+      // immediately, with no restart. Only the whitelisted keys are copied.
+      if (this._settings) { Object.assign(this._settings, whitelisted); }
+      const parts = Object.entries(whitelisted).map(([k, v]) => `${k}=${v}`).join(', ');
+      this._cb?.log(`⚙ settings_update applied: ${parts}`);
+    } catch (err) {
+      this._cb?.log(`⚠️ settings_update failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

@@ -1341,10 +1341,15 @@ export class TaskLoopRunner {
       }
     }
 
-    // Persistent-process grok (ACP `grok agent stdio`, grok-cli AND grok-tui):
-    // a mid-run steer is a QUEUED session/prompt delivered to the LIVE process —
-    // it never exits, so the steer reaches the same long-lived agent.
-    if (root && turnInFlight && (provider === 'grok-cli' || provider === 'grok-tui') && isGrokAcpBusy(root)) {
+    // Persistent-process grok (ACP `grok agent stdio`): grok-acp directly, plus
+    // grok-cli/grok-tui when routed over the persistent ACP session. A mid-run
+    // steer is a QUEUED session/prompt delivered to the LIVE process — it never
+    // exits, so the steer reaches the same long-lived agent IMMEDIATELY instead
+    // of being buffered to the turn boundary below. (grok-acp — the explicit
+    // provider added after this branch was first written — was omitted from the
+    // literal grok-cli/grok-tui check, so its steers wrongly fell through to the
+    // boundary buffer; usesGrokAcpSession() covers all three uniformly.)
+    if (root && turnInFlight && usesGrokAcpSession(provider, root) && isGrokAcpBusy(root)) {
       if (steerGrokAcp(root, clean, msg => this._cb?.log(msg))) {
         this._cb?.log(`⚡ Steered mid-turn (grok ACP): "${clean.slice(0, 80)}"`);
         onDelivered?.();

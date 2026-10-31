@@ -233,27 +233,42 @@ export function firstTurnSystemReminder(root: string): string {
  *
  * The office can edit an agent's SOUL.md live (via the mcp-operate file browser, or
  * a persona change on connect). This fires a `<system-reminder>` on ANY turn whose
- * SOUL.md mtime advanced past the last one we recorded — so an identity edit made
+ * SOUL.md CONTENT changed since the last one we recorded — so an identity edit made
  * mid-session is actually adopted, not ignored until the next fresh session.
  *
- * State is a tiny `.autodev/.soul-seen` marker (last-seen mtime). The FIRST time we
- * see a SOUL.md (no marker yet) we only record it and stay silent — the first-turn
- * reminder already tells the agent to read SOUL.md, and connect-time persona writes
- * must not trigger a spurious "it changed" on turn 1. Best-effort; never throws.
+ * Gated on a CONTENT HASH, not mtime. SOUL.md is re-touched every turn by callers
+ * that may rewrite it with IDENTICAL content (an office persona/skills sync, or the
+ * file-browser `write` action) — an mtime-only gate treated every such touch as a
+ * change and fired the reminder every single turn even when nothing actually changed.
+ * Hashing the content neutralizes mtime churn: the reminder fires only on a real edit.
+ *
+ * State is a tiny `.autodev/.soul-seen` marker holding the last-seen sha256 hex. The
+ * FIRST time we see a SOUL.md (no marker, or a legacy mtime-integer marker from the
+ * old gate) we only record the hash and stay silent — the first-turn reminder already
+ * tells the agent to read SOUL.md, and connect-time persona writes must not trigger a
+ * spurious "it changed" on turn 1. Best-effort; never throws.
  */
 export function soulUpdatedReminder(root: string): string {
   try {
     const soulPath = path.join(root, 'SOUL.md');
     if (!fs.existsSync(soulPath)) { return ''; }
-    const mtime = Math.floor(fs.statSync(soulPath).mtimeMs);
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(soulPath)).digest('hex');
     const marker = path.join(root, '.autodev', '.soul-seen');
-    let last = 0;
-    try { last = parseInt(fs.readFileSync(marker, 'utf8').trim(), 10) || 0; } catch { last = 0; }
-    if (mtime !== last) {
-      try { fs.mkdirSync(path.dirname(marker), { recursive: true }); fs.writeFileSync(marker, String(mtime), 'utf8'); } catch { /* best effort */ }
+    let last = '';
+    try { last = fs.readFileSync(marker, 'utf8').trim(); } catch { last = ''; }
+    // A valid prior hash is 64 hex chars. Anything else — an absent marker, or a
+    // legacy mtime integer written by the old gate — counts as "no prior hash", so
+    // we migrate it silently (record the hash, emit nothing) instead of firing a
+    // bogus "was just UPDATED" on the first turn after upgrade.
+    const hasPrior = /^[0-9a-f]{64}$/.test(last);
+    const changed = hasPrior && last !== hash;
+    // Persist the current hash whenever it differs from what's stored (first run,
+    // legacy-marker migration, or a real change) so the next turn compares fresh.
+    if (last !== hash) {
+      try { fs.mkdirSync(path.dirname(marker), { recursive: true }); fs.writeFileSync(marker, hash, 'utf8'); } catch { /* best effort */ }
     }
-    // No prior marker → first observation this session: record, stay silent.
-    if (last === 0 || mtime <= last) { return ''; }
+    // No prior hash (first observation / migration) or unchanged content → silent.
+    if (!changed) { return ''; }
     return [
       '<system-reminder>',
       'Your `SOUL.md` was just UPDATED (edited from the office). Re-read `SOUL.md` now and adopt the',

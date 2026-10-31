@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { log } from '../logger';
 import { applyWsUrl, applySetupUrl } from '../connect';
 import { ConfigManager } from '../configManager';
+import { writeFileSecure } from '../core/secureFile';
 
 interface ConnectOpts {
   url?: string;
@@ -41,7 +42,10 @@ export function connectCommand(program: Command): void {
           if (opts.sessionName) { cur.sessionName = opts.sessionName; log.gray(`  session name: ${opts.sessionName}`); }
           if (opts.fileBrowser) { cur.enableFileBrowser = true; log.gray('  file browser: enabled'); }
           if (opts.mcpOnly) { cur.mcpOnly = true; log.gray('  mode: MCP-only (operator MCP wired for a no-loop client)'); }
-          fs.writeFileSync(sp, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+          // Defense-in-depth: this file holds the serverApiKey/ws token the bind
+          // wrote, so write it 0600 (writeFileSecure) rather than a default-umask
+          // writeFileSync that would create a world-readable new file.
+          writeFileSecure(sp, JSON.stringify(cur, null, 2) + '\n');
         }
         // An MCP-only client never runs `autodev start`, so the task loop's
         // config sync never fires — wire the operator MCP into the provider

@@ -6,8 +6,9 @@ import * as path from 'path';
 import { VncSessionManager } from './vnc/manager';
 import { RdpSessionManager } from './rdp/manager';
 import { saveAttachment } from './messageBuilder';
-import { shortId } from './todo';
+import { shortId, parseTodo } from './todo';
 import { todoWriter } from './todoWriteManager';
+import { TodoTaskVerifier, TodoState } from './todoTaskVerifier';
 import { isKnownSlashCommand } from './core/commands';
 import { handleFbRequest } from './fileBrowser';
 import { handleGitRequest } from './git/gitRequest';
@@ -63,6 +64,12 @@ export class WebSocketPoller {
   private _seenOrder: string[] = [];
   private _seenDeliveriesFile: string | null = null;
   private static readonly MAX_SEEN_DELIVERIES = 2000;
+
+  // Verify-and-re-append backstop for pushed tasks. A delivered task is tracked
+  // here until its line is DURABLY present in TODO.md; a grok-acp turn that
+  // clobbers TODO.md is repaired on the next tick, and the task_ack is deferred
+  // until the line is confirmed present (so the office's 45s sweep stays armed).
+  private _todoVerifier: TodoTaskVerifier | null = null;
 
   // Heartbeat: send a WS Ping every 25 s and expect a Pong. If 2 pings in a
   // row come back without a pong (≈55 s), force-reconnect. Without this the
@@ -179,10 +186,37 @@ export class WebSocketPoller {
     } catch { /* best-effort persistence */ }
   }
 
+  /**
+   * Lazily build the verify-and-re-append poller (needs `_todoPath`, set in
+   * start()). Wires the TODO.md read, the idempotent re-append, and the deferred
+   * ack to this poller's real implementations.
+   */
+  private _verifier(): TodoTaskVerifier {
+    if (!this._todoVerifier) {
+      this._todoVerifier = new TodoTaskVerifier({
+        readState: (): TodoState => {
+          const present = new Set<string>();
+          const done = new Set<string>();
+          for (const t of parseTodo(this._todoPath)) {
+            if (!t.id) { continue; }
+            (t.status === 'done' ? done : present).add(t.id);
+          }
+          return { present, done };
+        },
+        appendIfAbsent: (id, payload) => todoWriter.appendIfAbsent(this._todoPath, payload, id).then(() => undefined),
+        sendAck: (dbTaskId) => this._sendTaskAck(dbTaskId),
+        onReappended: () => this._onTaskAppend?.(),
+        log: (m) => this._log(m),
+      });
+    }
+    return this._todoVerifier;
+  }
+
   /** Tear down the connection permanently. */
   destroy(): void {
     this._destroyed = true;
     this._stopHeartbeat();
+    this._todoVerifier?.stop();
     this._vncManager.stopAll();
     this._rdpManager.stopAll();
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
@@ -580,11 +614,15 @@ export class WebSocketPoller {
       const meta = (t['metadata'] as Record<string, unknown> | undefined) ?? {};
       if (taskId && this._seenTaskIds.has(taskId)) {
         this._log(`WS task already processed (id=${taskId}), skipping`);
-        // Already queued locally, but the office is still re-delivering it (faded) —
-        // that means our earlier arrival ack never landed. Re-ack so the sweep stops.
+        // Already queued locally, but the office is still re-delivering it (faded).
+        // If the verify poller is still tracking this task it has DELIBERATELY not
+        // acked yet (waiting for the TODO.md line to be durably present past a
+        // grok clobber) — do NOT short-circuit that ack here; the poller owns it.
+        // Otherwise our earlier ack never landed, so re-ack to stop the sweep.
         // Idempotent server-side; only for real DB tasks (metadata.taskId present).
         if (meta['event'] === 'user_message' && typeof meta['taskId'] === 'string') {
-          this._sendTaskAck(meta['taskId'] as string);
+          const dbId = meta['taskId'] as string;
+          if (!this._todoVerifier?.has(dbId)) { this._sendTaskAck(dbId); }
         }
         return;
       }
@@ -713,15 +751,20 @@ export class WebSocketPoller {
       }
 
       if (!this._todoPath) { this._log('WS failed to append task to TODO.md: todoPath is empty'); return; }
-      todoWriter.append(this._todoPath, fullText, wsTaskId)
+      // Append the task immediately so the loop can pick it up now — but
+      // idempotently by id, and WITHOUT acking. A grok-acp turn may clobber this
+      // line; the verify poller (registered below) repairs the clobber on its
+      // next tick and only sends task_ack once the line is DURABLY present. Until
+      // then the office's 45s redelivery sweep stays armed as a backstop, so a
+      // CLI crash before the line is durable still gets the task re-pushed.
+      todoWriter.appendIfAbsent(this._todoPath, fullText, wsTaskId)
         .then(() => {
           // At-least-once: only record the delivery as seen AFTER the durable
           // TODO append succeeds. On failure we leave it unseen so the server's
           // reconnect replay re-delivers it instead of dropping it.
           if (taskId) { this._markSeenDelivery(taskId); }
-          // Confirm arrival to the office so it stops re-delivering this task and
-          // clears its "not yet delivered" fade. Idempotent server-side.
-          if (dbTaskId) { this._sendTaskAck(dbTaskId); }
+          // Register for verify-and-re-append. The ack is deferred to the poller.
+          this._verifier().track(wsTaskId, fullText, dbTaskId);
           this._onTaskAppend?.();
         })
         .catch(err => { this._log(`WS failed to append task to TODO.md: ${err}`); });

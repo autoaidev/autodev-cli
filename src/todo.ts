@@ -267,6 +267,23 @@ export function appendTask(filePath: string, text: string, id?: string): string 
   return taskId;
 }
 
+/**
+ * Idempotent-by-id append. If a task line carrying `id` already exists in the
+ * file (in ANY section — Todo / In Progress / Done), this is a no-op and returns
+ * the id unchanged; otherwise it appends like {@link appendTask}. This is the
+ * guard the WS verify-poller relies on: re-appending a clobbered task must never
+ * produce a duplicate line, even if a concurrent write re-added it first (the
+ * read + append run inside the per-file serialisation queue — see
+ * TodoWriteManager.appendIfAbsent).
+ */
+export function appendTaskIfAbsent(filePath: string, text: string, id: string): string {
+  if (fs.existsSync(filePath)) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    if (parseTodoContent(content).some(t => t.id === id)) { return id; }
+  }
+  return appendTask(filePath, text, id);
+}
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

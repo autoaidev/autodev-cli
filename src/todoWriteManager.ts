@@ -1,4 +1,4 @@
-import { appendTask, resetToTodo, resetAllInProgress, markDone, markInProgress, Task } from './todo';
+import { appendTask, appendTaskIfAbsent, resetToTodo, resetAllInProgress, markDone, markInProgress, Task } from './todo';
 
 /**
  * Serialises all mutating TODO.md operations so concurrent callers
@@ -25,6 +25,17 @@ class TodoWriteManager {
     /** Append a new task to the Todo section and return its generated task ID. */
     append(filePath: string, text: string, id?: string): Promise<string> {
         return this._enqueue(filePath, () => appendTask(filePath, text, id));
+    }
+
+    /**
+     * Idempotent-by-id append: append the task only if no line with this id is
+     * already present in the file. The presence check + append run as a SINGLE
+     * enqueued op, so two concurrent callers (the WS immediate write and the
+     * verify-poller re-append) can never both write the same id — exactly one
+     * line is ever produced. Returns the id.
+     */
+    appendIfAbsent(filePath: string, text: string, id: string): Promise<string> {
+        return this._enqueue(filePath, () => appendTaskIfAbsent(filePath, text, id));
     }
 
     /** Reset a single [~] in-progress task back to [ ]. */

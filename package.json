@@ -1,6 +1,6 @@
 {
   "name": "autodev-cli",
-  "version": "1.4.206",
+  "version": "1.4.207",
   "description": "AutoAIDev CLI — autonomous AI task loop with VS Code / Cursor launcher",
   "author": "Peter Ivanov <peter@microweber.com>",
   "license": "MIT",

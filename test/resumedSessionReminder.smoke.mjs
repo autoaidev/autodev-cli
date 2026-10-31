@@ -70,8 +70,12 @@ ok('resumed turn: override present, first-turn absent — and in the messageFile
   // Dispatch truth: the model reads the messageFile, not the returned `prompt`.
   const msg = fs.readFileSync(messageFile, 'utf8');
   assert.match(msg, OVERRIDE, 'messageFile itself must carry the override');
+  // On a THROTTLED turn (includeProfile=false) the standing protocol block
+  // (`NEXT TASK TO BEGIN`) is NOT sent; the per-turn `## Current task` block is.
+  // The override must still precede the task content.
+  assert.ok(!/NEXT TASK TO BEGIN/.test(msg), 'throttled turn must NOT carry the standing protocol prose');
   assert.ok(
-    msg.indexOf('<system-reminder>') < msg.indexOf('NEXT TASK TO BEGIN'),
+    msg.indexOf('<system-reminder>') < msg.indexOf('## Current task'),
     'override must precede the task in the dispatched messageFile',
   );
 });

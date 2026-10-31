@@ -10,6 +10,7 @@
 
 import * as fs from 'fs';
 import { RateLimitDetector } from '../../rateLimit';
+import { buildTaskProtocolBlock } from '../../messageBuilder';
 
 // ---------------------------------------------------------------------------
 // Minimal TypeScript interfaces for the parts of the library we use.
@@ -191,6 +192,17 @@ async function getOrCreateClient(
   }
 
   const lib = _getLib();
+
+  // Deliver the STANDING protocol ONCE via Claude's native system prompt, set at
+  // session init. The same text is sourced from buildTaskProtocolBlock() — the
+  // single source the inline every-50 refresh reads — so the system prompt and
+  // the periodic inline re-send can never diverge. Best-effort: if assembling the
+  // text throws, fall back to no append (the inline cadence still delivers it).
+  // If the client's init type does not accept the field it is simply ignored —
+  // the extra key on the Record<string, unknown> config is inert, never a crash.
+  let appendSystemPrompt: string | undefined;
+  try { appendSystemPrompt = buildTaskProtocolBlock(); } catch { appendSystemPrompt = undefined; }
+
   const client = await lib.ClaudeClient.init({
     cwd: root,
     dangerouslySkipPermissions: true,
@@ -202,6 +214,7 @@ async function getOrCreateClient(
     // process.env before this runs. Pass it through explicitly so it survives
     // regardless of whether the client merges or replaces the child env.
     env: { CI: 'true', ...(process.env['MCP_TIMEOUT'] ? { MCP_TIMEOUT: process.env['MCP_TIMEOUT'] } : {}) },
+    ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
     ...(model ? { model: model.replace(/-1m$/i, '') } : {}),
   });
 

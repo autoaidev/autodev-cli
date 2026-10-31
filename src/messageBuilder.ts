@@ -361,14 +361,67 @@ function readOrEmpty(filePath: string): string {
   } catch { return ''; }
 }
 
-function buildTaskInstruction(task: Task, todoPath: string, root: string, noCommit = false): string {
+/**
+ * STANDING protocol prose — identical on every turn and task-INDEPENDENT.
+ *
+ * This is the "NEXT TASK" framing + the generic `### Steps required` explanation
+ * + the PRODUCED-DELIVERABLE / loop-runs-continuously hardening + the trailing
+ * PROGRAM.md pointer. It carries NO per-task values, so it can be delivered ONCE
+ * through a provider's native system prompt (Claude `appendSystemPrompt`) and then
+ * re-inlined only on the profile cadence (init + every ~50 turns) instead of on
+ * every single turn. The per-turn specifics (which line, the exact marker, the
+ * done line, attachments) live in {@link buildTaskCurrentBlock} and still ship
+ * every turn.
+ *
+ * This is the SINGLE SOURCE for the standing protocol text: both the inline
+ * every-50 refresh (via buildMessage) and the Claude system prompt (via the
+ * claude-tui provider) read it here, so the two can never drift apart.
+ *
+ * EXTERNAL CONSUMER: the leading `> **NEXT TASK TO BEGIN` prefix is matched by
+ * game_spec_gen/.../AutodevHooksDriver.php (outside this repo). Do NOT change
+ * that first line without coordinating with that consumer.
+ */
+export function buildTaskProtocolBlock(): string {
+  // Relative file:// URI for the profile — works regardless of absolute workspace location.
+  const profileRef = `@file://./${AGENT_PROFILE_FILE}`;
+  return `> **NEXT TASK TO BEGIN, DO NOT STOP WORK**
+
+> **IMPORTANT:** Even if you have done a similar task before, this is a **new independent task** that requires real work. Do NOT just mark it done — actually complete the task fully.
+
+### Steps required
+
+1. Open the TODO file and find the task's line — the exact \`- [ ]\` marker is shown above under **Current task**.
+2. Mark it in-progress **before** starting: change \`[ ]\` to \`[~]\`
+3. **Actually do the work** described by the task text above. Follow all protocol instructions from your agent profile.
+ 3.1 Discover the real task by opening the attachment files related to the todo entry, which are part of the task instructions. The files are listed above and may include important context, data, or subtasks. They are embedded in the message for your convenience, so read them carefully.
+4. Only when a **concrete deliverable actually exists** — a file created or edited, a command run with its result, a verifiable change on disk — mark it complete: change the box to \`[x]\` with today's date (the exact done line is shown above under **Current task**).
+5. Continue to the next \`[ ]\` task in the TODO file — do not stop until all tasks are done.
+
+> **A turn ends with a PRODUCED DELIVERABLE, never with an intention.** Do NOT reply that you *will* do X, *plan to* do X, or have *acknowledged* X — in THIS turn, actually produce X (an edit / a new file / a command result) and change the box to \`[x]\`. A turn that only restates the plan, describes what you would do, or says "I will continue" — without a file, an edit, or a command result — is **NOT progress** and does **NOT** count as done. Never write \`[x]\` unless the deliverable is really there; if you cannot finish it this turn, leave it \`[~]\` and produce as much real work as you can.
+
+> This loop runs continuously. Each task dispatch is a fresh task. "Standing by", "already done", or "I will do it" is not acceptable — complete the work.
+
+---
+
+**Full protocol and agent instructions:** ${profileRef}`;
+}
+
+/**
+ * PER-TURN dynamic block — the current task's concrete specifics. Shipped EVERY
+ * turn (never throttled): the `## Current task` header + id/text/todo/line, the
+ * exact `taskLine` / `doneLine` markers, any attachments + inlined attachment
+ * bodies, PLUS one always-present terse marking line.
+ *
+ * The marking line keeps the load-bearing TODO-marking contract (`[~]` → `[x]`)
+ * in EVERY turn even when the standing protocol block is throttled out — loop
+ * completion detection keys on that TODO transition, so it must never disappear.
+ */
+export function buildTaskCurrentBlock(task: Task, todoPath: string, root: string): string {
   const date = new Date().toISOString().slice(0, 10);
   // Full raw task marker line as it appears (or will appear) in TODO.md
   const taskId   = task.id ? `[${task.id}] ` : '';
   const taskLine = `- [ ] ${taskId}${task.text}`;
   const doneLine = `- [x] ${date}  ${taskId}${task.text}`;
-  // Relative file:// URI for the profile — works regardless of absolute workspace location.
-  const profileRef = `@file://./${AGENT_PROFILE_FILE}`;
 
   // Inline attachment files from task.attachments (populated at parse time by todo.ts).
   // Only .md files are inlined as text — binary attachments (images, PDFs, etc.)
@@ -385,43 +438,22 @@ function buildTaskInstruction(task: Task, todoPath: string, root: string, noComm
     }
   }
   const inlinedSection = inlinedFiles.length > 0
-    ? `\n---\n\n## Message Content (inlined — do not try to open the file)\n\n${inlinedFiles.join('\n\n---\n\n')}\n`
+    ? `\n\n---\n\n## Message Content (inlined — do not try to open the file)\n\n${inlinedFiles.join('\n\n---\n\n')}\n`
     : '';
 
   const attachmentRef = task.attachments && task.attachments.length > 0
     ? `**Attachments:** ${task.attachments.map(p => `\`${p}\``).join(', ')}\n`
     : '';
 
-  return `> **NEXT TASK TO BEGIN, DO NOT STOP WORK**
-  
-## Current task
+  return `## Current task
 
 **Task ID:** \`${taskId.trim() || '(no id)'}\`
 **Task text:** ${task.text}
 **TODO.md:** \`${todoPath}\`  line ${task.line}
-${attachmentRef}
-see in 
-> **IMPORTANT:** Even if you have done a similar task before, this is a **new independent task** that requires real work. Do NOT just mark it done — actually complete the task fully.
+${attachmentRef}**Task marker (line ${task.line}):** \`${taskLine}\`
+**Done line (write this only once a real deliverable exists):** \`${doneLine}\`
 
-### Steps required
-
-1. Open \`${todoPath}\` and find line ${task.line}:
-   \`${taskLine}\`
-2. Mark it in-progress **before** starting: change \`[ ]\` to \`[~]\`
-3. **Actually do the work** described by the task text above. Follow all protocol instructions from your agent profile.
- 3.1 Discover the real task by opening the attachment files related to the todo entry, which are part of the task instructions. The files are listed above and may include important context, data, or subtasks. They are embedded in the message for your convenience, so read them carefully.
-4. Only when a **concrete deliverable actually exists** — a file created or edited, a command run with its result, a verifiable change on disk — mark it complete:
-   \`${doneLine}\`
-5. Continue to the next \`[ ]\` task in \`${todoPath}\` — do not stop until all tasks are done.
-
-> **A turn ends with a PRODUCED DELIVERABLE, never with an intention.** Do NOT reply that you *will* do X, *plan to* do X, or have *acknowledged* X — in THIS turn, actually produce X (an edit / a new file / a command result) and change the box to \`[x]\`. A turn that only restates the plan, describes what you would do, or says "I will continue" — without a file, an edit, or a command result — is **NOT progress** and does **NOT** count as done. Never write \`[x]\` unless the deliverable is really there; if you cannot finish it this turn, leave it \`[~]\` and produce as much real work as you can.
-
-> This loop runs continuously. Each task dispatch is a fresh task. "Standing by", "already done", or "I will do it" is not acceptable — complete the work.
-
----
-
-**Full protocol and agent instructions:** ${profileRef}
-${inlinedSection}`;
+Mark this task \`[~]\` before starting and \`[x]\` only once a real deliverable exists on disk.${inlinedSection}`;
 }
 
 /**
@@ -573,10 +605,6 @@ export function buildMessage(
 ): { prompt: string; messageFile: string } {
   autodevDir(root);
 
-  // Read the noCommit flag from the identity section frontmatter (media source).
-  const identityFile = path.join(__dirname, '..', 'media', 'profile', '00-identity.md');
-  const { meta } = parseFrontmatter(readOrEmpty(identityFile));
-
   // PROGRAM.md + skill deployment live on the PROFILE BUILD (rebuildProfile — run
   // once at loop start and on explicit Save & Rebuild), NOT on this per-message
   // path. buildMessage no longer rewrites PROGRAM.md, re-deploys skills, or
@@ -596,9 +624,24 @@ export function buildMessage(
   // not.) Creating it here (before soulUpdatedReminder) means the .soul-seen marker
   // records the skeleton's mtime silently on turn 1.
   ensureSoulSkeleton(root);
-  // Build the task trigger message — profile is loaded by agents via AGENTS.md → @.autodev/PROGRAM.md
+  // Build the task trigger message in two parts:
+  //   - protocolBlock: STANDING prose (NEXT-TASK framing + Steps-required + the
+  //     deliverable/loop hardening + PROGRAM.md pointer). Task-independent, so it
+  //     rides the profile cadence (init + every ~50 turns) exactly like the heavy
+  //     PROGRAM.md body already does. Also delivered once via Claude's native
+  //     system prompt (claude-tui) from this SAME function.
+  //   - currentBlock: PER-TURN specifics (## Current task + exact markers +
+  //     attachments + the always-present `[~]`/`[x]` marking line). Ships EVERY
+  //     turn so the TODO-marking contract that drives completion detection never
+  //     drops out, even on a throttled turn.
   const todoPath = path.join(todoDir, 'TODO.md');
-  const taskMessage = buildTaskInstruction(task, todoPath, root, meta.noCommit);
+  const protocolBlock = buildTaskProtocolBlock();
+  const currentBlock  = buildTaskCurrentBlock(task, todoPath, root);
+  // Gate ONLY the standing protocol block on the includeProfile cadence; the
+  // current block is always present. When included, the protocol goes FIRST
+  // (NEXT-TASK framing), then the current task — matching the historical ordering
+  // where the framing preceded the task specifics.
+  const taskParts = includeProfile ? [protocolBlock, currentBlock] : [currentBlock];
 
   // System reminders that must precede the task text. The dispatcher feeds the
   // model from the messageFile (via writeCombinedFile), NOT from the returned
@@ -633,7 +676,7 @@ export function buildMessage(
   }
 
   // Reminders FIRST, then the task text, written to the file the model reads.
-  const messageBody = [...reminders, taskMessage].join('\n\n---\n\n');
+  const messageBody = [...reminders, ...taskParts].join('\n\n---\n\n');
   const messageFile = writeMessageFile(root, messageBody);
 
   // The combined `prompt` string mirrors the messageFile ordering for the
@@ -641,6 +684,6 @@ export function buildMessage(
   // it lives in PROGRAM.md on disk and is appended by writeCombinedFile at
   // dispatch (profile build owns PROGRAM.md; this path owns only the reminders +
   // task text).
-  const parts: string[] = [...reminders, taskMessage];
+  const parts: string[] = [...reminders, ...taskParts];
   return { prompt: parts.join('\n\n---\n\n'), messageFile };
 }

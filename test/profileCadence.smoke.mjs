@@ -24,6 +24,7 @@ const {
   DEFAULT_PROFILE_EVERY_N, PROFILE_NEVER, PROFILE_TURNS_FILE,
 } = await import('../out/core/profileCadence.js');
 const { loadSettingsForRoot } = await import('../out/core/settingsLoader.js');
+const { buildMessage, buildTaskProtocolBlock } = await import('../out/messageBuilder.js');
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -127,6 +128,53 @@ ok('load/save round-trip and reset sentinel', () => {
   assert.ok(fs.existsSync(path.join(d, PROFILE_TURNS_FILE)), 'persistence file is written under .autodev/');
   resetProfileTurns(d);
   assert.strictEqual(loadProfileTurns(d), PROFILE_NEVER, 'reset writes the NEVER sentinel');
+});
+
+// ── S8: the GATE in buildMessage — the standing protocol block rides the
+// includeProfile cadence; the per-turn Current-task block (incl. the marking
+// line) ships on EVERY turn. This is the end-to-end payoff of the cadence:
+// stop re-sending the `NEXT TASK TO BEGIN` boilerplate every turn. ──
+ok('throttled turn: Current-task + marking line present, NEXT-TASK prose absent', () => {
+  const d = tmpRoot();
+  fs.writeFileSync(path.join(d, 'TODO.md'), '- [ ] do the thing\n');
+  const task = { id: 'T1', text: 'do the thing', line: 1, attachments: [] };
+  const { messageFile } = buildMessage(task, d, d, /*includeProfile*/ false, /*resumedTurn*/ true);
+  const msg = fs.readFileSync(messageFile, 'utf8');
+  // Per-turn specifics are ALWAYS present…
+  assert.match(msg, /## Current task/, 'throttled turn must still carry the Current-task block');
+  assert.match(msg, /Mark this task `\[~\]` before starting and `\[x\]` only once a real deliverable exists on disk\./,
+    'the always-present marking line must survive on a throttled turn (TODO-marking contract)');
+  // …but the STANDING protocol prose is NOT re-sent.
+  assert.ok(!/NEXT TASK TO BEGIN/.test(msg), 'throttled turn must NOT re-send the NEXT-TASK protocol prose');
+  assert.ok(!/### Steps required/.test(msg), 'throttled turn must NOT re-send the generic Steps-required prose');
+});
+
+ok('included turn: BOTH the standing protocol and the Current-task block present', () => {
+  const d = tmpRoot();
+  fs.writeFileSync(path.join(d, 'TODO.md'), '- [ ] do the thing\n');
+  const task = { id: 'T1', text: 'do the thing', line: 1, attachments: [] };
+  const { messageFile } = buildMessage(task, d, d, /*includeProfile*/ true, /*resumedTurn*/ false);
+  const msg = fs.readFileSync(messageFile, 'utf8');
+  assert.match(msg, /NEXT TASK TO BEGIN/, 'an includeProfile turn must carry the standing protocol prose');
+  assert.match(msg, /### Steps required/, 'an includeProfile turn must carry the Steps-required prose');
+  assert.match(msg, /## Current task/, 'an includeProfile turn must also carry the Current-task block');
+  assert.match(msg, /Mark this task `\[~\]` before starting/, 'the marking line is present on an included turn too');
+  // The protocol goes FIRST, then the current task (historical framing order).
+  assert.ok(msg.indexOf('NEXT TASK TO BEGIN') < msg.indexOf('## Current task'),
+    'the standing protocol block must precede the Current-task block');
+});
+
+// ── S9: the Claude system-prompt text comes from the SAME source as the inline
+// protocol block, so the native system prompt and the every-50 inline refresh
+// can never diverge. ──
+ok('buildTaskProtocolBlock is the single standing-protocol source (system prompt == inline)', () => {
+  const block = buildTaskProtocolBlock();
+  assert.match(block, /NEXT TASK TO BEGIN/, 'the standing block carries the NEXT-TASK framing');
+  assert.match(block, /### Steps required/, 'the standing block carries the Steps-required prose');
+  assert.match(block, /PRODUCED DELIVERABLE, never with an intention/, 'the standing block carries the deliverable hardening');
+  assert.match(block, /@file:\/\/\.\/\.autodev\/PROGRAM\.md/, 'the standing block carries the PROGRAM.md pointer');
+  // Task-independent: no per-task interpolation leaks into the standing text.
+  assert.ok(!/## Current task/.test(block), 'the standing block must NOT contain per-turn task specifics');
 });
 
 console.log(`\nprofileCadence smoke: ${pass} passed`);

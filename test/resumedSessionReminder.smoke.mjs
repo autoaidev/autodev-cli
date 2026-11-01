@@ -1,23 +1,25 @@
-// Offline smoke — resume-aware reminder selection.
+// Offline smoke — cadence-gated intention/continuity reminders.
 //
-// Proves the per-resumed-turn override that stops a RESUMING agent (grok-cli/
-// grok-tui, or any provider with resumeSession on) from redundantly re-reading its
-// SOUL.md/PROGRAM.md identity+protocol every turn once the session already carries
-// them. The override is additive and gated so it never fights the other reminders.
+// The identity/intention reminders ride the PROFILE CADENCE (`includeProfile`):
+// they fire on START, AFTER COMPACT / session reset (loop force-includes then),
+// and every `profileEveryNTasks` turns (default 200) — NOT every turn. On a
+// cadence turn the choice is:
+//   - context REFRESHED (first turn / post-compact / reset / stateless) → point
+//     the agent AT its anchors: firstTurnSystemReminder (read SOUL + PROGRAM).
+//   - smoothly RESUMED (identity/protocol still in context) → the lightweight
+//     TODO-continuity nudge (resumedSessionReminder): NO SOUL/identity re-read.
+// A SOUL content change is event-driven and wins over either, any turn.
 //
-//   S1  resumedSessionReminder() returns the override text.
-//   S2  FIRST turn (includeProfile=true): first-turn PROGRAM/SOUL reminder is
-//       injected; the resumed override is NOT (identity genuinely loads on turn 1).
-//   S3  RESUMED turn (includeProfile=false, resumedTurn=true): the resumed override
-//       IS injected and the first-turn reminder is NOT — and it lands in the
-//       messageFile the model actually reads (dispatch truth), not just `prompt`.
-//   S4  STATELESS turn (includeProfile=false, resumedTurn=false): NEITHER the
-//       first-turn reminder NOR the resumed override — the standing profile pillars
-//       are left to drive identity, exactly as before.
-//   S5  SOUL-UPDATED resumed turn: the SOUL "was UPDATED → re-read" reminder WINS;
-//       the resumed override is suppressed so it never contradicts a real re-read.
-//   S6  every-N profile re-send (includeProfile=true, resumedTurn=true): the
-//       first-turn reminder is injected and the resumed override is suppressed.
+//   S1  resumedSessionReminder() is TODO-focused — no SOUL/identity re-read nag.
+//   S2  first turn (includeProfile, !resumed) → firstTurn reminder, no TODO nudge.
+//   S3  resumed INTACT cadence turn (includeProfile, resumed, !refreshed) → TODO
+//       nudge present, firstTurn absent — and in the messageFile, before the task.
+//   S4  QUIET turn (includeProfile=false) → NEITHER reminder (no per-turn noise).
+//   S5  context-REFRESHED cadence turn (includeProfile, resumed, refreshed) →
+//       firstTurn reminder (read anchors after compact/reset), TODO nudge absent.
+//   S6  SOUL-updated cadence turn → the "was UPDATED → re-read" reminder wins;
+//       both cadence reminders are suppressed.
+//   S7  stateless cadence turn (includeProfile, !resumed) → firstTurn reminder.
 // Run: node test/resumedSessionReminder.smoke.mjs   (after npm run build)
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -39,57 +41,70 @@ function tmpRoot() {
 const task = { id: 'T1', text: 'do the thing', line: 1, attachments: [] };
 
 // Reminder-identifying phrases (each unique to one reminder).
-const OVERRIDE  = /CONTINUING your existing session/;   // resumedSessionReminder
-const FIRSTTURN = /Before doing anything else/;          // firstTurnSystemReminder
+const RESUMED   = /CONTINUING your existing session/;   // resumedSessionReminder (TODO nudge)
+const FIRSTTURN = /Before doing anything else/;          // firstTurnSystemReminder (read anchors)
 const SOULUPD   = /was just UPDATED/;                    // soulUpdatedReminder
+
+// Signatures: buildMessage(task, root, todoDir, includeProfile, resumedTurn, contextRefreshed)
 
 console.log('resumedSessionReminder smoke');
 
-// ── S1: the override builder returns the override text. ──
-ok('resumedSessionReminder() returns the override text', () => {
+// ── S1: the resumed nudge is TODO-focused, with no SOUL/identity re-read text. ──
+ok('resumedSessionReminder() is TODO-focused — no SOUL re-read nag', () => {
   const r = resumedSessionReminder('/tmp/whatever');
   assert.match(r, /<system-reminder>/);
-  assert.match(r, OVERRIDE, 'override must tell the agent it is continuing its session');
-  assert.match(r, /Do NOT/, 'override must say not to re-read identity/protocol');
+  assert.match(r, RESUMED, 'nudge must tell the agent it is continuing its session');
+  assert.match(r, /TODO\.md/, 'nudge must carry the TODO-continuity instruction');
+  assert.match(r, /\[~\]/, 'nudge must mention the [~] in-progress marker');
+  assert.ok(!/SOUL\.md/.test(r), 'nudge must NOT reference SOUL.md (no identity re-read)');
+  assert.ok(!/identity|persona|protocol/i.test(r), 'nudge must NOT nag about identity/protocol');
 });
 
-// ── S2: first turn → first-turn reminder, NO override. ──
-ok('first turn: first-turn reminder present, resumed override absent', () => {
+// ── S2: first turn → firstTurn reminder, NO TODO nudge. ──
+ok('first turn: firstTurn reminder present, TODO nudge absent', () => {
   const d = tmpRoot();
   const { prompt } = buildMessage(task, d, d, /*includeProfile*/ true, /*resumedTurn*/ false);
-  assert.match(prompt, FIRSTTURN, 'turn 1 must carry the first-turn PROGRAM/SOUL reminder');
-  assert.ok(!OVERRIDE.test(prompt), 'turn 1 must NOT carry the resumed override');
+  assert.match(prompt, FIRSTTURN, 'turn 1 must carry the firstTurn PROGRAM/SOUL reminder');
+  assert.ok(!RESUMED.test(prompt), 'turn 1 must NOT carry the resumed TODO nudge');
 });
 
-// ── S3: resumed turn → override present, first-turn reminder absent, in messageFile. ──
-ok('resumed turn: override present, first-turn absent — and in the messageFile', () => {
+// ── S3: resumed intact cadence turn → TODO nudge present, firstTurn absent, in file. ──
+ok('resumed intact cadence turn: TODO nudge present, firstTurn absent — and in the messageFile', () => {
   const d = tmpRoot();
-  const { prompt, messageFile } = buildMessage(task, d, d, /*includeProfile*/ false, /*resumedTurn*/ true);
-  assert.match(prompt, OVERRIDE, 'resumed turn must carry the override');
-  assert.ok(!FIRSTTURN.test(prompt), 'resumed turn must NOT carry the first-turn reminder');
+  const { prompt, messageFile } = buildMessage(
+    task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true, /*contextRefreshed*/ false,
+  );
+  assert.match(prompt, RESUMED, 'resumed intact cadence turn must carry the TODO nudge');
+  assert.ok(!FIRSTTURN.test(prompt), 'resumed intact cadence turn must NOT carry the firstTurn reminder');
   // Dispatch truth: the model reads the messageFile, not the returned `prompt`.
   const msg = fs.readFileSync(messageFile, 'utf8');
-  assert.match(msg, OVERRIDE, 'messageFile itself must carry the override');
-  // On a THROTTLED turn (includeProfile=false) the standing protocol block
-  // (`NEXT TASK TO BEGIN`) is NOT sent; the per-turn `## Current task` block is.
-  // The override must still precede the task content.
-  assert.ok(!/NEXT TASK TO BEGIN/.test(msg), 'throttled turn must NOT carry the standing protocol prose');
+  assert.match(msg, RESUMED, 'messageFile itself must carry the TODO nudge');
   assert.ok(
     msg.indexOf('<system-reminder>') < msg.indexOf('## Current task'),
-    'override must precede the task in the dispatched messageFile',
+    'the nudge must precede the task in the dispatched messageFile',
   );
 });
 
-// ── S4: stateless turn → neither reminder. ──
-ok('stateless turn: no first-turn reminder and no resumed override', () => {
+// ── S4: QUIET (throttled) turn → neither reminder. ──
+ok('quiet turn (includeProfile=false): no firstTurn and no TODO nudge', () => {
   const d = tmpRoot();
-  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ false, /*resumedTurn*/ false);
-  assert.ok(!FIRSTTURN.test(prompt), 'stateless turn must NOT carry the first-turn reminder');
-  assert.ok(!OVERRIDE.test(prompt), 'stateless turn must NOT carry the resumed override');
+  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ false, /*resumedTurn*/ true);
+  assert.ok(!FIRSTTURN.test(prompt), 'a throttled turn must NOT carry the firstTurn reminder');
+  assert.ok(!RESUMED.test(prompt), 'a throttled turn must NOT carry the TODO nudge');
 });
 
-// ── S5: SOUL-updated resumed turn → SOUL re-read wins, override suppressed. ──
-ok('SOUL-updated resumed turn: re-read reminder wins, override suppressed', () => {
+// ── S5: context-refreshed cadence turn (compact/reset) → firstTurn, no nudge. ──
+ok('context-refreshed cadence turn: firstTurn reminder, TODO nudge absent', () => {
+  const d = tmpRoot();
+  const { prompt } = buildMessage(
+    task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true, /*contextRefreshed*/ true,
+  );
+  assert.match(prompt, FIRSTTURN, 'post-compact/reset must re-point the agent AT its anchors');
+  assert.ok(!RESUMED.test(prompt), 'a refreshed turn must NOT carry the "already loaded" nudge');
+});
+
+// ── S6: SOUL-updated cadence turn → SOUL re-read wins, both cadence reminders off. ──
+ok('SOUL-updated cadence turn: re-read reminder wins, cadence reminders suppressed', () => {
   const d = tmpRoot();
   const soul = path.join(d, 'SOUL.md');
   fs.writeFileSync(soul, '# Soul\nName: Nova\n');
@@ -97,17 +112,20 @@ ok('SOUL-updated resumed turn: re-read reminder wins, override suppressed', () =
   buildMessage(task, d, d, false, false);          // observe once → marker recorded, silent
   fs.writeFileSync(soul, '# Soul\nName: Nova\n\n## Persona\nNow a designer.\n');
   fs.utimesSync(soul, new Date(2000_000), new Date(2000_000)); // office edit advances mtime
-  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ false, /*resumedTurn*/ true);
+  const { prompt } = buildMessage(
+    task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true, /*contextRefreshed*/ false,
+  );
   assert.match(prompt, SOULUPD, 'a real SOUL change must still trigger the re-read reminder');
-  assert.ok(!OVERRIDE.test(prompt), 'override must be suppressed when SOUL actually changed this turn');
+  assert.ok(!RESUMED.test(prompt), 'the TODO nudge is suppressed when SOUL actually changed');
+  assert.ok(!FIRSTTURN.test(prompt), 'the firstTurn reminder is suppressed when SOUL actually changed');
 });
 
-// ── S6: every-N profile re-send (includeProfile=true on a resumed turn). ──
-ok('every-N re-send: first-turn reminder injected, override suppressed', () => {
+// ── S7: stateless cadence turn → firstTurn reminder. ──
+ok('stateless cadence turn: firstTurn reminder present', () => {
   const d = tmpRoot();
-  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true);
-  assert.match(prompt, FIRSTTURN, 'periodic re-send must re-inject the PROGRAM/SOUL reminder');
-  assert.ok(!OVERRIDE.test(prompt), 'override must not fire on a turn that re-sends the profile');
+  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ true, /*resumedTurn*/ false);
+  assert.match(prompt, FIRSTTURN, 'a stateless cadence turn must carry the firstTurn reminder');
+  assert.ok(!RESUMED.test(prompt), 'a stateless turn must NOT carry the resumed TODO nudge');
 });
 
 console.log(`\nresumedSessionReminder smoke: ${pass} passed`);

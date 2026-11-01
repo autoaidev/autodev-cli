@@ -27,8 +27,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** Default re-send cadence (turns) when `profileEveryNTasks` is not set. */
-export const DEFAULT_PROFILE_EVERY_N = 50;
+/**
+ * Default re-send cadence (turns) when `profileEveryNTasks` is not set.
+ *
+ * The heavy profile + the identity/intention reminders ride this cadence, so on a
+ * persistent/resumed session they re-inject only on START, AFTER COMPACT (the loop
+ * force-includes then), and every N turns — NOT every turn. Raised 50 → 200 so a
+ * long-lived agent isn't re-anchored (and the user isn't shown the identity
+ * reminder) four times as often as needed.
+ */
+export const DEFAULT_PROFILE_EVERY_N = 200;
 
 /** File that persists the turn counter, under `<root>/.autodev/`. */
 export const PROFILE_TURNS_FILE = '.autodev/.profile-turns';
@@ -42,7 +50,7 @@ export interface ProfileCadenceInput {
    * `PROFILE_NEVER` (-1) means it has never been delivered yet.
    */
   turnsSinceProfile: number;
-  /** `settings.profileEveryNTasks` (default 50). <= 0 disables the periodic refresh. */
+  /** `settings.profileEveryNTasks` (default 200). <= 0 disables the periodic refresh. */
   profileInterval: number;
   /**
    * Does the model's context carry over INTO this turn (a persistent / resumed

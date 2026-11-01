@@ -19,6 +19,8 @@ export function buildPrompt(
   includeProfile = true,
   /** True when this dispatch resumes an existing session past turn 1 — see buildMessage. */
   resumedTurn = false,
+  /** True when context was just refreshed/lost (first turn / reset / post-compact) — see buildMessage. */
+  contextRefreshed = false,
 ): { prompt: string; messageFile: string } {
-  return buildMessage(task, root, todoDir, includeProfile, resumedTurn);
+  return buildMessage(task, root, todoDir, includeProfile, resumedTurn, contextRefreshed);
 }

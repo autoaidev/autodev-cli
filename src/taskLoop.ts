@@ -451,6 +451,10 @@ export class TaskLoopRunner {
   /** Set when a fresh session was just established (session reset): the next
    *  dispatch must re-inject the profile because the carried context is gone. */
   private _forceProfileNextTurn = false;
+  /** Set when the NEXT turn's context was just refreshed/lost (session reset OR a
+   *  /compact): that turn's cadence reminder should point the agent AT its anchors
+   *  (read SOUL/PROGRAM) rather than the "already loaded, continue" TODO nudge. */
+  private _contextRefreshedNextTurn = false;
   /** Manages all "every N tasks" periodic action counters. */
   private readonly _periodicMgr = new PeriodicActionManager();
   // ── autoresearch verify_and_keep gate (opt-in via .autodev/CONTROL.md) ──
@@ -548,6 +552,13 @@ export class TaskLoopRunner {
     } finally {
       this._compacting = false;
       this._lastCompactTime = Date.now();
+      // After a compact the window was summarized — the identity/protocol pillars
+      // may have been dropped. Force the NEXT turn to re-inject the profile and
+      // point the agent back AT its anchors (read SOUL/PROGRAM), one of the three
+      // moments the intention reminders are allowed to fire (start / compact / 200).
+      this._forceProfileNextTurn = true;
+      this._contextRefreshedNextTurn = true;
+      if (this._workspaceRoot) { resetProfileTurns(this._workspaceRoot); }
     }
   }
 
@@ -614,6 +625,7 @@ export class TaskLoopRunner {
     this._resetSessionCounter = 0;
     this._profileSentCounter = 0;
     this._forceProfileNextTurn = false;
+    this._contextRefreshedNextTurn = false;
     this._periodicMgr.resetAndPersist(callbacks.workspaceRoot);
     this._hookLineSeen.clear();
     // Load the opt-in control spec. Absent file ⇒ null ⇒ verify_and_keep gate,
@@ -2175,12 +2187,18 @@ export class TaskLoopRunner {
       });
       const includeProfile = profileDecision.includeProfile;
       this._forceProfileNextTurn = false;
+      // Consume the context-refreshed flag (set by a session reset or a /compact)
+      // for THIS turn: on a refreshed turn the cadence reminder points the agent at
+      // its anchors (read SOUL/PROGRAM) instead of the "continue, already loaded"
+      // TODO nudge. Reset after reading so it only applies to the immediate turn.
+      const contextRefreshed = this._contextRefreshedNextTurn;
+      this._contextRefreshedNextTurn = false;
       if (this._workspaceRoot) { saveProfileTurns(this._workspaceRoot, profileDecision.turnsSinceProfile); }
       // Keep the legacy in-memory counter roughly in step (diagnostics only).
       this._profileSentCounter = profileDecision.turnsSinceProfile;
 
       // Build prompt (needed even when not sending, for messageFile path)
-      let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile, resumedTurn);
+      let { prompt, messageFile } = buildPrompt(task, this._workspaceRoot!, path.dirname(todoPath), includeProfile, resumedTurn, contextRefreshed);
       const remaining = countRemaining(parseTodo(todoPath));
 
       // ── verify_and_keep: pre-task snapshot + fold in any fix hint ──────────
@@ -2765,6 +2783,7 @@ export class TaskLoopRunner {
           // re-inject the profile/pillars (otherwise the every-N throttle would
           // leave the new session protocol-less until the counter rolls over).
           this._forceProfileNextTurn = true;
+          this._contextRefreshedNextTurn = true;
           if (this._workspaceRoot) { resetProfileTurns(this._workspaceRoot); }
         }
 

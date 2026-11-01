@@ -349,7 +349,7 @@ export const SETTINGS_DEFAULTS: AutodevSettings = {
   maxStrandRetries: 3,
   pruneTodoEveryNTasks: 0,
   journalLearnEveryNTasks: 0,
-  profileEveryNTasks: 50,
+  profileEveryNTasks: 200,
   compactEveryNTasks: 0,
   skillEveryNTasks: 0,
   memoryEveryNTasks: 0,

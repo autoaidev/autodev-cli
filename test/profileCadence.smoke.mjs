@@ -37,13 +37,13 @@ function tmpRoot() {
 
 console.log('profileCadence smoke');
 
-// ── S1: default is 50. ──
-ok('default cadence is 50', () => {
-  assert.strictEqual(DEFAULT_PROFILE_EVERY_N, 50, 'module default must be 50');
-  // settingsLoader default (the user-facing setting) must also be 50.
+// ── S1: default is 200 (identity/intention reminders ride this cadence). ──
+ok('default cadence is 200', () => {
+  assert.strictEqual(DEFAULT_PROFILE_EVERY_N, 200, 'module default must be 200');
+  // settingsLoader default (the user-facing setting) must also be 200.
   const d = tmpRoot();
   const s = loadSettingsForRoot(d);
-  assert.strictEqual(s.profileEveryNTasks, 50, 'settings default profileEveryNTasks must be 50');
+  assert.strictEqual(s.profileEveryNTasks, 200, 'settings default profileEveryNTasks must be 200');
 });
 
 // ── S2: persistent session — turn 1 in, 2..50 out, 51 in. ──

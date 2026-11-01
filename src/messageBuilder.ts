@@ -301,11 +301,12 @@ export function soulUpdatedReminder(root: string): string {
 export function resumedSessionReminder(_root: string): string {
   return [
     '<system-reminder>',
-    'You are CONTINUING your existing session — your `SOUL.md` identity and',
-    '`.autodev/PROGRAM.md` protocol are ALREADY loaded in this conversation. Do NOT',
-    're-read them or restate your identity/protocol; continue directly with the task.',
-    'Re-read a file only if a reminder tells you it changed, or you actually need a',
-    'specific reference for the work.',
+    'You are CONTINUING your existing session — pick up directly from where you left',
+    'off. Keep `TODO.md` accurate as you go: mark an item `[~]` the moment you start',
+    'it and `[x]` the moment it is finished, and add any new work you discover. Do',
+    'not restart from scratch or re-open files you already have loaded; open a file',
+    'only if a reminder tells you it changed, or you actually need a specific',
+    'reference for the work.',
     '</system-reminder>',
   ].join('\n');
 }
@@ -617,6 +618,15 @@ export function buildMessage(
    * false so stateless providers / one-shot sends behave exactly as before.
    */
   resumedTurn = false,
+  /**
+   * True when this turn's context was just REFRESHED/LOST — the first turn, a
+   * session reset, or right after a /compact — so the agent should treat its
+   * identity/protocol as needing a (re)load even though the provider nominally
+   * "resumes". Drives the cadence reminder choice: a refreshed turn points the
+   * agent AT its anchors (read SOUL/PROGRAM); a smoothly-resumed cadence turn
+   * gets the lightweight TODO-continuity nudge instead. Default false.
+   */
+  contextRefreshed = false,
 ): { prompt: string; messageFile: string } {
   autodevDir(root);
 
@@ -663,31 +673,33 @@ export function buildMessage(
   // `prompt` string, so these MUST be written into the messageFile — otherwise
   // they are silently dropped for every provider.
   const reminders: string[] = [];
-  // On the first turn of the session (same signal as includeProfile), prepend a
-  // short system reminder pointing at PROGRAM.md (protocol index) + SOUL.md
-  // (identity anchor). Gated on PROGRAM.md actually existing so a deleted file
-  // never produces a broken pointer. Once per session/loop start — not every turn.
-  if (includeProfile) {
-    const reminder = firstTurnSystemReminder(root);
-    if (reminder) { reminders.push(reminder); }
-  }
-  // On ANY turn, if SOUL.md changed since we last saw it (e.g. the office edited the
-  // agent's identity live), tell the agent to re-read it — not just on turn 1.
+
+  // EVENT-DRIVEN (any turn, independent of the cadence): if SOUL.md actually
+  // changed since we last saw it (e.g. the office edited the agent's identity
+  // live), tell the agent to re-read it. This is NOT one of the throttled
+  // "intention" reminders — it fires only on a real content change.
   const soulUpd = soulUpdatedReminder(root);
   const soulChanged = !!soulUpd;
   if (soulUpd) { reminders.push(soulUpd); }
 
-  // On a RESUMED turn (resuming provider, past turn 1), identity+protocol are
-  // already in the live context — inject a per-turn override that suppresses the
-  // standing "re-read SOUL/PROGRAM every message" pillars so the agent doesn't
-  // open every turn re-reading what it already holds. Gated so it never fights the
-  // other reminders: skipped on the first turn (`includeProfile` — that turn must
-  // load identity) and skipped when SOUL.md actually changed this turn (the
-  // soulUpdatedReminder re-read wins). Additive: default resumedTurn=false leaves
-  // stateless providers and one-shot sends untouched.
-  if (resumedTurn && !includeProfile && !soulChanged) {
-    const resumed = resumedSessionReminder(root);
-    if (resumed) { reminders.push(resumed); }
+  // INTENTION/CONTINUITY reminders ride the PROFILE CADENCE (`includeProfile`):
+  // they fire on START, AFTER COMPACT / session reset (the loop force-includes
+  // then), and every `profileEveryNTasks` turns (default 200) — NOT every turn.
+  // Skipped when SOUL.md already changed this turn (that re-read reminder wins).
+  //   - A context-REFRESHED cadence turn (first turn, post-compact/reset, or a
+  //     stateless provider that has no carried context) points the agent AT its
+  //     anchors: read SOUL.md (identity) + PROGRAM.md (protocol).
+  //   - A smoothly-RESUMED cadence turn (identity/protocol still in context) gets
+  //     only the lightweight TODO-continuity nudge — no SOUL/identity re-read,
+  //     since nothing changed and it is already loaded.
+  if (includeProfile && !soulChanged) {
+    if (resumedTurn && !contextRefreshed) {
+      const resumed = resumedSessionReminder(root);
+      if (resumed) { reminders.push(resumed); }
+    } else {
+      const reminder = firstTurnSystemReminder(root);
+      if (reminder) { reminders.push(reminder); }
+    }
   }
 
   // Reminders FIRST, then the task text, written to the file the model reads.

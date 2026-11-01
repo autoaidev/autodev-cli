@@ -10,10 +10,16 @@
 //     TODO-continuity nudge (resumedSessionReminder): NO SOUL/identity re-read.
 // A SOUL content change is event-driven and wins over either, any turn.
 //
+// The resumed nudge is ALSO gated on TODO.md actually changing since the last
+// cadence turn (todoChangedSinceSeen): an intact resumed session where nothing
+// moved (agent finished, just waiting) gets NO reminder — "do not send the
+// system reminders if the files are not modified."
+//
 //   S1  resumedSessionReminder() is TODO-focused — no SOUL/identity re-read nag.
 //   S2  first turn (includeProfile, !resumed) → firstTurn reminder, no TODO nudge.
-//   S3  resumed INTACT cadence turn (includeProfile, resumed, !refreshed) → TODO
-//       nudge present, firstTurn absent — and in the messageFile, before the task.
+//   S3  resumed INTACT cadence turn + TODO CHANGED (includeProfile, resumed,
+//       !refreshed) → TODO nudge present, firstTurn absent — and in the messageFile.
+//   S3b resumed INTACT cadence turn + TODO UNCHANGED → nudge ABSENT (no-noise gate).
 //   S4  QUIET turn (includeProfile=false) → NEITHER reminder (no per-turn noise).
 //   S5  context-REFRESHED cadence turn (includeProfile, resumed, refreshed) →
 //       firstTurn reminder (read anchors after compact/reset), TODO nudge absent.
@@ -26,7 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const { buildMessage, resumedSessionReminder } = await import('../out/messageBuilder.js');
+const { buildMessage, resumedSessionReminder, todoChangedSinceSeen } = await import('../out/messageBuilder.js');
 
 let pass = 0;
 const ok = (name, fn) => { fn(); console.log('  ✓', name); pass++; };
@@ -68,13 +74,17 @@ ok('first turn: firstTurn reminder present, TODO nudge absent', () => {
   assert.ok(!RESUMED.test(prompt), 'turn 1 must NOT carry the resumed TODO nudge');
 });
 
-// ── S3: resumed intact cadence turn → TODO nudge present, firstTurn absent, in file. ──
-ok('resumed intact cadence turn: TODO nudge present, firstTurn absent — and in the messageFile', () => {
+// ── S3: resumed intact cadence turn + TODO CHANGED → nudge present, firstTurn absent, in file. ──
+ok('resumed intact cadence turn + TODO CHANGED: nudge present, firstTurn absent — and in the messageFile', () => {
   const d = tmpRoot();
+  // Seed the .todo-seen marker (the first observation records silently and
+  // returns false), then mutate TODO.md so this cadence turn sees a REAL change.
+  assert.ok(!todoChangedSinceSeen(d, d), 'first observation records the hash silently, returns false');
+  fs.writeFileSync(path.join(d, 'TODO.md'), '- [~] do the thing\n- [ ] and another\n');
   const { prompt, messageFile } = buildMessage(
     task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true, /*contextRefreshed*/ false,
   );
-  assert.match(prompt, RESUMED, 'resumed intact cadence turn must carry the TODO nudge');
+  assert.match(prompt, RESUMED, 'a CHANGED TODO on a resumed cadence turn must carry the nudge');
   assert.ok(!FIRSTTURN.test(prompt), 'resumed intact cadence turn must NOT carry the firstTurn reminder');
   // Dispatch truth: the model reads the messageFile, not the returned `prompt`.
   const msg = fs.readFileSync(messageFile, 'utf8');
@@ -83,6 +93,16 @@ ok('resumed intact cadence turn: TODO nudge present, firstTurn absent — and in
     msg.indexOf('<system-reminder>') < msg.indexOf('## Current task'),
     'the nudge must precede the task in the dispatched messageFile',
   );
+});
+
+// ── S3b: resumed intact cadence turn + TODO UNCHANGED → nudge ABSENT (no-noise gate). ──
+ok('resumed intact cadence turn + TODO UNCHANGED: nudge absent — no reminder when files did not move', () => {
+  const d = tmpRoot();
+  // Seed the marker to the CURRENT TODO.md so nothing has changed since.
+  assert.ok(!todoChangedSinceSeen(d, d), 'first observation returns false');
+  const { prompt } = buildMessage(task, d, d, /*includeProfile*/ true, /*resumedTurn*/ true, /*contextRefreshed*/ false);
+  assert.ok(!RESUMED.test(prompt), 'an UNCHANGED TODO must suppress the continuity nudge');
+  assert.ok(!FIRSTTURN.test(prompt), 'still no firstTurn reminder on an intact resumed turn');
 });
 
 // ── S4: QUIET (throttled) turn → neither reminder. ──

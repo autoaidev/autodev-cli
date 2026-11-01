@@ -296,6 +296,12 @@ export function soulUpdatedReminder(root: string): string {
  * actually changed this turn (soulUpdatedReminder wins → a real re-read). It is
  * purely additive: stateless providers and first turns still get their pillars.
  *
+ * It is ALSO gated on `TODO.md` actually changing since the last cadence turn
+ * (see `todoChangedSinceSeen`): on an intact resumed session where nothing moved
+ * — the agent finished and is only waiting — re-injecting this nudge is pure
+ * noise ("we must not send the system reminders if the files are not modified").
+ * The caller only pushes it when the TODO file genuinely changed.
+ *
  * Exported so smoke tests can assert the override text directly.
  */
 export function resumedSessionReminder(_root: string): string {
@@ -309,6 +315,39 @@ export function resumedSessionReminder(_root: string): string {
     'reference for the work.',
     '</system-reminder>',
   ].join('\n');
+}
+
+/**
+ * Has `TODO.md` changed since the last time we evaluated the resumed-session
+ * nudge? Content-hashed (not mtime) against a tiny `.autodev/.todo-seen` marker,
+ * for the SAME reason as `.soul-seen`: an office/persona sync or a file-browser
+ * write can rewrite the file with identical bytes, and an mtime gate would then
+ * fire on every such touch. Returns true ONLY on a real content change.
+ *
+ * Semantics are "changed since the last cadence turn that checked" — the marker
+ * is refreshed on each call, and the caller only invokes this on an intact
+ * resumed cadence turn. So an agent actively editing its plan still gets the
+ * periodic continuity nudge, while a finished/idle agent whose TODO.md is stable
+ * is left in silence. The FIRST observation (no marker, or a legacy marker) is
+ * recorded silently and returns false — we never nudge merely because no marker
+ * existed yet. A MISSING TODO.md also returns false (no TODO, no TODO nudge).
+ * Best-effort; never throws.
+ */
+export function todoChangedSinceSeen(root: string, todoDir: string): boolean {
+  try {
+    const todoPath = path.join(todoDir, 'TODO.md');
+    if (!fs.existsSync(todoPath)) { return false; }
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(todoPath)).digest('hex');
+    const marker = path.join(root, '.autodev', '.todo-seen');
+    let last = '';
+    try { last = fs.readFileSync(marker, 'utf8').trim(); } catch { last = ''; }
+    const hasPrior = /^[0-9a-f]{64}$/.test(last);
+    const changed = hasPrior && last !== hash;
+    if (last !== hash) {
+      try { fs.mkdirSync(path.dirname(marker), { recursive: true }); fs.writeFileSync(marker, hash, 'utf8'); } catch { /* best effort */ }
+    }
+    return changed;
+  } catch { return false; }
 }
 
 /** Returns the .autodev/messages directory, creating it if needed. */
@@ -691,11 +730,16 @@ export function buildMessage(
   //     anchors: read SOUL.md (identity) + PROGRAM.md (protocol).
   //   - A smoothly-RESUMED cadence turn (identity/protocol still in context) gets
   //     only the lightweight TODO-continuity nudge — no SOUL/identity re-read,
-  //     since nothing changed and it is already loaded.
+  //     since nothing changed and it is already loaded. AND only when TODO.md
+  //     actually changed since the last cadence turn: on an intact resumed
+  //     session where nothing moved (the agent finished and is just waiting),
+  //     re-injecting the nudge is pure noise, so we stay silent.
   if (includeProfile && !soulChanged) {
     if (resumedTurn && !contextRefreshed) {
-      const resumed = resumedSessionReminder(root);
-      if (resumed) { reminders.push(resumed); }
+      if (todoChangedSinceSeen(root, todoDir)) {
+        const resumed = resumedSessionReminder(root);
+        if (resumed) { reminders.push(resumed); }
+      }
     } else {
       const reminder = firstTurnSystemReminder(root);
       if (reminder) { reminders.push(reminder); }

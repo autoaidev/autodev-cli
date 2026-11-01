@@ -965,7 +965,15 @@ export function mcpOperateCommand(program: Command): void {
           if (lastUsage) { ev.usage = lastUsage; }
           if (lastModel) { ev.model = lastModel; }
           socket.sendFrame({ type: 'hook_event', data: ev });
-          markWorking();   // producing assistant text is activity → keep 'working'
+          // NB: do NOT markWorking() here. Assistant prose is usually the turn's
+          // final wrap-up ("…done. I am idle."), tailed from the transcript on a
+          // later 5s tick — often AFTER the turn-END hook already settled us idle
+          // and AFTER the office's own complete_task set the badge idle server-side.
+          // Re-asserting 'working' on that trailing prose stranded the badge on
+          // 'working' with nothing left to flip it back (the exact "task complete
+          // but still shows working" bug). The genuine working signal is live TOOL
+          // activity (PreToolUse/PostToolUse → markWorking) and server-side
+          // start_task; narration is not work, so it must not drive the badge.
         };
         const tailTranscript = (): void => {
           if (!socket || !transcriptPath) { return; }
@@ -1470,6 +1478,15 @@ export function mcpOperateCommand(program: Command): void {
             // finalize any task it started this session but never completed, so the
             // office posts the completion + XP instead of leaving it stuck working.
             await reconcileOpenTasks();
+            // Parking in wait_for_events IS the turn-end for a persistent session:
+            // the provider holds the turn open on this blocking tool, so no
+            // Stop/session_end hook fires to flip the badge. Report idle NOW (clears
+            // the 120s decay timer and posts set_status idle) so the office stops
+            // showing 'working' while the agent is only listening. Idempotent
+            // (deduped on the last reported status, and the office no-ops an
+            // unchanged status), so the per-poll re-entry costs nothing; the next
+            // real tool hook re-marks 'working'.
+            reportIdleOnTeardown();
             const secs = Math.max(1, Math.min(55, Number(params?.arguments?.timeout_seconds) || 25));
             if (eventQueue.length === 0) { await waitForEvent(secs * 1000); }
             const events = eventQueue.splice(0, eventQueue.length);

@@ -184,6 +184,112 @@ export function applyPersonaToSoul(root: string, persona?: AgentPersona | null):
   }
 }
 
+// Idempotent markers for the ATTACHED-SKILLS block inside SOUL.md. Distinct from
+// the persona markers (above) so the two managed blocks never collide and each is
+// upserted/removed independently. These are the SAME marker strings the non-Claude
+// AGENTS.md prose fold uses (projectSkills.foldSkillsIntoProfile), but in a DIFFERENT
+// file (SOUL.md) — consistent naming, zero overlap.
+const SKILLS_BEGIN = '<!-- autodev:skills:begin -->';
+const SKILLS_END   = '<!-- autodev:skills:end -->';
+
+/**
+ * Generic upsert of a single marker-delimited block inside `<root>/SOUL.md`,
+ * shared by the skills block (and mirrors applyPersonaToSoul's exact semantics):
+ *  - `block` non-empty → insert/replace the block in place (idempotent for the
+ *    same content); create SOUL.md with a minimal identity header if it's missing.
+ *  - `block` null/empty → REMOVE any existing block (no-op if absent / no file).
+ * Everything outside the markers is preserved untouched. Best-effort: any failure
+ * is swallowed (returns false) so it never breaks the caller.
+ *
+ * @returns true if SOUL.md was written/changed, false otherwise.
+ */
+function upsertMarkedSoulBlock(root: string, begin: string, end: string, block: string | null): boolean {
+  try {
+    if (!root) { return false; }
+    const soulPath = path.join(root, 'SOUL.md');
+    const exists = fs.existsSync(soulPath);
+    const blockRe = new RegExp(`\\n*${escapeRegExp(begin)}[\\s\\S]*?${escapeRegExp(end)}\\n*`);
+
+    // Remove / empty: strip any existing block, otherwise no-op.
+    if (!block) {
+      if (!exists) { return false; }
+      const cur = fs.readFileSync(soulPath, 'utf8');
+      if (!blockRe.test(cur)) { return false; }
+      const next = cur.replace(blockRe, '\n').replace(/\n{3,}/g, '\n\n');
+      fs.writeFileSync(soulPath, next.endsWith('\n') ? next : next + '\n', 'utf8');
+      return true;
+    }
+
+    if (!exists) {
+      // Single '\n' between header and block (minimalSoulHeader already ends with
+      // a newline) so a fresh create matches the normalized replace form below —
+      // otherwise the next same-set re-sync would "change" \n\n\n → \n\n and break
+      // idempotency. Mirrors applyPersonaToSoul's create branch exactly.
+      const content = `${minimalSoulHeader()}\n${block}\n`;
+      const dir = path.dirname(soulPath);
+      if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+      fs.writeFileSync(soulPath, content, 'utf8');
+      return true;
+    }
+
+    const cur = fs.readFileSync(soulPath, 'utf8');
+    let next: string;
+    if (blockRe.test(cur)) {
+      next = cur.replace(blockRe, `\n\n${block}\n`);
+    } else {
+      next = `${cur.replace(/\n+$/, '')}\n\n${block}\n`;
+    }
+    next = next.replace(/\n{3,}/g, '\n\n');
+    if (!next.endsWith('\n')) { next += '\n'; }
+    if (next === cur) { return false; }
+    fs.writeFileSync(soulPath, next, 'utf8');
+    return true;
+  } catch {
+    // Best-effort: a SOUL.md write failure must never break skill sync.
+    return false;
+  }
+}
+
+/**
+ * Keep SOUL.md's attached-skills block in sync with the agent's CURRENT on-disk
+ * skill set. Each attached skill becomes ONE relative-path reference line
+ * `file://./.claude/skills/<slug>/SKILL.md` (matching the AGENTS.md `file://./…`
+ * style), inside a managed `<!-- autodev:skills:begin -->`…`end` block.
+ *
+ * Idempotent and mirroring the persona block: re-syncing the same set changes
+ * nothing, an attached slug adds its line, a detached slug drops it, and ZERO
+ * skills removes the whole block. Slugs are de-duped and sorted so the rendered
+ * block is deterministic (order-independent → genuinely idempotent). Best-effort;
+ * never throws (returns false on any failure).
+ *
+ * Callers pass the slug list the skill reconcile ALREADY computed (the written /
+ * on-disk set) — this never re-fetches or re-reads `.claude/skills`.
+ *
+ * @returns true if SOUL.md was written/changed, false otherwise.
+ */
+export function applySkillsToSoul(root: string, slugs?: string[] | null): boolean {
+  try {
+    if (!root) { return false; }
+    const list = Array.from(new Set(
+      (Array.isArray(slugs) ? slugs : [])
+        .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        .map(s => s.trim()),
+    )).sort();
+    const block = list.length > 0
+      ? [
+          SKILLS_BEGIN,
+          '## Skills',
+          '',
+          ...list.map(slug => `file://./.claude/skills/${slug}/SKILL.md`),
+          SKILLS_END,
+        ].join('\n')
+      : null;
+    return upsertMarkedSoulBlock(root, SKILLS_BEGIN, SKILLS_END, block);
+  } catch {
+    return false;
+  }
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -33,6 +33,7 @@ import { EmailTaskPoller } from './emailPoller';
 import { resolveConfiguredModel } from './core/modelInfo';
 import { loadProjectUserMcp, saveProjectUserMcp, sanitizeRemoteMcpEntries } from './core/projectMcp';
 import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from './core/projectSkills';
+import { applySkillsToSoul } from './connect';
 import { decideProfileInclusion, loadProfileTurns, saveProfileTurns, resetProfileTurns, DEFAULT_PROFILE_EVERY_N } from './core/profileCadence';
 import { ConfigManager } from './configManager';
 import { createAgentBackup, uploadAgentBackup, downloadAgentBackup, restoreAgentBackup, isTrustedDownloadUrl } from './agentBackup';
@@ -1078,6 +1079,13 @@ export class TaskLoopRunner {
       if (!providerConsumesSkills(this._settings?.provider)) {
         foldSkillsIntoProfile(root, safe);
       }
+      // Reflect the real on-disk skill set in SOUL.md as a managed block of
+      // `file://./.claude/skills/<slug>/SKILL.md` reference lines — attach adds a
+      // line, detach drops it, zero skills removes the block. Use the slugs the
+      // reconcile just computed (never re-read disk). Best-effort: a SOUL write
+      // failure must never break skill sync. The per-turn SOUL content-hash
+      // reminder picks up this external write next turn (same as the persona push).
+      try { applySkillsToSoul(root, written); } catch { /* non-fatal */ }
       void ConfigManager.reportProjectSkills(root, written, (m) => this._cb?.log(m));
       this._cb?.log(`✅ skills synced — wrote ${written.length}, removed ${removed.length} (.claude/skills). Live-reloads on the next run — no restart.`);
     } catch (err) {

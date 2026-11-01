@@ -13,6 +13,7 @@ import { isKnownSlashCommand } from './core/commands';
 import { handleFbRequest } from './fileBrowser';
 import { handleGitRequest } from './git/gitRequest';
 import { buildWsUpgradeRequest } from './wsHandshake';
+import { applyPersonaToSoul, type AgentPersona } from './connect';
 
 // ---------------------------------------------------------------------------
 // WebSocketPoller — persistent WS connection for ws:// / wss:// endpoints
@@ -636,6 +637,27 @@ export class WebSocketPoller {
       // Delivered live to the running turn (mid-turn injection), NOT appended to
       // TODO. Same A2A task-frame shape as a user_message but event='steer'.
       if (meta['event'] === 'steer' || meta['event'] === 'instant') {
+        // Persona push (pixel-office AgentController::assignPersonality live delivery):
+        // the frame carries a STRUCTURED persona in metadata.persona alongside the
+        // steer text. Write it into SOUL.md DETERMINISTICALLY here instead of trusting
+        // the model to self-edit from the steer text (unreliable, esp. grok-acp). The
+        // steer text is still delivered below as an immediate same-turn nudge; the SOUL
+        // write is the durable layer. The per-turn SOUL content-hash reminder
+        // (messageBuilder.soulUpdatedReminder) hashes SOUL.md from disk against
+        // .autodev/.soul-seen every turn, so it notices this external write on the next
+        // turn and tells the model to re-read it — we deliberately DON'T touch the
+        // marker here. applyPersonaToSoul is idempotent (replaces an existing block, a
+        // general/empty persona removes it), so there's no double-apply. Fully guarded:
+        // a missing/malformed persona or a write failure must never break steer handling.
+        if (meta['source'] === 'persona' && meta['persona'] && this._workspaceRoot) {
+          try {
+            const persona = meta['persona'] as AgentPersona;
+            const wrote = applyPersonaToSoul(this._workspaceRoot, persona);
+            this._log(`WS persona push → SOUL.md ${wrote ? 'updated' : 'unchanged'} (${persona?.label ?? persona?.id ?? 'persona'})`);
+          } catch (err) {
+            this._log(`WS persona push failed to write SOUL.md: ${err}`);
+          }
+        }
         const steerObj = meta['task'] as Record<string, unknown> | undefined;
         let steerText = typeof steerObj?.['text'] === 'string' ? steerObj['text'] as string : '';
         // A steer can carry the same A2A file parts a user_message does (pasted /

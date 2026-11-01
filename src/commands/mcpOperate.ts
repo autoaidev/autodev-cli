@@ -17,6 +17,7 @@ import { VncSessionManager } from '../vnc/manager';
 import { RdpSessionManager } from '../rdp/manager';
 import { saveProjectUserMcp, sanitizeRemoteMcpEntries } from '../core/projectMcp';
 import { sanitizeRemoteSkills, saveProjectSkills, foldSkillsIntoProfile, providerConsumesSkills } from '../core/projectSkills';
+import { applySkillsToSoul } from '../connect';
 import { ConfigManager } from '../configManager';
 import { CLI_VERSION } from '../version';
 import { buildNotificationEvent } from '../core/liveNarration';
@@ -657,6 +658,11 @@ export function mcpOperateCommand(program: Command): void {
           if (!providerConsumesSkills(settings.provider)) {
             foldSkillsIntoProfile(cwd, safe);
           }
+          // Mirror the on-disk skill set into SOUL.md as a managed block of
+          // `file://./.claude/skills/<slug>/SKILL.md` reference lines (attach adds,
+          // detach drops, zero removes the block). Reuse the reconcile's slugs; a
+          // SOUL write failure must never break skill sync.
+          try { applySkillsToSoul(cwd, written); } catch { /* non-fatal */ }
           void ConfigManager.reportProjectSkills(cwd, written, logErr);
           logErr(`✅ skills synced — wrote ${written.length}, removed ${removed.length} (.claude/skills). Live-reloads on the next run — no relaunch.`);
         } catch (err) {

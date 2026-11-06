@@ -47,6 +47,9 @@
 // ---------------------------------------------------------------------------
 
 import * as child_process from 'child_process';
+import type { UsagePayload } from '../base/types';
+import type { ProviderUsage } from '../base/ProviderUsage';
+import { setLatestUsage } from '../base/usageRegistry';
 
 /** Callbacks the host injects so hook emission + redaction stay in one place. */
 export interface AcpHostHooks {
@@ -72,6 +75,7 @@ export type AcpUpdate =
   | { kind: 'reasoning'; text: string }
   | { kind: 'tool_call'; id: string; name: string; input: unknown }
   | { kind: 'tool_result'; id: string; outputText: string; status: string }
+  | { kind: 'usage'; raw: unknown }
   | { kind: 'other' };
 
 /** Provider-specific launch + decode configuration. */
@@ -85,6 +89,12 @@ export interface AcpLaunchSpec {
   narrationTitle: string;
   /** Forward agent_thought_chunk as narration too (default false). */
   narrateReasoning?: boolean;
+  /** Provider usage extractor. When set, a decoded `usage_update` notification is
+   *  packed into the compact {@link UsagePayload} (via this provider's context
+   *  limit) and surfaced as the session's latest usage for the start/ACP hook
+   *  forwarder. OMIT it to leave this agent without usage (e.g. grok yields none
+   *  → no usage frame is ever emitted). PURE — the extractor guards every field. */
+  usage?: ProviderUsage;
   /** This agent requires an explicit `authenticate` before session/new|load
    *  (grok ≥1.0.41 does: `initialize` advertises `authMethods` and session/new
    *  otherwise fails "Authentication required: no auth method id provided").
@@ -139,6 +149,14 @@ export function decodeAcpUpdateStandard(msg: unknown): AcpUpdate {
     if (status !== 'completed' && status !== 'failed' && status !== 'cancelled') { return { kind: 'other' }; }
     const id = String(u['toolCallId'] ?? '');
     return { kind: 'tool_result', id, status, outputText: extractToolOutput(u) };
+  }
+  if (su === 'usage_update') {
+    // Surface the raw token block for the host to pack with its provider context
+    // limit. Prefer a nested `usage`/`tokens` object; fall back to the whole
+    // update (the extractor guards every field either way).
+    const inner = u['usage'] ?? u['tokens'];
+    const raw = (inner && typeof inner === 'object') ? inner : u;
+    return { kind: 'usage', raw };
   }
   return { kind: 'other' };
 }
@@ -235,6 +253,11 @@ export class AcpSession {
   private _activity: string | undefined;
   /** Did the active turn produce ANY assistant text or tool call? (empty-turn guard) */
   private _turnHadOutput = false;
+  /** Latest token/context snapshot decoded from a `usage_update` notification and
+   *  packed with `spec.usage`. Undefined until the agent emits one (and always
+   *  undefined for a provider with no `spec.usage`, e.g. grok). Also mirrored into
+   *  the shared usage registry so the start/ACP hook forwarder can attach it. */
+  private _lastUsage: UsagePayload | undefined;
   /** Timestamp (ms) of the LAST agent activity this turn — bumped on every
    *  session/update (tool_call, tool_call_update, message/thought chunk, plan).
    *  The activity-based watchdog (runTurn) reads this: a turn that keeps producing
@@ -382,6 +405,9 @@ export class AcpSession {
   get pid(): number | undefined { return this.child?.pid; }
   get sessionId(): string | undefined { return this._sessionId; }
   get activity(): string | undefined { return this._activity; }
+  /** Latest usage snapshot surfaced by the agent this session, or undefined when
+   *  none has been seen (always undefined for a provider with no `spec.usage`). */
+  get usage(): UsagePayload | undefined { return this._lastUsage; }
   /** Busy while the primary turn is running OR any steered/queued prompt is still
    *  in-flight — so the loop never treats the agent as idle mid-queue (Bug A). */
   isBusy(): boolean { return this._busy || this._inflight.size > 0; }
@@ -620,6 +646,17 @@ export class AcpSession {
       this._activity = u.name;
       this._toolNames.set(u.id, u.name);
       this.hooks.emitHook('PreToolUse', { tool_name: u.name, tool_input: u.input, tool_use_id: u.id });
+      return;
+    }
+    if (u.kind === 'usage') {
+      // Pack the raw token block with this provider's context limit (no extractor
+      // ⇒ no usage, e.g. grok). Mirror into the registry so the start/ACP hook
+      // forwarder can attach it; omitted entirely when nothing packs.
+      const packed = this.spec.usage?.extract(u.raw, this.model) ?? null;
+      if (packed) {
+        this._lastUsage = packed;
+        setLatestUsage(this.root, packed, this.model);
+      }
       return;
     }
     if (u.kind === 'tool_result') {

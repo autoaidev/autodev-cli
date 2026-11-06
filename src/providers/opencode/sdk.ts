@@ -17,6 +17,8 @@ import { execSync } from 'child_process';
 import { pathToFileURL } from 'url';
 import { normalizeEvent } from '../../hookEventNormalizer';
 import { LiveNarrationStreamer, appendHookEventLine } from '../../core/liveNarration';
+import { OpencodeProviderUsage } from './ProviderUsage';
+import { setLatestUsage } from '../base/usageRegistry';
 import {
   opencodeAcpEnabled, sendOpencodeAcpPrompt, steerOpencodeAcp, isOpencodeAcpBusy,
   getOpencodeAcpActivity, getOpencodeAcpLatestSessionId, hasOpencodeAcpSession,
@@ -281,6 +283,10 @@ const _SKIP_LOG = new Set([
 /** Accumulated assistant text per root — flushed to the output channel on session.idle. */
 const _textBuffer = new Map<string, string>();
 
+/** Packs opencode `message.updated` token blocks into the compact usage snapshot
+ *  the start hook forwarder attaches (via the shared usage registry). */
+const _opencodeUsage = new OpencodeProviderUsage();
+
 /**
  * Per-root live-narration streamer: coalesces the SDK's streamed text deltas into
  * periodic `Notification` hook events so the assistant's message shows up in the
@@ -350,6 +356,17 @@ async function _startEventLogger(root: string, client: SdkClient): Promise<void>
       const payload = (ev?.payload ?? ev) as Record<string, unknown>;
       const type = payload?.type as string | undefined;
       const props = payload?.properties as Record<string, unknown> | undefined;
+
+      // message.updated carries the assistant message's running token counts
+      // (info.tokens). It's skip-logged (not forwarded as its own hook), so pull
+      // the usage out HERE, before the skip check, and remember it as this root's
+      // latest usage for the start hook forwarder. Guarded: no tokens ⇒ no-op.
+      if (type === 'message.updated') {
+        const info = (props?.info ?? props) as Record<string, unknown> | undefined;
+        const tokens = (info?.tokens ?? info) as unknown;
+        const model = typeof info?.modelID === 'string' ? (info.modelID as string) : undefined;
+        setLatestUsage(root, _opencodeUsage.extract(tokens, model), model);
+      }
 
       if (!type || _SKIP_LOG.has(type)) { continue; }
 

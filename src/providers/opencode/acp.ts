@@ -28,6 +28,7 @@ import * as child_process from 'child_process';
 import { AcpSession, decodeAcpUpdateStandard } from '../acp/AcpSession';
 import type { AcpHostHooks, AcpLaunchSpec, AcpTurnResult } from '../acp/AcpSession';
 import { eventTypeFor } from '../base/ProviderNormalizer';
+import { OpencodeProviderUsage } from './ProviderUsage';
 import { redactSecrets, redactDeep } from '../../core/redactSecrets';
 
 const OPENCODE_BIN = 'opencode';
@@ -42,6 +43,7 @@ export const OPENCODE_ACP_SPEC: AcpLaunchSpec = {
   decodeUpdate: decodeAcpUpdateStandard,
   narrationTitle: 'opencode',
   narrateReasoning: false, // keep opencode's agent_thought_chunk out of the feed
+  usage: new OpencodeProviderUsage(), // pack usage_update → latest usage for the forwarder
 };
 
 /**

@@ -17,6 +17,8 @@ import * as os   from 'os';
 import * as path from 'path';
 import { appendHookEvent } from '../../hookEventNormalizer';
 import { LiveNarrationStreamer, appendHookEventLine } from '../../core/liveNarration';
+import { extractCopilotUsage } from './ProviderUsage';
+import { setLatestUsage } from '../base/usageRegistry';
 
 // ---------------------------------------------------------------------------
 // Minimal runtime types mirroring @github/copilot sdk/index.d.ts
@@ -363,6 +365,10 @@ async function _sendAsync(
       if (ev.type === 'user_input.requested' && ev.data?.['requestId']) {
         try { session.respondToUserInput(ev.data['requestId'] as string, { kind: 'accept', text: '' }); } catch { /* ignore */ }
       }
+      // Copilot SDK events (assistant.message, telemetry) carry token counts on
+      // ev.data; remember the latest as this root's usage for the start hook
+      // forwarder. Guarded — extractCopilotUsage returns null when no tokens.
+      setLatestUsage(root, extractCopilotUsage(ev.data));
       if (!ev.ephemeral) {
         const d = ev.data ?? {};
         const toolName = (d['toolName'] ?? d['name']) as string | undefined;

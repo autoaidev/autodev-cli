@@ -22,6 +22,7 @@ import { sendCopilotSdkPrompt, isCopilotSdkBusy, getLatestCopilotSdkSessionId, r
 import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy, getOpencodeSdkActivity, closeOpencodeSdkClient, forceIdleOpencodeSdk, steerOpencodeSdk, opencodeCliPersistentEnabled, opencodeAcpEnabled, hasOpencodeAcpSession, steerOpencodeAcpTracked, ensureOpencodeAcpSteer } from './providers/opencodeSdkProvider';
 import { isGrokTuiBusy, getGrokTuiLastActivity, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy, grokAcpEnabled, hasGrokAcpSession, steerGrokAcpTracked, ensureGrokAcpSteer } from './providers/grokTuiProvider';
 import { enqueuePendingSteer, readPendingSteers, removePendingSteer } from './pendingSteers';
+import { getLatestUsage } from './providers/base/usageRegistry';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -1739,7 +1740,21 @@ export class TaskLoopRunner {
               // Redact secrets from the whole hook object (tool_input/tool_response/
               // assistant narration/file contents) before it leaves the machine —
               // this stream is stored + rendered in the office feed/chat.
-              this._webhookPoller!.sendFrame({ type: 'hook_event', data: redactDeep(ev) });
+              const data = redactDeep(ev) as Record<string, unknown>;
+              // Additive usage + model signal (mirrors mcpOperate.ts:965-966 — the
+              // server's HookEventNormalizer reads data.usage → Agent.usage, data.model
+              // → Agent.model). Attach the latest usage a provider surfaced for this
+              // root (opencode ACP/SDK, copilot SDK) ONLY when present and the frame
+              // doesn't already carry its own. Grok yields none → the field is simply
+              // omitted (never a zero-filled frame). Usage values only; nothing logged.
+              if (data && typeof data === 'object' && data['usage'] === undefined) {
+                const lu = this._workspaceRoot ? getLatestUsage(this._workspaceRoot) : undefined;
+                if (lu) {
+                  data['usage'] = lu.usage;
+                  if (lu.model && data['model'] === undefined) { data['model'] = lu.model; }
+                }
+              }
+              this._webhookPoller!.sendFrame({ type: 'hook_event', data });
             } catch { /* skip malformed lines */ }
           }
         } catch { /* ignore read errors */ }

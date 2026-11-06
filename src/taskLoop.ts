@@ -23,6 +23,8 @@ import { runOpencodeSdkCompact, getOpencodeSdkLatestSessionId, isOpencodeSdkBusy
 import { isGrokTuiBusy, getGrokTuiLastActivity, steerGrokTui, closeGrokTuiSession, forceIdleGrokTui, steerGrokAcp, isGrokAcpBusy, grokAcpEnabled, hasGrokAcpSession, steerGrokAcpTracked, ensureGrokAcpSteer } from './providers/grokTuiProvider';
 import { enqueuePendingSteer, readPendingSteers, removePendingSteer } from './pendingSteers';
 import { getLatestUsage } from './providers/base/usageRegistry';
+import { sumTranscriptUsage } from './core/claudeUsage';
+import type { UsagePayload } from './providers/base/types';
 import { captureAndSaveSessionId, saveSessionId, getSessionId, clearSessionId, stdoutFilePath, exitFilePath } from './sessionState';
 import { readClaudeOutputSince } from './dispatcher';
 import { PROVIDERS, ProviderId } from './providers';
@@ -378,6 +380,18 @@ export class TaskLoopRunner {
    *  parallel session in the same workspace, all writing to one homedir
    *  file). Entries older than HOOKS_DEDUPE_WINDOW_MS are pruned each tick. */
   private _hookLineSeen = new Map<string, number>();
+  /** Per-transcript byte offsets for the start-path Claude usage tailer (keyed
+   *  by transcript_path), so each tick reads only newly-appended lines and a
+   *  50k-line transcript stays cheap. First sight of a large transcript starts
+   *  at its end — prior-session turns must NOT be billed to the current task. */
+  private _claudeUsageOffsets = new Map<string, number>();
+  /** Latest token/context snapshot parsed from a Claude session transcript.
+   *  The claude-cli `autodev start` path fires no token-bearing hook — usage
+   *  lives only in ~/.claude/projects/…/<id>.jsonl, whose path each hook carries
+   *  as transcript_path. Attached to forwarded frames that lack their own usage
+   *  so the office gets per-task tokens for Claude, matching mcpOperate. */
+  private _claudeLastUsage: UsagePayload | null = null;
+  private _claudeLastModel: string | null = null;
   private _taskCompletionAbort: (() => void) | null = null;
   private _retryScheduler = new RetryScheduler();
   private _resumeResolve: (() => void) | null = null;
@@ -629,6 +643,7 @@ export class TaskLoopRunner {
     this._contextRefreshedNextTurn = false;
     this._periodicMgr.resetAndPersist(callbacks.workspaceRoot);
     this._hookLineSeen.clear();
+    this._claudeUsageOffsets.clear();
     // Load the opt-in control spec. Absent file ⇒ null ⇒ verify_and_keep gate,
     // pre-task snapshots, and revert logic all stay dormant (today's behavior).
     this._controlSpec = callbacks.workspaceRoot ? loadControlSpec(callbacks.workspaceRoot) : null;
@@ -1737,6 +1752,12 @@ export class TaskLoopRunner {
               const ev = JSON.parse(line);
               // Inject session name (workspace folder) so pixel office can display it
               if (sessionName) { ev._session_name = sessionName; }
+              // claude-cli start path fires no token-bearing hook — usage lives
+              // only in the session transcript this hook references. Tail it for
+              // the latest message.usage so we can attach per-task tokens below
+              // (cheap: offset-guarded, reads only newly-appended bytes).
+              const tp = (ev && typeof ev === 'object') ? (ev as Record<string, unknown>)['transcript_path'] : undefined;
+              if (typeof tp === 'string' && tp) { this._tailClaudeUsageFromTranscript(tp); }
               // Redact secrets from the whole hook object (tool_input/tool_response/
               // assistant narration/file contents) before it leaves the machine —
               // this stream is stored + rendered in the office feed/chat.
@@ -1745,13 +1766,17 @@ export class TaskLoopRunner {
               // server's HookEventNormalizer reads data.usage → Agent.usage, data.model
               // → Agent.model). Attach the latest usage a provider surfaced for this
               // root (opencode ACP/SDK, copilot SDK) ONLY when present and the frame
-              // doesn't already carry its own. Grok yields none → the field is simply
+              // doesn't already carry its own; else fall back to the Claude usage we
+              // tailed from the transcript. Grok yields neither → the field is simply
               // omitted (never a zero-filled frame). Usage values only; nothing logged.
               if (data && typeof data === 'object' && data['usage'] === undefined) {
                 const lu = this._workspaceRoot ? getLatestUsage(this._workspaceRoot) : undefined;
                 if (lu) {
                   data['usage'] = lu.usage;
                   if (lu.model && data['model'] === undefined) { data['model'] = lu.model; }
+                } else if (this._claudeLastUsage) {
+                  data['usage'] = this._claudeLastUsage;
+                  if (this._claudeLastModel && data['model'] === undefined) { data['model'] = this._claudeLastModel; }
                 }
               }
               this._webhookPoller!.sendFrame({ type: 'hook_event', data });
@@ -1761,6 +1786,58 @@ export class TaskLoopRunner {
       }, 10_000);
       this._pollerIntervals.push(hooksInterval);
     }
+  }
+
+  /**
+   * Tail a Claude session transcript for its latest `message.usage` block and
+   * cache it in `_claudeLastUsage`/`_claudeLastModel`. The claude-cli `autodev
+   * start` path fires no token-bearing hook — usage lives only in the transcript
+   * (~/.claude/projects/…/<id>.jsonl), whose path every hook payload carries as
+   * transcript_path. Reads only newly-appended bytes per path, so it is cheap
+   * even on a very long transcript.
+   *
+   * First sight of a LARGE transcript starts at its current end: a long-lived or
+   * resumed session must NOT have its whole prior history billed to the current
+   * task. A small/fresh transcript (≤512 KB — e.g. a short autonomy worker that
+   * finished before the first 10s tick) is read from the start so its single
+   * turn's usage is not missed. Usage values only; nothing is logged.
+   */
+  private _tailClaudeUsageFromTranscript(transcriptPath: string): void {
+    const FRESH_TRANSCRIPT_MAX = 512 * 1024;
+    try {
+      if (!fs.existsSync(transcriptPath)) { return; }
+      const size = fs.statSync(transcriptPath).size;
+      let prev = this._claudeUsageOffsets.get(transcriptPath);
+      if (prev === undefined) {
+        prev = size <= FRESH_TRANSCRIPT_MAX ? 0 : size;
+        this._claudeUsageOffsets.set(transcriptPath, prev);
+        // Bound the map so a loop that touches many subagent transcripts over a
+        // long run doesn't grow it without limit.
+        if (this._claudeUsageOffsets.size > 64) {
+          const firstKey = this._claudeUsageOffsets.keys().next().value as string | undefined;
+          if (firstKey && firstKey !== transcriptPath) { this._claudeUsageOffsets.delete(firstKey); }
+        }
+      }
+      if (size <= prev) {
+        // Truncation/rotation → restart from the new (smaller) end next time.
+        if (size < prev) { this._claudeUsageOffsets.set(transcriptPath, size); }
+        return;
+      }
+      const fd = fs.openSync(transcriptPath, 'r');
+      const buf = Buffer.alloc(size - prev);
+      fs.readSync(fd, buf, 0, buf.length, prev);
+      fs.closeSync(fd);
+      this._claudeUsageOffsets.set(transcriptPath, size);
+      // Sum EVERY new assistant message in this drain (see sumTranscriptUsage).
+      // A null result (drain carried no assistant usage — e.g. tool_result-only
+      // lines) leaves the cached snapshot intact so the office sees no change and
+      // records no spurious zero-token increment.
+      const drained = sumTranscriptUsage(buf.toString('utf8').split('\n'));
+      if (drained) {
+        this._claudeLastUsage = drained.usage;
+        if (drained.model) { this._claudeLastModel = drained.model; }
+      }
+    } catch { /* ignore transient read errors */ }
   }
 
   /**

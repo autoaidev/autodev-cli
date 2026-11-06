@@ -186,7 +186,7 @@ export function classifyAcpResult(result: { result?: { stopReason?: string }; er
   return { clean: CLEAN.has(sr), stopReason: sr || 'unknown' };
 }
 
-interface PendingRpc { resolve: (msg: { result?: Record<string, unknown>; error?: { message?: string } }) => void; }
+interface PendingRpc { resolve: (msg: { result?: Record<string, unknown>; error?: { message?: string } }) => void; timer?: ReturnType<typeof setTimeout>; }
 
 /**
  * One persistent ACP process for a workspace root. Not a singleton — the host
@@ -325,6 +325,17 @@ export class AcpSession {
     if (Number.isFinite(n) && n > 0) { return n; }
     if (Number.isFinite(n) && n <= 0 && String(raw).trim() !== '') { return 0; } // disabled
     return 90 * 1000;
+  }
+
+  /** Timeout for a control/handshake `_request` (initialize/authenticate/session/
+   *  load/new/list). A wedged live child must not strand the request (and, for
+   *  session/load, `_loading=true` → dead hooks). `0`/negative disables it. */
+  static requestTimeoutMs(): number {
+    const raw = process.env['AUTODEV_ACP_REQUEST_TIMEOUT_MS'] ?? '';
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0) { return n; }
+    if (Number.isFinite(n) && n <= 0 && String(raw).trim() !== '') { return 0; } // disabled
+    return 120 * 1000;
   }
 
   /** PURE watchdog verdict, extracted so the activity-reset logic is unit-testable
@@ -540,8 +551,9 @@ export class AcpSession {
     this._busy = false;
     this._activity = undefined;
     this._flushOpenTools('interrupted'); // Bug B: close any tools open when the agent dies
+    this._loading = false; // never strand the session/load replay guard on a dead child
     const err = { error: { message: `acp agent exited (code=${code} sig=${sig})` } };
-    for (const [, p] of this.pending) { try { p.resolve(err); } catch { /* ignore */ } }
+    for (const p of [...this.pending.values()]) { try { p.resolve(err); } catch { /* ignore */ } }
     this.pending.clear();
     this._inflight.clear();
   }
@@ -562,9 +574,8 @@ export class AcpSession {
   private _handle(msg: Record<string, unknown>): void {
     const id = msg['id'];
     if (typeof id === 'number' && (msg['result'] !== undefined || msg['error'] !== undefined) && this.pending.has(id)) {
-      const p = this.pending.get(id)!;
-      this.pending.delete(id);
-      p.resolve(msg as { result?: Record<string, unknown>; error?: { message?: string } });
+      // resolve() === finish() (clears the request timeout + deletes from pending).
+      this.pending.get(id)!.resolve(msg as { result?: Record<string, unknown>; error?: { message?: string } });
       return;
     }
     // Request FROM the agent (we are the client). With empty caps the agent does
@@ -849,7 +860,8 @@ export class AcpSession {
     this._busy = false;
     this._activity = undefined;
     this._flushOpenTools('interrupted'); // Bug B: close any tools open at teardown
-    for (const [, p] of this.pending) { try { p.resolve({ error: { message: 'closed' } }); } catch { /* ignore */ } }
+    this._loading = false; // never strand the session/load replay guard on teardown
+    for (const p of [...this.pending.values()]) { try { p.resolve({ error: { message: 'closed' } }); } catch { /* ignore */ } }
     this.pending.clear();
     this._inflight.clear();
     if (c) {
@@ -858,12 +870,43 @@ export class AcpSession {
     }
   }
 
-  private _request(method: string, params: unknown): Promise<{ result?: Record<string, unknown>; error?: { message?: string } }> {
+  /**
+   * Send a control/handshake JSON-RPC request (initialize, authenticate,
+   * session/load, session/new, session/list) and await its response.
+   *
+   * These must never hang forever: a LIVE-but-wedged child (e.g. grok stuck in
+   * `waiting_for_model` during a `session/load` — the exact hang the resume-stall
+   * logic elsewhere guards against) would otherwise leave this promise pending,
+   * and the `session/load` caller holds `_loading=true` across the await — so a
+   * never-resolving request STRANDS `_loading=true`, and `_onUpdate` then drops
+   * every subsequent session/update, killing all hook emission with no recovery
+   * until the child happens to die. So every request gets a generous timeout that
+   * resolves with an error (the caller falls back — e.g. session/load → session/new).
+   * The prompt TURN is NOT sent through here (it uses `_promptRequest`, which has
+   * its own activity watchdog), so long model turns are unaffected.
+   */
+  private _request(
+    method: string,
+    params: unknown,
+    timeoutMs = AcpSession.requestTimeoutMs(),
+  ): Promise<{ result?: Record<string, unknown>; error?: { message?: string } }> {
     const id = this.nextId++;
     return new Promise((resolve) => {
-      this.pending.set(id, { resolve });
+      let settled = false;
+      const finish = (msg: { result?: Record<string, unknown>; error?: { message?: string } }): void => {
+        if (settled) { return; }
+        settled = true;
+        const e = this.pending.get(id);
+        if (e?.timer) { clearTimeout(e.timer); }
+        this.pending.delete(id);
+        resolve(msg);
+      };
+      const timer = timeoutMs > 0
+        ? setTimeout(() => finish({ error: { message: `acp request timeout: ${method} (${timeoutMs}ms)` } }), timeoutMs)
+        : undefined;
+      this.pending.set(id, { resolve: finish, timer });
       const ok = this._send({ jsonrpc: '2.0', id, method, params });
-      if (!ok) { this.pending.delete(id); resolve({ error: { message: 'stdin write failed (agent not running)' } }); }
+      if (!ok) { finish({ error: { message: 'stdin write failed (agent not running)' } }); }
     });
   }
 

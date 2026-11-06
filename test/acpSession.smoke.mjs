@@ -85,6 +85,27 @@ await okAsync('A.1: session/load replay emits ZERO hooks (quiet reload)', async 
   sess.close();
 });
 
+// --- REGRESSION: a HUNG session/load must not strand _loading=true (dead hooks) ---
+// A grok child wedged in waiting_for_model during session/load never replies; the
+// request used to hang forever, leaving _loading=true so _onUpdate dropped EVERY
+// later session/update → no hooks were ever emitted again. The _request timeout
+// must unwind it (fall back to session/new) so emission recovers.
+await okAsync('HUNG session/load times out (no hang) and hooks resume after', async () => {
+  process.env.FAKE_ACP_HANG_LOAD = '1';                 // fake never replies to session/load
+  process.env.AUTODEV_ACP_REQUEST_TIMEOUT_MS = '300';   // short request timeout for the test
+  const { sess, events } = makeSession('prior-session-id'); // triggers session/load
+  const t0 = Date.now();
+  await sess.ensureReady(); // must NOT hang forever — times out, falls back to session/new
+  assert.ok(Date.now() - t0 < 4000, 'ensureReady returned (session/load timed out instead of hanging)');
+  await sess.runTurn('now do real work', () => {});
+  assert.ok(
+    events.some(e => e.name === 'Notification' && String(e.extra.message).includes('now do real work')),
+    'hooks resume after a hung session/load (not suppressed by a stranded _loading)',
+  );
+  for (const k of ['FAKE_ACP_HANG_LOAD', 'AUTODEV_ACP_REQUEST_TIMEOUT_MS']) delete process.env[k];
+  sess.close();
+});
+
 // --- LAYER A.3 (1.4.195): ACTIVITY-BASED watchdog (idle timeout, not runtime) ---
 ok('A.3: idleMs — AUTODEV_ACP_IDLE_MS wins, legacy MAX_RUN_MS/GROK back-compat, default 15m', () => {
   for (const k of ['AUTODEV_ACP_IDLE_MS', 'AUTODEV_ACP_MAX_RUN_MS', 'GROK_MAX_RUN_MS', 'AUTODEV_ACP_ABS_MAX_MS']) delete process.env[k];

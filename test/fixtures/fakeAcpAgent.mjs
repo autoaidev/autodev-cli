@@ -60,6 +60,10 @@ function handle(msg) {
     update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED-HISTORY-LINE\n' } });
     update({ sessionUpdate: 'tool_call', toolCallId: 'tc-replay', title: 'edit', rawInput: {} });
     update({ sessionUpdate: 'tool_call_update', toolCallId: 'tc-replay', status: 'completed', content: [{ type: 'text', text: 'x' }] });
+    // HANG MODE: simulate grok stuck in waiting_for_model during session/load —
+    // replay streams but the request NEVER gets a reply. Exercises the _request
+    // timeout so a wedged load can't strand _loading=true (dead hooks).
+    if (process.env.FAKE_ACP_HANG_LOAD === '1') { return; }
     reply(msg.id, {});
     return;
   }
